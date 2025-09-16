@@ -1,4 +1,3 @@
-
 import {
   GoogleGenAI,
   LiveServerMessage,
@@ -25,6 +24,7 @@ class GeminiService {
   private ai: GoogleGenAI;
   private log: LogFunction;
   private isIntentionallyClosing = false;
+  private currentMessage = '';
 
   constructor(apiKey: string, log: LogFunction) {
     if (!apiKey) {
@@ -60,10 +60,19 @@ class GeminiService {
             if (message.serverContent?.modelTurn?.parts) {
               for (const part of message.serverContent.modelTurn.parts) {
                 if (part.text) {
-                  this.log(`Received message from AI: "${part.text.substring(0, 50)}..."`);
-                  callbacks.onMessage(part.text);
+                  this.currentMessage += part.text;
+                  this.log(`Received chunk: "${part.text.substring(0, 50)}..."`);
                 }
               }
+            }
+            
+            // Check if this is the end of the turn (message complete)
+            if (message.serverContent?.turnComplete) {
+              if (this.currentMessage.trim()) {
+                callbacks.onMessage(this.currentMessage.trim());
+                this.log(`Complete message sent: "${this.currentMessage.substring(0, 50)}..."`);
+              }
+              this.currentMessage = ''; // Reset for next message
             }
           },
           onerror: (e: ErrorEvent) => {
@@ -127,6 +136,7 @@ class GeminiService {
     if (this.session) {
       this.log("Disconnecting session.");
       this.isIntentionallyClosing = true;
+      this.currentMessage = ''; // Reset accumulator
       this.session.close();
       this.session = undefined;
     }
