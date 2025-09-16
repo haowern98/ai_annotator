@@ -6,9 +6,10 @@ import Header from './components/Header';
 import Controls from './components/Controls';
 import VideoDisplay from './components/VideoDisplay';
 import SummaryDisplay from './components/SummaryDisplay';
+import config from './config.json';
 
-const SUMMARY_INTERVAL_MS = 60000; // 1 minute
-const INITIAL_PROMPT = `You are an AI assistant analyzing a live screen share of a lecture. Your task is to provide concise summaries of the key points presented. You will receive video frames and the corresponding audio from the lecture every minute. When you receive the media, analyze BOTH the visual content (key concepts, diagrams, code, text) and the spoken audio. Combine information from both to create a comprehensive summary. Use Markdown for formatting (e.g., bullet points using '*' or '-', bold text using '**'). Be brief and to the point. Start each response with "Here's a summary of the current view:"`;
+const SUMMARY_INTERVAL_MS = config.SUMMARY_INTERVAL_MS;
+const INITIAL_PROMPT = config.INITIAL_PROMPT;
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
