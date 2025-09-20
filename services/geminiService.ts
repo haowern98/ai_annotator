@@ -132,39 +132,21 @@ class GeminiService {
     });
   }
 
-  public sendVideoModeFrames(base64Images: string[], base64Audio?: string, audioMimeType?: string, prompt?: string): void {
+  public requestSummary(): void {
     if (!this.session) {
-      this.log("Cannot send frames. Session is not connected.", LogLevel.ERROR);
+      this.log("Cannot request summary. Session is not connected.", LogLevel.ERROR);
       return;
     }
 
-    const imageParts: Part[] = base64Images.map(imageData => ({
-      inlineData: {
-        mimeType: 'image/jpeg',
-        data: imageData,
-      },
-    }));
+    const summaryRequestText = "Please provide a comprehensive summary of all the visual and audio content you've analyzed over the past minute. Follow the format specified in the initial prompt.";
     
-    const textPart: Part | null = prompt ? { text: prompt } : null;
-
-    const audioPart: Part | null = (base64Audio && audioMimeType) ? {
-        inlineData: {
-            mimeType: audioMimeType,
-            data: base64Audio,
-        },
-    } : null;
-
-    const parts = [textPart, ...imageParts, audioPart].filter((p): p is Part => p !== null);
-
-    const imagesSizeLog = base64Images.map((img, i) => `Image ${i + 1}: ${Math.round(img.length * 3 / 4 / 1024)} KB`).join(', ');
-    const audioLog = audioPart ? ` Audio (${audioMimeType}): ${Math.round(base64Audio!.length * 3 / 4 / 1024)} KB.` : '';
-    const promptLog = prompt ? ' (Includes prompt)' : '';
-
-    this.log(`Sending ${base64Images.length} frames to AI. ${imagesSizeLog}.${audioLog}${promptLog}`);
+    this.log("Requesting summary from AI based on accumulated data.");
     this.session.sendClientContent({
-      turns: [{ parts }],
+      turns: [{ parts: [{ text: summaryRequestText }] }],
     });
   }
+
+
 
   public disconnect(): void {
     if (this.session) {

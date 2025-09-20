@@ -2,14 +2,18 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { AppStatus, Summary, LogEntry, LogLevel } from './types';
 import GeminiService from './services/geminiService';
+import { VideoModeCapture } from './utils/videoMode';
 import Header from './components/Header';
 import Controls from './components/Controls';
 import VideoDisplay from './components/VideoDisplay';
 import SummaryDisplay from './components/SummaryDisplay';
 import config from './config.json';
 
-const SUMMARY_INTERVAL_MS = config.SUMMARY_INTERVAL_MS;
-const INITIAL_PROMPT = config.INITIAL_PROMPT;
+const VIDEO_MODE_CONFIG = {
+  dataCollectionIntervalMs: config.VIDEO_MODE_DATA_COLLECTION_INTERVAL_MS,
+  setsPerMinute: config.VIDEO_MODE_SETS_PER_MINUTE,
+  videoModePrompt: config.VIDEO_MODE_PROMPT,
+};
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -23,12 +27,10 @@ export default function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const intervalRef = useRef<number | null>(null);
   const statusRef = useRef(status);
-  const isFirstFrameRef = useRef(true);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioMimeTypeRef = useRef<string>('audio/webm');
-  const captureAndSendFrameRef = useRef<() => void>(() => {});
+  const videoModeRef = useRef<VideoModeCapture | null>(null);
 
   const addLog = useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     setLogs(prev => [...prev, {
@@ -44,9 +46,9 @@ export default function App() {
   }, [status]);
   
   const cleanup = useCallback(() => {
-    if (intervalRef.current) {
-      window.clearInterval(intervalRef.current);
-      intervalRef.current = null;
+    if (videoModeRef.current) {
+      videoModeRef.current.stop();
+      videoModeRef.current = null;
     }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
@@ -71,127 +73,9 @@ export default function App() {
     addLog("Analysis stopped and resources cleaned up.", LogLevel.SUCCESS);
   }, [addLog, cleanup]);
 
-  const captureAndSendFrame = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || !geminiService?.isConnected()) {
-      addLog("Skipping frame capture: core dependencies not ready.", LogLevel.WARN);
-      return;
-    }
 
-    const currentStream = videoRef.current.srcObject as MediaStream | null;
-    if (!currentStream || !currentStream.active) {
-      addLog(`Media stream is not active. Stopping analysis.`, LogLevel.WARN);
-      handleStop();
-      return;
-    }
-
-    const video = videoRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) {
-      addLog("Video has no dimensions yet, skipping frame capture.", LogLevel.WARN);
-      return;
-    }
-    
-    addLog("Capturing frame and audio snippet...");
-    
-    // 1. Capture Video Frame
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-       addLog("Failed to get 2D context from canvas.", LogLevel.ERROR);
-       return;
-    }
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-    const videoBase64Data = dataUrl.split(',')[1];
-    
-    // 2. Capture Audio Snippet
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state !== 'recording') {
-        addLog("Audio recorder not ready. Sending frame without audio.", LogLevel.WARN);
-        const prompt = isFirstFrameRef.current ? INITIAL_PROMPT : undefined;
-        geminiService.sendFrame(videoBase64Data, undefined, undefined, prompt);
-        if (isFirstFrameRef.current) isFirstFrameRef.current = false;
-        return;
-    }
-
-    const audioPromise = new Promise<{ audioData: string; mimeType: string }>((resolve, reject) => {
-        let audioChunks: Blob[] = [];
-        recorder.ondataavailable = (e) => {
-             if (e.data.size > 0) audioChunks.push(e.data);
-        };
-        recorder.onstop = () => {
-            if (audioChunks.length === 0) {
-                return reject(new Error("No audio data was captured in the interval."));
-            }
-
-            const detectedMimeType = audioChunks[0].type || audioMimeTypeRef.current;
-            if (!detectedMimeType) {
-                return reject(new Error("Could not determine audio MIME type from data blobs."));
-            }
-
-            const audioBlob = new Blob(audioChunks, { type: detectedMimeType });
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const dataUrl = reader.result as string;
-                if (!dataUrl || !dataUrl.startsWith('data:')) {
-                    return reject(new Error("Invalid data URL from FileReader."));
-                }
-                
-                // Robustly find the Base64 data, ignoring commas in the MIME type.
-                const separator = ';base64,';
-                const separatorIndex = dataUrl.indexOf(separator);
-                if (separatorIndex === -1) {
-                    return reject(new Error("Malformed base64 data URL: ';base64,' separator not found."));
-                }
-                const base64Audio = dataUrl.substring(separatorIndex + separator.length);
-
-                resolve({ audioData: base64Audio, mimeType: detectedMimeType });
-                
-                if (statusRef.current === AppStatus.ANALYZING) {
-                    recorder.start();
-                }
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(audioBlob);
-            
-            recorder.ondataavailable = null;
-            recorder.onstop = null;
-        };
-        recorder.stop();
-    });
-
-    try {
-        const { audioData, mimeType } = await audioPromise;
-        const prompt = isFirstFrameRef.current ? INITIAL_PROMPT : undefined;
-        geminiService.sendFrame(videoBase64Data, audioData, mimeType, prompt);
-        if (isFirstFrameRef.current) {
-            isFirstFrameRef.current = false;
-        }
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        addLog(`Error capturing audio: ${message}. Sending video only.`, LogLevel.WARN);
-        const prompt = isFirstFrameRef.current ? INITIAL_PROMPT : undefined;
-        geminiService.sendFrame(videoBase64Data, undefined, undefined, prompt);
-        if (isFirstFrameRef.current) {
-            isFirstFrameRef.current = false;
-        }
-        // Restart recording even on failure to not halt the process
-        // FIX: The original check `recorder.state === 'inactive'` caused a TypeScript error
-        // because the type of `recorder.state` was narrowed to 'recording' earlier in the
-        // function, and TypeScript's control flow analysis didn't detect that
-        // `recorder.stop()` changes the state. Reading from the ref `mediaRecorderRef.current`
-        // bypasses this incorrect narrowing.
-        if (mediaRecorderRef.current?.state === 'inactive' && statusRef.current === AppStatus.ANALYZING) {
-            mediaRecorderRef.current.start();
-        }
-    }
-
-  }, [addLog, handleStop, geminiService]);
   
-  useEffect(() => {
-    captureAndSendFrameRef.current = captureAndSendFrame;
-  }, [captureAndSendFrame]);
+
 
   useEffect(() => {
     if (!mediaStream || !videoRef.current) return;
@@ -207,11 +91,49 @@ export default function App() {
   }, [mediaStream, addLog]);
 
   useEffect(() => {
-    if (isVideoReady && geminiService && isFirstFrameRef.current) {
-      addLog("Dependencies met (video + connection). Triggering initial frame capture.", LogLevel.SUCCESS);
-      captureAndSendFrame();
+    if (isVideoReady && geminiService) {
+      addLog("Dependencies met (video + connection). Initializing video mode.", LogLevel.SUCCESS);
+      
+      // Initialize video mode capture
+      const videoMode = new VideoModeCapture(
+        VIDEO_MODE_CONFIG,
+        {
+          onSummary: (summary) => {
+            setSummaries((prev) => [
+              ...prev,
+              {
+                id: `sum_${Date.now()}`,
+                text: summary,
+                timestamp: new Date().toLocaleTimeString(),
+              },
+            ]);
+          },
+          onError: (error) => {
+            setError(`Video Mode Error: ${error}`);
+            setStatus(AppStatus.ERROR);
+            cleanup();
+          },
+          onStatusChange: (newStatus) => {
+            setStatus(newStatus);
+          },
+        },
+        addLog,
+        {
+          videoRef,
+          canvasRef,
+          mediaRecorderRef,
+          audioMimeTypeRef,
+          statusRef,
+        }
+      );
+      
+      videoMode.setGeminiService(geminiService);
+      videoModeRef.current = videoMode;
+      
+      // Start video mode capture
+      videoMode.start();
     }
-  }, [isVideoReady, geminiService, captureAndSendFrame, addLog]);
+  }, [isVideoReady, geminiService, addLog, cleanup]);
   
   const handleStart = async () => {
     addLog("Start Analysis clicked.");
@@ -224,7 +146,6 @@ export default function App() {
     }
     
     cleanup();
-    isFirstFrameRef.current = true;
     setError(null);
     setSummaries([]);
     setLogs([]);
@@ -324,11 +245,7 @@ export default function App() {
       setGeminiService(service);
       setStatus(AppStatus.ANALYZING);
       
-      addLog("Starting periodic capture interval for subsequent frames.");
-      intervalRef.current = window.setInterval(() => {
-        captureAndSendFrameRef.current();
-      }, SUMMARY_INTERVAL_MS);
-      addLog(`Subsequent frames will be captured every ${SUMMARY_INTERVAL_MS / 1000} seconds.`);
+      addLog("Video mode will start automatically once video is ready.");
 
     } catch (err) {
       const message = err instanceof Error ? err.message : "An unknown error occurred.";
