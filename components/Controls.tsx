@@ -1,7 +1,6 @@
-
-import React from 'react';
+import React, { useState } from 'react';
 import { AppStatus } from '../types';
-import { PlayIcon, StopIcon, LoadingIcon } from './icons';
+import { PlayIcon, StopIcon, LoadingIcon, ChevronDownIcon } from './icons';
 
 interface ControlsProps {
   status: AppStatus;
@@ -20,11 +19,21 @@ const statusMap: Record<AppStatus, { text: string; icon: React.ReactElement; col
 
 const Controls: React.FC<ControlsProps> = ({ status, onStart, onStop }) => {
   const isAnalyzing = status === AppStatus.ANALYZING;
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
   return (
     <div className="bg-base-200 p-4 rounded-lg shadow-lg flex items-center justify-between">
       <div>
-        <h2 className="font-bold text-lg">Control Panel</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="font-bold text-lg">Control Panel</h2>
+          <button
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-content-200 hover:bg-base-300/50 rounded transition-colors"
+            onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+            aria-expanded={isDropdownOpen}
+          >
+            <ChevronDownIcon className={`w-4 h-4 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
         <p className="text-sm text-content-200">Select your screen and start the analysis.</p>
       </div>
       <div className="flex items-center gap-4">

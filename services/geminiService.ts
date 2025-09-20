@@ -17,7 +17,7 @@ interface GeminiServiceCallbacks {
 }
 
 // Reverted to the specific live model required by the ai.live.connect API.
-const MODEL_NAME = 'models/gemini-2.0-flash-live-001';
+const MODEL_NAME = 'models/gemini-2.5-flash-live-preview';
 
 class GeminiService {
   private session: Session | undefined = undefined;
@@ -127,6 +127,40 @@ class GeminiService {
     const promptLog = prompt ? '(Includes initial prompt)' : '';
 
     this.log(`Sending frame to AI. Image size: ${Math.round(base64Image.length * 3 / 4 / 1024)} KB. ${audioLog}${promptLog}`);
+    this.session.sendClientContent({
+      turns: [{ parts }],
+    });
+  }
+
+  public sendVideoModeFrames(base64Images: string[], base64Audio?: string, audioMimeType?: string, prompt?: string): void {
+    if (!this.session) {
+      this.log("Cannot send frames. Session is not connected.", LogLevel.ERROR);
+      return;
+    }
+
+    const imageParts: Part[] = base64Images.map(imageData => ({
+      inlineData: {
+        mimeType: 'image/jpeg',
+        data: imageData,
+      },
+    }));
+    
+    const textPart: Part | null = prompt ? { text: prompt } : null;
+
+    const audioPart: Part | null = (base64Audio && audioMimeType) ? {
+        inlineData: {
+            mimeType: audioMimeType,
+            data: base64Audio,
+        },
+    } : null;
+
+    const parts = [textPart, ...imageParts, audioPart].filter((p): p is Part => p !== null);
+
+    const imagesSizeLog = base64Images.map((img, i) => `Image ${i + 1}: ${Math.round(img.length * 3 / 4 / 1024)} KB`).join(', ');
+    const audioLog = audioPart ? ` Audio (${audioMimeType}): ${Math.round(base64Audio!.length * 3 / 4 / 1024)} KB.` : '';
+    const promptLog = prompt ? ' (Includes prompt)' : '';
+
+    this.log(`Sending ${base64Images.length} frames to AI. ${imagesSizeLog}.${audioLog}${promptLog}`);
     this.session.sendClientContent({
       turns: [{ parts }],
     });
