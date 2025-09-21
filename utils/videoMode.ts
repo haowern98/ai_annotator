@@ -30,7 +30,6 @@ export class VideoModeCapture {
   
   private captureIntervalId: number | null = null;
   private captureCount = 0;
-  private isFirstCapture = true;
 
   constructor(
     config: VideoModeConfig,
@@ -66,7 +65,6 @@ export class VideoModeCapture {
 
     this.log(`Starting video mode capture every ${this.config.dataCollectionIntervalMs / 1000}s`, LogLevel.SUCCESS);
     this.captureCount = 0;
-    this.isFirstCapture = true;
 
     // Start capturing data every 10 seconds
     this.captureIntervalId = window.setInterval(() => {
@@ -86,7 +84,6 @@ export class VideoModeCapture {
     }
     
     this.captureCount = 0;
-    this.isFirstCapture = true;
   }
 
   private async captureAndSendData(): Promise<void> {
@@ -128,13 +125,14 @@ export class VideoModeCapture {
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     const videoBase64Data = dataUrl.split(',')[1];
 
-    // 2. Capture Audio Snippet
+    // 2. Generate appropriate prompt based on data point number
+    const prompt = this.generatePromptForDataPoint(this.captureCount);
+
+    // 3. Capture Audio Snippet
     const recorder = this.mediaRecorderRef.current;
     if (!recorder || recorder.state !== 'recording') {
       this.log("Audio recorder not ready. Sending frame without audio.", LogLevel.WARN);
-      const prompt = this.isFirstCapture ? this.config.videoModePrompt : undefined;
       this.geminiService.sendFrame(videoBase64Data, undefined, undefined, prompt);
-      if (this.isFirstCapture) this.isFirstCapture = false;
       
       // Handle summary request if needed
       if (shouldRequestSummary) {
@@ -196,14 +194,9 @@ export class VideoModeCapture {
 
     try {
       const { audioData, mimeType } = await audioPromise;
-      const prompt = this.isFirstCapture ? this.config.videoModePrompt : undefined;
       
-      // Send data to Gemini without expecting immediate response
+      // Send data to Gemini with appropriate prompt
       this.geminiService.sendFrame(videoBase64Data, audioData, mimeType, prompt);
-      
-      if (this.isFirstCapture) {
-        this.isFirstCapture = false;
-      }
       
       this.log(`Data point ${this.captureCount} sent to Gemini (${Math.round(videoBase64Data.length * 3 / 4 / 1024)}KB image, ${Math.round(audioData.length * 3 / 4 / 1024)}KB audio)`);
       
@@ -216,12 +209,7 @@ export class VideoModeCapture {
       const message = err instanceof Error ? err.message : String(err);
       this.log(`Error capturing audio for data point ${this.captureCount}: ${message}. Sending video only.`, LogLevel.WARN);
       
-      const prompt = this.isFirstCapture ? this.config.videoModePrompt : undefined;
       this.geminiService.sendFrame(videoBase64Data, undefined, undefined, prompt);
-      
-      if (this.isFirstCapture) {
-        this.isFirstCapture = false;
-      }
 
       // Restart recording even on failure
       if (this.mediaRecorderRef.current?.state === 'inactive' && this.statusRef.current === AppStatus.ANALYZING) {
@@ -235,18 +223,45 @@ export class VideoModeCapture {
     }
   }
 
+  private generatePromptForDataPoint(dataPointNumber: number): string {
+    if (dataPointNumber === 1) {
+      // Data Point 1: Full instructions + response control
+      return `You are analyzing a lecture/presentation through 10-second data segments. You will receive 6 sets of data per minute (screenshot + 10-second audio). I will send sets 1-5 for you to hold in context, then set 6 will request a comprehensive summary.
+
+For context sets (1-5): Add the screenshot and audio to your memory and respond only with "Received Data [number]".
+
+${this.config.videoModePrompt}
+
+This is data set 1. Respond only with "Received Data 1".`;
+    } else if (dataPointNumber >= 2 && dataPointNumber <= 5) {
+      // Data Points 2-5: Simple holding instruction
+      return `This is data set ${dataPointNumber}. Add this screenshot and audio to your memory with the previous sets. Respond only with "Received Data ${dataPointNumber}".`;
+    } else if (dataPointNumber === 6) {
+      // Data Point 6: Final set + summary request
+      return `This is data set 6, the final set. Add this to your memory, then provide the comprehensive summary of all 6 data sets using the format specified initially. 
+
+First respond with "Received Data 6", then provide:
+
+1. Individual 10-second summaries for each data point (2 sentences each covering visual and audio content):
+   - Data Point 1 (0-10 seconds)
+   - Data Point 2 (10-20 seconds) 
+   - Data Point 3 (20-30 seconds)
+   - Data Point 4 (30-40 seconds)
+   - Data Point 5 (40-50 seconds)
+   - Data Point 6 (50-60 seconds)
+
+2. Then provide the full comprehensive analysis of the entire 60-second period using the format specified in the initial instructions.`;
+    } else {
+      // Fallback (shouldn't happen with proper counter reset)
+      return `This is data set ${dataPointNumber}. Add this screenshot and audio to your memory. Respond only with "Received Data ${dataPointNumber}".`;
+    }
+  }
+
   private handleSummaryRequest(): void {
-    this.log(`Requesting summary after collecting ${this.captureCount} data points.`, LogLevel.INFO);
+    this.log(`Data point 6 includes summary request. Resetting counter for next cycle.`, LogLevel.INFO);
     
     // Reset counter immediately to prevent race conditions
     this.captureCount = 0;
-    
-    // Request summary with a small delay to ensure the last data point is processed
-    setTimeout(() => {
-      if (this.geminiService?.isConnected()) {
-        this.geminiService.requestSummary();
-      }
-    }, 100);
   }
 
 
