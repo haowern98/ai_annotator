@@ -46,6 +46,10 @@ class GeminiService {
     const config = {
       responseModalities: [Modality.TEXT],
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+      contextWindowCompression: {
+         triggerTokens: '25600',
+          slidingWindow: { targetTokens: '12800' },
+      }
     };
 
     try {
