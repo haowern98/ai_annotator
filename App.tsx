@@ -3,6 +3,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { AppStatus, Summary, LogEntry, LogLevel } from './types';
 import GeminiService from './services/geminiService';
 import { VideoModeCapture } from './utils/videoMode';
+import { DynamicSampling } from './utils/dynamicSampling';
 import Header from './components/Header';
 import Controls from './components/Controls';
 import VideoDisplay from './components/VideoDisplay';
@@ -15,6 +16,11 @@ const VIDEO_MODE_CONFIG = {
   videoModePrompt: config.VIDEO_MODE_PROMPT,
 };
 
+const DYNAMIC_SAMPLING_CONFIG = {
+  ...config.DYNAMIC_SAMPLING_CONFIG,
+  dynamicSamplingPrompt: config.DYNAMIC_SAMPLING_PROMPT,
+};
+
 export default function App() {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [summaries, setSummaries] = useState<Summary[]>([]);
@@ -22,6 +28,7 @@ export default function App() {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [geminiService, setGeminiService] = useState<GeminiService | null>(null);
+  const [selectedMode, setSelectedMode] = useState<string>('Video Mode');
 
   const [isVideoReady, setIsVideoReady] = useState(false);
 
@@ -31,6 +38,7 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioMimeTypeRef = useRef<string>('audio/webm');
   const videoModeRef = useRef<VideoModeCapture | null>(null);
+  const dynamicSamplingRef = useRef<DynamicSampling | null>(null);
 
   const addLog = useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     setLogs(prev => [...prev, {
@@ -49,6 +57,10 @@ export default function App() {
     if (videoModeRef.current) {
       videoModeRef.current.stop();
       videoModeRef.current = null;
+    }
+    if (dynamicSamplingRef.current) {
+      dynamicSamplingRef.current.stop();
+      dynamicSamplingRef.current = null;
     }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
@@ -73,6 +85,11 @@ export default function App() {
     addLog("Analysis stopped and resources cleaned up.", LogLevel.SUCCESS);
   }, [addLog, cleanup]);
 
+  const handleModeChange = useCallback((mode: string) => {
+    addLog(`Analysis mode changed to: ${mode}`);
+    setSelectedMode(mode);
+  }, [addLog]);
+
 
   
 
@@ -91,7 +108,19 @@ export default function App() {
   }, [mediaStream, addLog]);
 
   useEffect(() => {
-    if (isVideoReady && geminiService) {
+    // Clean up any existing mode before starting new one
+    if (videoModeRef.current) {
+      videoModeRef.current.stop();
+      videoModeRef.current = null;
+      addLog("Stopped existing Video Mode before mode switch.", LogLevel.INFO);
+    }
+    if (dynamicSamplingRef.current) {
+      dynamicSamplingRef.current.stop();
+      dynamicSamplingRef.current = null;
+      addLog("Stopped existing Dynamic Sampling before mode switch.", LogLevel.INFO);
+    }
+
+    if (isVideoReady && geminiService && selectedMode === 'Video Mode') {
       addLog("Dependencies met (video + connection). Initializing video mode.", LogLevel.SUCCESS);
       
       // Initialize video mode capture
@@ -132,8 +161,49 @@ export default function App() {
       
       // Start video mode capture
       videoMode.start();
+    } else if (isVideoReady && geminiService && selectedMode === 'Lecture Mode') {
+      addLog("Dependencies met (video + connection). Initializing dynamic sampling mode.", LogLevel.SUCCESS);
+      
+      // Initialize dynamic sampling capture
+      const dynamicSampling = new DynamicSampling(
+        DYNAMIC_SAMPLING_CONFIG,
+        {
+          onSummary: (summary) => {
+            setSummaries((prev) => [
+              ...prev,
+              {
+                id: `sum_${Date.now()}`,
+                text: summary,
+                timestamp: new Date().toLocaleTimeString(),
+              },
+            ]);
+          },
+          onError: (error) => {
+            setError(`Dynamic Sampling Error: ${error}`);
+            setStatus(AppStatus.ERROR);
+            cleanup();
+          },
+          onStatusChange: (newStatus) => {
+            setStatus(newStatus);
+          },
+        },
+        addLog,
+        {
+          videoRef,
+          canvasRef,
+          mediaRecorderRef,
+          audioMimeTypeRef,
+          statusRef,
+        }
+      );
+      
+      dynamicSampling.setGeminiService(geminiService);
+      dynamicSamplingRef.current = dynamicSampling;
+      
+      // Start dynamic sampling capture
+      dynamicSampling.start();
     }
-  }, [isVideoReady, geminiService, addLog, cleanup]);
+  }, [isVideoReady, geminiService, selectedMode, addLog, cleanup]);
   
   const handleStart = async () => {
     addLog("Start Analysis clicked.");
@@ -245,7 +315,7 @@ export default function App() {
       setGeminiService(service);
       setStatus(AppStatus.ANALYZING);
       
-      addLog("Video mode will start automatically once video is ready.");
+      addLog(`${selectedMode} will start automatically once video is ready.`);
 
     } catch (err) {
       const message = err instanceof Error ? err.message : "An unknown error occurred.";
@@ -276,7 +346,13 @@ export default function App() {
       <Header />
       <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
         <div className="lg:w-3/5 flex flex-col gap-4">
-          <Controls status={status} onStart={handleStart} onStop={handleStop} />
+          <Controls 
+            status={status} 
+            onStart={handleStart} 
+            onStop={handleStop} 
+            selectedMode={selectedMode}
+            onModeChange={handleModeChange}
+          />
            {error && (
             <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded-lg">
               <p className="font-bold">An Error Occurred</p>

@@ -6,6 +6,8 @@ interface ControlsProps {
   status: AppStatus;
   onStart: () => void;
   onStop: () => void;
+  selectedMode: string;
+  onModeChange: (mode: string) => void;
 }
 
 const statusMap: Record<AppStatus, { text: string; icon: React.ReactElement; color: string; disabled: boolean }> = {
@@ -17,10 +19,9 @@ const statusMap: Record<AppStatus, { text: string; icon: React.ReactElement; col
   [AppStatus.STOPPING]: { text: 'Stopping...', icon: <LoadingIcon />, color: 'bg-gray-500', disabled: true },
 };
 
-const Controls: React.FC<ControlsProps> = ({ status, onStart, onStop }) => {
+const Controls: React.FC<ControlsProps> = ({ status, onStart, onStop, selectedMode, onModeChange }) => {
   const isAnalyzing = status === AppStatus.ANALYZING;
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  const [selectedMode, setSelectedMode] = useState('Lecture Mode');
   const [isModeDropdownOpen, setIsModeDropdownOpen] = useState(false);
 
   return (
@@ -77,7 +78,7 @@ const Controls: React.FC<ControlsProps> = ({ status, onStart, onStop }) => {
                 <button
                   className="w-full text-left px-3 py-2 text-sm text-content-200 hover:bg-base-300/50 first:rounded-t last:rounded-b"
                   onClick={() => {
-                    setSelectedMode('Lecture Mode');
+                    onModeChange('Lecture Mode');
                     setIsModeDropdownOpen(false);
                   }}
                 >
@@ -86,7 +87,7 @@ const Controls: React.FC<ControlsProps> = ({ status, onStart, onStop }) => {
                 <button
                   className="w-full text-left px-3 py-2 text-sm text-content-200 hover:bg-base-300/50 first:rounded-t last:rounded-b"
                   onClick={() => {
-                    setSelectedMode('Video Mode');
+                    onModeChange('Video Mode');
                     setIsModeDropdownOpen(false);
                   }}
                 >

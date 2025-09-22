@@ -109,31 +109,54 @@ class GeminiService {
       return;
     }
 
-    const imagePart: Part = {
-      inlineData: {
-        mimeType: 'image/jpeg',
-        data: base64Image,
-      },
-    };
+    const parts: Part[] = [];
     
-    const textPart: Part | null = prompt ? { text: prompt } : null;
-
-    const audioPart: Part | null = (base64Audio && audioMimeType) ? {
+    // Add text part if provided
+    if (prompt) {
+      parts.push({ text: prompt });
+    }
+    
+    // Add image part only if base64Image is not empty
+    if (base64Image && base64Image.length > 0) {
+      parts.push({
         inlineData: {
-            mimeType: audioMimeType,
-            data: base64Audio,
+          mimeType: 'image/jpeg',
+          data: base64Image,
         },
-    } : null;
+      });
+    }
+    
+    // Add audio part if provided
+    if (base64Audio && audioMimeType) {
+      parts.push({
+        inlineData: {
+          mimeType: audioMimeType,
+          data: base64Audio,
+        },
+      });
+    }
 
-    const parts = [textPart, imagePart, audioPart].filter((p): p is Part => p !== null);
-
-    const audioLog = audioPart ? `Audio (${audioMimeType}) size: ${Math.round(base64Audio!.length * 3 / 4 / 1024)} KB. ` : '';
+    const audioLog = (base64Audio && audioMimeType) ? `Audio (${audioMimeType}) size: ${Math.round(base64Audio.length * 3 / 4 / 1024)} KB. ` : '';
+    const imageLog = base64Image ? `Image size: ${Math.round(base64Image.length * 3 / 4 / 1024)} KB. ` : '';
     const promptLog = prompt ? '(Includes initial prompt)' : '';
 
-    this.log(`Sending frame to AI. Image size: ${Math.round(base64Image.length * 3 / 4 / 1024)} KB. ${audioLog}${promptLog}`);
+    this.log(`Sending frame to AI. ${imageLog}${audioLog}${promptLog}`);
     this.session.sendClientContent({
       turns: [{ parts }],
     });
+  }
+
+  public sendTextOnly(text: string): void {
+    if (!this.session) {
+      this.log("Cannot send text. Session is not connected.", LogLevel.ERROR);
+      return;
+    }
+
+    this.log(`Sending text-only message to AI (${text.length} characters)`);
+    this.session.sendClientContent({
+      turns: [{ parts: [{ text }] }],
+    });
+    this.log("Text-only message sent successfully.", LogLevel.SUCCESS);
   }
 
   public requestSummary(): void {
