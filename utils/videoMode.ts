@@ -30,6 +30,10 @@ export class VideoModeCapture {
   
   private captureIntervalId: number | null = null;
   private captureCount = 0;
+  
+  // Summary synchronization state
+  private isWaitingForSummary = false;
+  private pendingCycleStart = false;
 
   constructor(
     config: VideoModeConfig,
@@ -55,6 +59,13 @@ export class VideoModeCapture {
 
   public setGeminiService(service: GeminiService): void {
     this.geminiService = service;
+    
+    // Set up summary completion callback
+    if (service) {
+      service.onSummaryComplete(() => {
+        this.handleSummaryReceived();
+      });
+    }
   }
 
   public start(): void {
@@ -65,8 +76,10 @@ export class VideoModeCapture {
 
     this.log(`Starting video mode capture every ${this.config.dataCollectionIntervalMs / 1000}s`, LogLevel.SUCCESS);
     this.captureCount = 0;
+    this.isWaitingForSummary = false;
+    this.pendingCycleStart = false;
 
-    // Start capturing data every 10 seconds
+    // Start capturing data every 5 seconds
     this.captureIntervalId = window.setInterval(() => {
       this.captureAndSendData();
     }, this.config.dataCollectionIntervalMs);
@@ -84,11 +97,35 @@ export class VideoModeCapture {
     }
     
     this.captureCount = 0;
+    this.isWaitingForSummary = false;
+    this.pendingCycleStart = false;
+  }
+
+  // Handle when summary is received from Gemini
+  private handleSummaryReceived(): void {
+    this.log("Summary received from Gemini. Starting next cycle.", LogLevel.SUCCESS);
+    
+    this.isWaitingForSummary = false;
+    this.captureCount = 0; // Reset counter now that summary is complete
+    
+    // If there was a pending cycle start, trigger it now
+    if (this.pendingCycleStart) {
+      this.pendingCycleStart = false;
+      this.log("Executing pending cycle start after summary completion.", LogLevel.INFO);
+      // The next interval will naturally start the new cycle
+    }
   }
 
   private async captureAndSendData(): Promise<void> {
     if (!this.videoRef.current || !this.canvasRef.current || !this.geminiService?.isConnected()) {
       this.log("Skipping data capture: core dependencies not ready.", LogLevel.WARN);
+      return;
+    }
+
+    // Block new cycles if waiting for summary
+    if (this.isWaitingForSummary) {
+      this.log("Waiting for summary completion before starting next cycle. Skipping capture.", LogLevel.INFO);
+      this.pendingCycleStart = true;
       return;
     }
 
@@ -226,29 +263,35 @@ export class VideoModeCapture {
   private generatePromptForDataPoint(dataPointNumber: number): string {
     if (dataPointNumber === 1) {
       // Data Point 1: Full instructions + response control
-      return `You are analyzing a lecture/presentation through 10-second data segments. You will receive 6 sets of data per minute (screenshot + 10-second audio). I will send sets 1-5 for you to hold in context, then set 6 will request a comprehensive summary.
+      return `You are analyzing a lecture/presentation through 5-second data segments. You will receive 12 sets of data per minute (screenshot + 5-second audio). I will send sets 1-11 for you to hold in context, then set 12 will request a comprehensive summary.
 
-For context sets (1-5): Add the screenshot and audio to your memory and respond only with "Received Data [number]".
+For context sets (1-11): Add the screenshot and audio to your memory and respond only with "Received Data [number]".
 
 ${this.config.videoModePrompt}
 
 This is data set 1. Respond only with "Received Data 1".`;
-    } else if (dataPointNumber >= 2 && dataPointNumber <= 5) {
-      // Data Points 2-5: Simple holding instruction
+    } else if (dataPointNumber >= 2 && dataPointNumber <= 11) {
+      // Data Points 2-11: Simple holding instruction
       return `This is data set ${dataPointNumber}. Add this screenshot and audio to your memory with the previous sets. Respond only with "Received Data ${dataPointNumber}".`;
-    } else if (dataPointNumber === 6) {
-      // Data Point 6: Final set + summary request
-      return `This is data set 6, the final set. Add this to your memory, then provide the comprehensive summary of all 6 data sets using the format specified initially. 
+    } else if (dataPointNumber === 12) {
+      // Data Point 12: Final set + summary request
+      return `This is data set 12, the final set. Add this to your memory, then provide the comprehensive summary of all 12 data sets using the format specified initially. 
 
-First respond with "Received Data 6", then provide:
+First respond with "Received Data 12", then provide:
 
-1. Individual 10-second summaries for each data point (2 sentences each covering visual and audio content):
-   - Data Point 1 (0-10 seconds)
-   - Data Point 2 (10-20 seconds) 
-   - Data Point 3 (20-30 seconds)
-   - Data Point 4 (30-40 seconds)
-   - Data Point 5 (40-50 seconds)
-   - Data Point 6 (50-60 seconds)
+1. Individual 5-second summaries for each data point (2 sentences each covering visual and audio content):
+   - Data Point 1 (0-5 seconds)
+   - Data Point 2 (5-10 seconds) 
+   - Data Point 3 (10-15 seconds)
+   - Data Point 4 (15-20 seconds)
+   - Data Point 5 (20-25 seconds)
+   - Data Point 6 (25-30 seconds)
+   - Data Point 7 (30-35 seconds)
+   - Data Point 8 (35-40 seconds)
+   - Data Point 9 (40-45 seconds)
+   - Data Point 10 (45-50 seconds)
+   - Data Point 11 (50-55 seconds)
+   - Data Point 12 (55-60 seconds)
 
 2. Then provide the full comprehensive analysis of the entire 60-second period using the format specified in the initial instructions.`;
     } else {
@@ -258,11 +301,10 @@ First respond with "Received Data 6", then provide:
   }
 
   private handleSummaryRequest(): void {
-    this.log(`Data point 6 includes summary request. Resetting counter for next cycle.`, LogLevel.INFO);
+    this.log(`Data point 12 sent with summary request. Waiting for summary completion before next cycle.`, LogLevel.INFO);
     
-    // Reset counter immediately to prevent race conditions
-    this.captureCount = 0;
+    // Set flag to wait for summary instead of immediately resetting
+    this.isWaitingForSummary = true;
+    // Note: Counter reset now happens in handleSummaryReceived()
   }
-
-
 }
