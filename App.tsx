@@ -22,6 +22,7 @@ export default function App() {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [geminiService, setGeminiService] = useState<GeminiService | null>(null);
+  const [selectedMode, setSelectedMode] = useState<string>('Lecture Mode');
 
   const [isVideoReady, setIsVideoReady] = useState(false);
 
@@ -91,7 +92,7 @@ export default function App() {
   }, [mediaStream, addLog]);
 
   useEffect(() => {
-    if (isVideoReady && geminiService) {
+    if (isVideoReady && geminiService && selectedMode === 'Video Mode') {
       addLog("Dependencies met (video + connection). Initializing video mode.", LogLevel.SUCCESS);
       
       // Initialize video mode capture
@@ -132,8 +133,10 @@ export default function App() {
       
       // Start video mode capture
       videoMode.start();
+    } else if (isVideoReady && geminiService && selectedMode === 'Lecture Mode') {
+      addLog("Lecture Mode selected but not yet implemented.", LogLevel.INFO);
     }
-  }, [isVideoReady, geminiService, addLog, cleanup]);
+  }, [isVideoReady, geminiService, selectedMode, addLog, cleanup]);
   
   const handleStart = async () => {
     addLog("Start Analysis clicked.");
@@ -276,7 +279,13 @@ export default function App() {
       <Header />
       <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
         <div className="lg:w-3/5 flex flex-col gap-4">
-          <Controls status={status} onStart={handleStart} onStop={handleStop} />
+          <Controls 
+            status={status} 
+            onStart={handleStart} 
+            onStop={handleStop}
+            selectedMode={selectedMode}
+            onModeChange={setSelectedMode}
+          />
            {error && (
             <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded-lg">
               <p className="font-bold">An Error Occurred</p>
