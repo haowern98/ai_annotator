@@ -3,6 +3,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { AppStatus, Summary, LogEntry, LogLevel } from './types';
 import GeminiService from './services/geminiService';
 import { VideoModeCapture } from './utils/videoMode';
+import { RealtimeMode } from './utils/realtimeMode';
 import Header from './components/Header';
 import Controls from './components/Controls';
 import VideoDisplay from './components/VideoDisplay';
@@ -13,6 +14,12 @@ const VIDEO_MODE_CONFIG = {
   dataCollectionIntervalMs: config.VIDEO_MODE_DATA_COLLECTION_INTERVAL_MS,
   setsPerMinute: config.VIDEO_MODE_SETS_PER_MINUTE,
   videoModePrompt: config.VIDEO_MODE_PROMPT,
+};
+
+const REALTIME_MODE_CONFIG = {
+  captureIntervalMs: config.REALTIME_MODE_CONFIG.captureIntervalMs,
+  sessionRefreshIntervalMs: config.REALTIME_MODE_CONFIG.sessionRefreshIntervalMs,
+  realtimePrompt: config.REALTIME_MODE_CONFIG.realtimePrompt,
 };
 
 export default function App() {
@@ -32,6 +39,7 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioMimeTypeRef = useRef<string>('audio/webm');
   const videoModeRef = useRef<VideoModeCapture | null>(null);
+  const realtimeModeRef = useRef<RealtimeMode | null>(null);
 
   const addLog = useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     setLogs(prev => [...prev, {
@@ -50,6 +58,10 @@ export default function App() {
     if (videoModeRef.current) {
       videoModeRef.current.stop();
       videoModeRef.current = null;
+    }
+    if (realtimeModeRef.current) {
+      realtimeModeRef.current.stop();
+      realtimeModeRef.current = null;
     }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
@@ -134,7 +146,46 @@ export default function App() {
       // Start video mode capture
       videoMode.start();
     } else if (isVideoReady && geminiService && selectedMode === 'Lecture Mode') {
-      addLog("Lecture Mode selected but not yet implemented.", LogLevel.INFO);
+      addLog("Dependencies met (video + connection). Initializing realtime mode.", LogLevel.SUCCESS);
+      
+      // Initialize realtime mode capture
+      const realtimeMode = new RealtimeMode(
+        REALTIME_MODE_CONFIG,
+        {
+          onRealtimeResponse: (response) => {
+            setSummaries((prev) => [
+              ...prev,
+              {
+                id: `rt_${Date.now()}`,
+                text: response,
+                timestamp: new Date().toLocaleTimeString(),
+              },
+            ]);
+          },
+          onError: (error) => {
+            setError(`Realtime Mode Error: ${error}`);
+            setStatus(AppStatus.ERROR);
+            cleanup();
+          },
+          onStatusChange: (newStatus) => {
+            setStatus(newStatus);
+          },
+        },
+        addLog,
+        {
+          videoRef,
+          canvasRef,
+          mediaRecorderRef,
+          audioMimeTypeRef,
+          statusRef,
+        }
+      );
+      
+      realtimeMode.setGeminiService(geminiService);
+      realtimeModeRef.current = realtimeMode;
+      
+      // Start realtime mode capture
+      realtimeMode.start();
     }
   }, [isVideoReady, geminiService, selectedMode, addLog, cleanup]);
   
@@ -248,7 +299,7 @@ export default function App() {
       setGeminiService(service);
       setStatus(AppStatus.ANALYZING);
       
-      addLog("Video mode will start automatically once video is ready.");
+      addLog(`${selectedMode} will start automatically once video is ready.`);
 
     } catch (err) {
       const message = err instanceof Error ? err.message : "An unknown error occurred.";
