@@ -29,6 +29,7 @@ export class VideoModeCapture {
   private statusRef: React.RefObject<AppStatus>;
   
   private captureIntervalId: number | null = null;
+  private recorderHealthCheckId: number | null = null;
   private captureCount = 0;
   
   // Summary synchronization state
@@ -84,6 +85,11 @@ export class VideoModeCapture {
       this.captureAndSendData();
     }, this.config.dataCollectionIntervalMs);
 
+    // Health check: Ensure recorder stays running (check every 2 seconds)
+    this.recorderHealthCheckId = window.setInterval(() => {
+      this.ensureRecorderRunning();
+    }, 2000);
+
     // Capture first frame immediately
     this.captureAndSendData();
   }
@@ -96,9 +102,39 @@ export class VideoModeCapture {
       this.captureIntervalId = null;
     }
     
+    if (this.recorderHealthCheckId) {
+      window.clearInterval(this.recorderHealthCheckId);
+      this.recorderHealthCheckId = null;
+    }
+    
     this.captureCount = 0;
     this.isWaitingForSummary = false;
     this.pendingCycleStart = false;
+  }
+
+  // Ensure audio recorder is running
+  private ensureRecorderRunning(): void {
+    const recorder = this.mediaRecorderRef.current;
+    if (!recorder) {
+      this.log("MediaRecorder not initialized.", LogLevel.WARN);
+      return;
+    }
+
+    if (recorder.state === 'inactive') {
+      try {
+        recorder.start();
+        this.log("Audio recorder restarted after being inactive.", LogLevel.SUCCESS);
+      } catch (error) {
+        this.log(`Failed to restart audio recorder: ${error instanceof Error ? error.message : 'Unknown error'}`, LogLevel.ERROR);
+      }
+    } else if (recorder.state === 'paused') {
+      try {
+        recorder.resume();
+        this.log("Audio recorder resumed from paused state.", LogLevel.SUCCESS);
+      } catch (error) {
+        this.log(`Failed to resume audio recorder: ${error instanceof Error ? error.message : 'Unknown error'}`, LogLevel.ERROR);
+      }
+    }
   }
 
   // Handle when summary is received from Gemini
@@ -167,6 +203,12 @@ export class VideoModeCapture {
 
     // 3. Capture Audio Snippet
     const recorder = this.mediaRecorderRef.current;
+    
+    // Try to ensure recorder is running before capture
+    if (recorder && recorder.state !== 'recording') {
+      this.ensureRecorderRunning();
+    }
+    
     if (!recorder || recorder.state !== 'recording') {
       this.log("Audio recorder not ready. Sending frame without audio.", LogLevel.WARN);
       this.geminiService.sendFrame(videoBase64Data, undefined, undefined, prompt);

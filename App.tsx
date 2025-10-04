@@ -46,7 +46,7 @@ export default function App() {
     statusRef.current = status;
   }, [status]);
   
-  const cleanup = useCallback(() => {
+  const cleanup = useCallback((clearSession: boolean = false) => {
     if (videoModeRef.current) {
       videoModeRef.current.stop();
       videoModeRef.current = null;
@@ -56,7 +56,13 @@ export default function App() {
       mediaRecorderRef.current = null;
     }
     if (geminiService) {
-      geminiService.disconnect();
+      if (clearSession) {
+        // Completely clear session - next connection will be fresh
+        geminiService.clearSession();
+      } else {
+        // Just disconnect - can resume later
+        geminiService.disconnect();
+      }
       setGeminiService(null);
     }
     if (mediaStream) {
@@ -69,9 +75,10 @@ export default function App() {
   const handleStop = useCallback(() => {
     addLog("Stop Analysis triggered.");
     setStatus(AppStatus.STOPPING);
-    cleanup();
+    // Don't clear session - allow resuming later if user restarts
+    cleanup(false);
     setStatus(AppStatus.IDLE);
-    addLog("Analysis stopped and resources cleaned up.", LogLevel.SUCCESS);
+    addLog("Analysis stopped. Session preserved for potential resume.", LogLevel.SUCCESS);
   }, [addLog, cleanup]);
 
 
@@ -112,7 +119,7 @@ export default function App() {
           onError: (error) => {
             setError(`Video Mode Error: ${error}`);
             setStatus(AppStatus.ERROR);
-            cleanup();
+            cleanup(true); // Clear session on video mode error
           },
           onStatusChange: (newStatus) => {
             setStatus(newStatus);
@@ -231,7 +238,7 @@ export default function App() {
         onError: (e) => {
           setError(`Session Error: ${e}`);
           setStatus(AppStatus.ERROR);
-          cleanup();
+          cleanup(true); // Clear session on error
         },
         onClose: (reason) => {
           if (statusRef.current !== AppStatus.STOPPING && statusRef.current !== AppStatus.IDLE) {
@@ -239,8 +246,12 @@ export default function App() {
              addLog(msg, LogLevel.ERROR);
              setError(msg);
              setStatus(AppStatus.IDLE);
-             cleanup();
+             cleanup(true); // Clear session on unexpected close
           }
+        },
+        onReconnecting: () => {
+          addLog('Connection lost. Attempting to reconnect with session context...', LogLevel.WARN);
+          setStatus(AppStatus.CONNECTING);
         },
       });
 
@@ -259,7 +270,7 @@ export default function App() {
         setError(`Failed to start session: ${message}`);
       }
       setStatus(AppStatus.ERROR);
-      cleanup();
+      cleanup(true); // Clear session on startup error
     }
   };
   
