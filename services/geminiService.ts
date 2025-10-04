@@ -134,6 +134,11 @@ class GeminiService {
               // If we were expecting a summary before disconnect, re-request it
               if (this.isExpectingSummary) {
                 this.log("Summary was interrupted by disconnect. Re-requesting summary...", LogLevel.WARN);
+                
+                // CRITICAL: Clear any partial buffered response to prevent duplicates
+                this.currentMessage = '';
+                this.log("Cleared partial summary buffer to prevent duplicates.", LogLevel.INFO);
+                
                 // Small delay to ensure connection is stable
                 setTimeout(() => {
                   this.requestSummary();
