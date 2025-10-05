@@ -7,6 +7,8 @@ import Header from './components/Header';
 import Controls from './components/Controls';
 import VideoDisplay from './components/VideoDisplay';
 import SummaryDisplay from './components/SummaryDisplay';
+import { Sidebar } from './components/Sidebar';
+import InterviewMode from './components/InterviewMode';
 import config from './config.json';
 
 const VIDEO_MODE_CONFIG = {
@@ -23,6 +25,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [geminiService, setGeminiService] = useState<GeminiService | null>(null);
   const [selectedMode, setSelectedMode] = useState<string>('Lecture Mode');
+  const [sidebarMode, setSidebarMode] = useState<'lecture' | 'interview'>('lecture');
+
+  const handleSidebarModeChange = (mode: 'lecture' | 'interview') => {
+    setSidebarMode(mode);
+  };
 
   const [isVideoReady, setIsVideoReady] = useState(false);
 
@@ -287,28 +294,39 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-base-100 flex flex-col font-sans">
+      <Sidebar 
+        defaultCollapsed={true} 
+        onModeChange={handleSidebarModeChange}
+        currentMode={sidebarMode}
+      />
       <Header />
-      <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
-        <div className="lg:w-3/5 flex flex-col gap-4">
-          <Controls 
-            status={status} 
-            onStart={handleStart} 
-            onStop={handleStop}
-            selectedMode={selectedMode}
-            onModeChange={setSelectedMode}
-          />
-           {error && (
-            <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded-lg">
-              <p className="font-bold">An Error Occurred</p>
-              <p className="text-sm">{error}</p>
-            </div>
-          )}
-          <VideoDisplay stream={mediaStream} videoRef={videoRef} status={status} />
-        </div>
-        <div className="lg:w-2/5">
-          <SummaryDisplay summaries={summaries} status={status} logs={logs} />
-        </div>
-      </main>
+      
+      {sidebarMode === 'lecture' ? (
+        <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
+          <div className="lg:w-3/5 flex flex-col gap-4">
+            <Controls 
+              status={status} 
+              onStart={handleStart} 
+              onStop={handleStop}
+              selectedMode={selectedMode}
+              onModeChange={setSelectedMode}
+            />
+             {error && (
+              <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded-lg">
+                <p className="font-bold">An Error Occurred</p>
+                <p className="text-sm">{error}</p>
+              </div>
+            )}
+            <VideoDisplay stream={mediaStream} videoRef={videoRef} status={status} />
+          </div>
+          <div className="lg:w-2/5">
+            <SummaryDisplay summaries={summaries} status={status} logs={logs} />
+          </div>
+        </main>
+      ) : (
+        <InterviewMode />
+      )}
+      
       <canvas ref={canvasRef} className="hidden"></canvas>
     </div>
   );
