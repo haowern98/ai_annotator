@@ -30,7 +30,6 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
   const [currentReply, setCurrentReply] = React.useState<string>(''); // Accumulates streaming response
   const [transcript, setTranscript] = React.useState<any[]>([]);
   const [currentTranscript, setCurrentTranscript] = React.useState<string>(''); // Accumulates partial transcript
-  const [logs, setLogs] = React.useState<LogEntry[]>([]);
   const [status, setStatus] = React.useState<AppStatus>(AppStatus.IDLE);
   const [selectedMode, setSelectedMode] = React.useState<string>('Interview Mode');
   const [mediaStream, setMediaStream] = React.useState<MediaStream | null>(null);
@@ -41,7 +40,6 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
   const streamingCaptureRef = React.useRef<ContinuousStreamingCapture | null>(null);
-  const logsEndRef = React.useRef<HTMLDivElement>(null);
   const statusRef = React.useRef(status);
 
   // Keep status ref updated
@@ -49,20 +47,27 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
     statusRef.current = status;
   }, [status]);
 
-  // Add log helper
+  // Add log helper - now logs to console instead of UI
   const addLog = React.useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
-    setLogs(prev => [...prev, {
-      id: Date.now() + Math.random(),
-      timestamp: new Date().toLocaleTimeString(),
-      level,
-      message,
-    }]);
+    const timestamp = new Date().toLocaleTimeString();
+    const prefix = `[${timestamp}]`;
+    
+    switch (level) {
+      case LogLevel.ERROR:
+        console.error(`${prefix} ❌ ${message}`);
+        break;
+      case LogLevel.WARN:
+        console.warn(`${prefix} ⚠️  ${message}`);
+        break;
+      case LogLevel.SUCCESS:
+        console.log(`%c${prefix} ✓ ${message}`, 'color: #4ade80');
+        break;
+      default:
+        console.log(`${prefix} ${message}`);
+    }
   }, []);
 
-  // Auto-scroll logs to bottom
-  // React.useEffect(() => {
-  //   logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  // }, [logs]);
+
 
   const cleanup = React.useCallback(() => {
     // Stop streaming capture
@@ -105,7 +110,6 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
     setError(null);
     setReplies([]);
     setTranscript([]);
-    setLogs([]);
     addLog('Initializing Live API session...');
     setStatus(AppStatus.CAPTURING);
 
@@ -325,19 +329,7 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
     };
   }, []); // Empty deps - only on unmount
 
-  // Get log level color
-  const getLogLevelColor = (level: LogLevel) => {
-    switch (level) {
-      case LogLevel.ERROR:
-        return 'text-red-400';
-      case LogLevel.WARN:
-        return 'text-yellow-400';
-      case LogLevel.SUCCESS:
-        return 'text-green-400';
-      default:
-        return 'text-content-200';
-    }
-  };
+
 
   return (
     <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
@@ -420,10 +412,10 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
         </div>
       </div>
 
-      {/* Right Side - Logs and AI Reply */}
+      {/* Right Side - AI Reply */}
       <div className="lg:w-1/2 flex flex-col gap-4">
-        {/* AI Replies Section */}
-        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ height: '300px' }}>
+        {/* AI Replies Section - Full height */}
+        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col flex-grow">
           <div className="p-4 border-b border-base-300">
             <h3 className="text-lg font-bold text-content-100">AI-Generated Replies</h3>
           </div>
@@ -446,42 +438,6 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
                     <div className="text-content-100">{reply.text}</div>
                   </div>
                 ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Debug Logs Section */}
-        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ minHeight: '300px' }}>
-          <div className="p-4 border-b border-base-300">
-            <h3 className="text-lg font-bold text-content-100">Debug Logs</h3>
-          </div>
-          <div className="flex-grow p-6 overflow-y-scroll font-mono text-sm">
-            {logs.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="text-base-300 mb-4">
-                  <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                </div>
-                <h4 className="text-xl font-bold text-content-100 mb-2">Logs will appear here</h4>
-                <p className="text-sm text-content-200">Start the analysis to see debug logs.</p>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {logs.map((log) => (
-                  <div key={log.id} className="py-1">
-                    <span className="text-content-300 text-xs">[{log.timestamp}]</span>
-                    {' '}
-                    <span className={getLogLevelColor(log.level)}>
-                      {log.level === LogLevel.ERROR && '❌ '}
-                      {log.level === LogLevel.WARN && '⚠️  '}
-                      {log.level === LogLevel.SUCCESS && '✓ '}
-                      {log.message}
-                    </span>
-                  </div>
-                ))}
-                <div ref={logsEndRef} />
               </div>
             )}
           </div>

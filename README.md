@@ -95,10 +95,21 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 6. **Full Analysis**: Model provides thorough answer/observation for every turn
 7. **No Manual Prompts**: No 60-second timers or manual summary requests
 
-### Live UI Updates
-- **Interviewer Transcript**: Shows partial transcription as speaker talks (with "Live..." indicator), then saves complete transcript when turn ends
-- **AI-Generated Replies**: Shows streaming response as it's generated (with "Generating..." indicator), then saves complete response when finished or interrupted
-- Both sections accumulate content in real-time, just like live captions
+### UI Layout
+
+**Left Side**:
+- Control Panel (Start/Stop)
+- Screen Preview (250px height)
+- Interviewer Transcript (300px height)
+
+**Right Side**:
+- AI-Generated Replies (full height, flex-grow)
+
+**Debug Logs**: Now output to browser DevTools console instead of UI
+- Open DevTools (F12) to see logs
+- Color-coded by level: Errors (red), Warnings (yellow), Success (green)
+- Includes timestamps and emoji indicators (❌ ⚠️ ✓)
+- Freed up screen space for larger AI replies section
 
 ## API Models
 
@@ -113,6 +124,7 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 - Full analysis responses enabled
 - Removed manual 60-second summary timer
 - Response interruptions are normal behavior (model prioritizes new input)
+- Debug logs now in DevTools console (F12) instead of UI
 
 ## Implementation Notes
 
