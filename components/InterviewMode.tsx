@@ -256,7 +256,7 @@ const InterviewMode: React.FC = () => {
 
       {/* Right Side */}
       <div className="lg:w-1/2 flex flex-col gap-4">
-        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col flex-grow">
+        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ height: '700px' }}>
           <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">AI-Generated Replies</h3></div>
           <div className="flex-grow p-6 overflow-y-auto">
              <div className="space-y-4">
