@@ -6,15 +6,16 @@ import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
 
 // Configuration for the two sessions
 const TRANSCRIPT_PROMPT = `You are transcribing audio from an interview. 
-Respond ONLY in the following format:
-
-TRANSCRIPT:[exact words spoken by interviewer]`;
+Respond ONLY with a valid JSON object in the following format:
+{
+  "transcript": "[exact words spoken by interviewer]"
+}`;
 
 const REPLY_PROMPT = `You are interviewing for a software engineer position at a software engineering company.
-Respond ONLY in the following format:
-
-REPLY:
-[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]`;
+Respond ONLY with a valid JSON object in the following format:
+{
+  "reply": "[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]"
+}`;
 
 const STREAMING_CONFIG = {
   videoFrameRate: 1,
@@ -72,7 +73,7 @@ const InterviewMode: React.FC = () => {
     }
   }, [mediaStream, transcriptService, replyService]);
 
-  const handleStart = async () => {
+   const handleStart = async () => {
     addLog('Interview Mode: Start Analysis clicked');
     if (!process.env.API_KEY) {
       const msg = "API_KEY environment variable not set.";
@@ -103,19 +104,27 @@ const InterviewMode: React.FC = () => {
       // Connect Transcript Service
       const connectTranscript = service1.connect({
         onTranscript: (text, isFinal) => {
-          if (isFinal) {
-            addLog(`Transcript (final): ${text.substring(0, 50)}...`, LogLevel.SUCCESS);
-            // This service should primarily use onModelResponse due to the prompt
-          } else {
+          if (!isFinal) {
             setCurrentTranscript(text);
           }
         },
         onModelResponse: (text) => {
-           const match = text.match(/TRANSCRIPT:\s*(.*)/is);
-           if (match && match[1]) {
-             const transcriptText = match[1].trim();
-             setTranscript(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: transcriptText }]);
-             addLog(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
+           try {
+             // 1. Clean the text: Sometimes the AI wraps JSON in markdown.
+             const cleanText = text.replace(/```json|```/g, '').trim();
+             
+             // 2. Parse the JSON string into a JavaScript object.
+             const parsed = JSON.parse(cleanText);
+             
+             // 3. Safely access the 'transcript' property and update the state.
+             if (parsed.transcript) {
+               const transcriptText = parsed.transcript;
+               setTranscript(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: transcriptText }]);
+               addLog(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
+             }
+           } catch (e) {
+             // 4. If parsing fails, log an error to help with debugging.
+             addLog(`Failed to parse JSON from transcript service: ${text}`, LogLevel.ERROR);
            }
            setCurrentTranscript('');
         },
@@ -125,17 +134,30 @@ const InterviewMode: React.FC = () => {
       
       // Connect Reply Service
       const connectReply = service2.connect({
-        onTranscript: () => {}, // Not used by this service
+        onTranscript: () => {},
         onPartialResponse: (textChunk) => {
-          setCurrentReply(prev => prev + textChunk);
+          // This now shows a placeholder "..." instead of the raw JSON chunks.
+          setCurrentReply(prev => (prev === '' ? '...' : prev));
         },
         onModelResponse: (text) => {
-          const match = text.match(/REPLY:\s*(.*)/is);
-          if (match && match[1]) {
-            const replyText = match[1].trim();
-            setReplies(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: replyText }]);
-            addLog(`Parsed reply: ${replyText.substring(0,30)}...`, LogLevel.SUCCESS);
+          try {
+            // 1. Clean the text.
+            const cleanText = text.replace(/```json|```/g, '').trim();
+            
+            // 2. Parse the JSON.
+            const parsed = JSON.parse(cleanText);
+            
+            // 3. Access the 'reply' property and update state.
+            if (parsed.reply) {
+              const replyText = parsed.reply;
+              setReplies(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: replyText }]);
+              addLog(`Parsed reply: ${replyText.substring(0,30)}...`, LogLevel.SUCCESS);
+            }
+          } catch (e) {
+            // 4. Log parsing errors.
+            addLog(`Failed to parse JSON from reply service: ${text}`, LogLevel.ERROR);
           }
+          // This clears the "..." placeholder once the final reply is ready.
           setCurrentReply('');
         },
         onError: (e) => { setError(`Reply Service Error: ${e}`); setStatus(AppStatus.ERROR); cleanup(); },
