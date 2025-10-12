@@ -4,100 +4,76 @@ import Controls from './Controls';
 import LiveApiService from '../services/liveApiService';
 import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
 
-interface InterviewModeProps {
-  // Props will be added later when wiring to Gemini
-}
+// Configuration for the two sessions
+const TRANSCRIPT_PROMPT = `You are transcribing audio from an interview. 
+Respond ONLY in the following format:
+
+TRANSCRIPT:[exact words spoken by interviewer]`;
+
+const REPLY_PROMPT = `You are interviewing for a software engineer position at a software engineering company.
+Respond ONLY in the following format:
+
+REPLY:
+[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]`;
 
 const STREAMING_CONFIG = {
-  videoFrameRate: 1, // 1 FPS for video
+  videoFrameRate: 1,
   audioChunkMs: 100,
-  systemInstruction: `You are a interviewing for a software engineer position at a company.
-
-IMPORTANT INSTRUCTIONS:
-1. Always transcribe what you heard first, then provide your copilot assistance.
-2. When you detect the interviewer has finished speaking (turn complete), respond ONLY IN THE FOLLOWING FORMAT:
-
-TRANSCRIPT: 
-(newline)[exact words spoken by interviewer]
-
-(newline)REPLY: 
-(newline)[Your reponse to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]
-`,
 };
 
-const InterviewMode: React.FC<InterviewModeProps> = () => {
+const InterviewMode: React.FC = () => {
   const [replies, setReplies] = React.useState<any[]>([]);
-  const [currentReply, setCurrentReply] = React.useState<string>(''); // Accumulates streaming response
+  const [currentReply, setCurrentReply] = React.useState<string>('');
   const [transcript, setTranscript] = React.useState<any[]>([]);
-  const [currentTranscript, setCurrentTranscript] = React.useState<string>(''); // Accumulates partial transcript
+  const [currentTranscript, setCurrentTranscript] = React.useState<string>('');
   const [status, setStatus] = React.useState<AppStatus>(AppStatus.IDLE);
   const [selectedMode, setSelectedMode] = React.useState<string>('Interview Mode');
   const [mediaStream, setMediaStream] = React.useState<MediaStream | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [liveApiService, setLiveApiService] = React.useState<LiveApiService | null>(null);
+  
+  // State for the two service instances
+  const [transcriptService, setTranscriptService] = React.useState<LiveApiService | null>(null);
+  const [replyService, setReplyService] = React.useState<LiveApiService | null>(null);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
   const streamingCaptureRef = React.useRef<ContinuousStreamingCapture | null>(null);
   const statusRef = React.useRef(status);
 
-  // Keep status ref updated
   React.useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
-  // Add log helper - now logs to console instead of UI
   const addLog = React.useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     const timestamp = new Date().toLocaleTimeString();
     const prefix = `[${timestamp}]`;
-    
     switch (level) {
-      case LogLevel.ERROR:
-        console.error(`${prefix} ❌ ${message}`);
-        break;
-      case LogLevel.WARN:
-        console.warn(`${prefix} ⚠️  ${message}`);
-        break;
-      case LogLevel.SUCCESS:
-        console.log(`%c${prefix} ✓ ${message}`, 'color: #4ade80');
-        break;
-      default:
-        console.log(`${prefix} ${message}`);
+      case LogLevel.ERROR: console.error(`${prefix} ❌ ${message}`); break;
+      case LogLevel.WARN: console.warn(`${prefix} ⚠️  ${message}`); break;
+      case LogLevel.SUCCESS: console.log(`%c${prefix} ✓ ${message}`, 'color: #4ade80'); break;
+      default: console.log(`${prefix} ${message}`);
     }
   }, []);
 
-
-
   const cleanup = React.useCallback(() => {
-    // Stop streaming capture
     if (streamingCaptureRef.current) {
       streamingCaptureRef.current.stop();
       streamingCaptureRef.current = null;
     }
+    
+    transcriptService?.disconnect();
+    replyService?.disconnect();
+    setTranscriptService(null);
+    setReplyService(null);
 
-    // Stop media recorder
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current = null;
-    }
-
-    // Disconnect Live API
-    if (liveApiService) {
-      liveApiService.disconnect();
-      setLiveApiService(null);
-    }
-
-    // Stop media stream
     if (mediaStream) {
       mediaStream.getTracks().forEach((track) => track.stop());
       setMediaStream(null);
     }
-  }, [mediaStream, liveApiService]);
+  }, [mediaStream, transcriptService, replyService]);
 
   const handleStart = async () => {
     addLog('Interview Mode: Start Analysis clicked');
-    
     if (!process.env.API_KEY) {
       const msg = "API_KEY environment variable not set.";
       addLog(msg, LogLevel.ERROR);
@@ -109,123 +85,74 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
     cleanup();
     setError(null);
     setReplies([]);
+    setCurrentReply('');
     setTranscript([]);
-    addLog('Initializing Live API session...');
+    setCurrentTranscript('');
+    addLog('Initializing dual-session Live API...');
     setStatus(AppStatus.CAPTURING);
 
     try {
-      addLog('Requesting screen capture permission...');
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
-
-      addLog('Screen capture permission granted.', LogLevel.SUCCESS);
-
-      // Check for audio
-      if (stream.getAudioTracks().length > 0) {
-        addLog('Audio track found in stream.', LogLevel.SUCCESS);
-      } else {
-        addLog('No audio track found in stream', LogLevel.WARN);
-      }
-
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       setMediaStream(stream);
       setStatus(AppStatus.CONNECTING);
 
-      // Create Live API service
-      addLog('Creating Live API service...');
-      const service = new LiveApiService(process.env.API_KEY, addLog);
+      // --- Create and Connect Both Services ---
+      const service1 = new LiveApiService(process.env.API_KEY, addLog);
+      const service2 = new LiveApiService(process.env.API_KEY, addLog);
 
-      // Connect to Live API
-      await service.connect({
+      // Connect Transcript Service
+      const connectTranscript = service1.connect({
         onTranscript: (text, isFinal) => {
           if (isFinal) {
-            addLog(`Transcript (final): ${text.substring(0, 50)}...`);
-            setTranscript(prev => [...prev, {
-              timestamp: new Date().toLocaleTimeString(),
-              text,
-            }]);
-            setCurrentTranscript(''); // Clear partial transcript
+            addLog(`Transcript (final): ${text.substring(0, 50)}...`, LogLevel.SUCCESS);
+            // This service should primarily use onModelResponse due to the prompt
           } else {
-            // Accumulate partial transcript
             setCurrentTranscript(text);
           }
         },
+        onModelResponse: (text) => {
+           const match = text.match(/TRANSCRIPT:\s*(.*)/is);
+           if (match && match[1]) {
+             const transcriptText = match[1].trim();
+             setTranscript(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: transcriptText }]);
+             addLog(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
+           }
+           setCurrentTranscript('');
+        },
+        onError: (e) => { setError(`Transcript Service Error: ${e}`); setStatus(AppStatus.ERROR); cleanup(); },
+        onClose: () => addLog('Transcript service closed.'),
+      }, TRANSCRIPT_PROMPT);
+      
+      // Connect Reply Service
+      const connectReply = service2.connect({
+        onTranscript: () => {}, // Not used by this service
         onPartialResponse: (textChunk) => {
-          // Accumulate streaming AI response
           setCurrentReply(prev => prev + textChunk);
         },
         onModelResponse: (text) => {
-          addLog(`Complete model response: ${text.substring(0, 50)}...`, LogLevel.SUCCESS);
-          
-          // Parse response to extract transcript and reply
-          const transcriptMatch = text.match(/TRANSCRIPT:\s*(.+?)(?=\n\s*REPLY:)/is);
-          const replyMatch = text.match(/REPLY:\s*(.+)/is);
-          
-          if (transcriptMatch && transcriptMatch[1]) {
-            const transcriptText = transcriptMatch[1].trim();
-            // Add transcript to interviewer transcript section
-            setTranscript(prev => [...prev, {
-              timestamp: new Date().toLocaleTimeString(),
-              text: transcriptText,
-            }]);
-            addLog(`Extracted transcript: ${transcriptText.substring(0, 30)}...`);
+          const match = text.match(/REPLY:\s*(.*)/is);
+          if (match && match[1]) {
+            const replyText = match[1].trim();
+            setReplies(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: replyText }]);
+            addLog(`Parsed reply: ${replyText.substring(0,30)}...`, LogLevel.SUCCESS);
           }
-          
-          if (replyMatch && replyMatch[1]) {
-            const aiReply = replyMatch[1].trim();
-            // Filter out responses with leaked labels
-            const hasLeakedLabels = /^(TRANSCRIPT|REPLY):/im.test(aiReply);
-            if (!hasLeakedLabels) {
-              // Add AI reply to replies section
-              setReplies(prev => [...prev, {
-                timestamp: new Date().toLocaleTimeString(),
-                text: aiReply,
-              }]);
-            }
-          } else if (!transcriptMatch) {
-            // No proper format found
-            setReplies(prev => [...prev, {
-              timestamp: new Date().toLocaleTimeString(),
-              text: "No reply found - model did not follow format",
-            }]);
-          }
-          
-          setCurrentReply(''); // Clear for next response
+          setCurrentReply('');
         },
-        onError: (e) => {
-          setError(`Live API Error: ${e}`);
-          addLog(`Live API Error: ${e}`, LogLevel.ERROR);
-          setStatus(AppStatus.ERROR);
-          cleanup();
-        },
-        onClose: (reason) => {
-          if (statusRef.current !== AppStatus.STOPPING && statusRef.current !== AppStatus.IDLE) {
-            const msg = `Live API closed unexpectedly: ${reason || 'Unknown reason'}`;
-            addLog(msg, LogLevel.ERROR);
-            setError(msg);
-            setStatus(AppStatus.IDLE);
-            cleanup();
-          }
-        },
-        onReconnecting: () => {
-          addLog('Connection lost. Attempting to reconnect...', LogLevel.WARN);
-          setStatus(AppStatus.CONNECTING);
-        },
-      }, STREAMING_CONFIG.systemInstruction);
+        onError: (e) => { setError(`Reply Service Error: ${e}`); setStatus(AppStatus.ERROR); cleanup(); },
+        onClose: () => addLog('Reply service closed.'),
+      }, REPLY_PROMPT);
 
-      addLog('Live API connection established.', LogLevel.SUCCESS);
-      setLiveApiService(service);
+      await Promise.all([connectTranscript, connectReply]);
+
+      addLog('Both API services connected successfully.', LogLevel.SUCCESS);
+      setTranscriptService(service1);
+      setReplyService(service2);
       setStatus(AppStatus.ANALYZING);
 
     } catch (err) {
-      const message = err instanceof Error ? err.message : "An unknown error occurred.";
+      const message = err instanceof Error ? err.message : "Unknown error.";
       addLog(`Failed to start session: ${message}`, LogLevel.ERROR);
-      if (message.includes('Permission denied')) {
-        setError('Screen share permission was denied. Please allow screen sharing to start the analysis.');
-      } else {
-        setError(`Failed to start session: ${message}`);
-      }
+      setError(`Failed to start session: ${message}`);
       setStatus(AppStatus.ERROR);
       cleanup();
     }
@@ -238,104 +165,55 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
     setStatus(AppStatus.IDLE);
     addLog('Analysis stopped', LogLevel.SUCCESS);
   };
-
-  // Set video source when mediaStream changes
+  
+  // Connect video source when mediaStream changes
   React.useEffect(() => {
     if (mediaStream && videoRef.current) {
       videoRef.current.srcObject = mediaStream;
-      addLog('Video stream connected to preview', LogLevel.SUCCESS);
     }
-  }, [mediaStream, addLog]);
+  }, [mediaStream]);
 
-  // Initialize streaming capture when video is ready and Live API is connected
+  // Initialize streaming when services and video are ready
   React.useEffect(() => {
     const video = videoRef.current;
-    if (!video || !mediaStream || !liveApiService) return;
+    if (!video || !mediaStream || !transcriptService || !replyService) return;
 
     let hasStarted = false;
-
     const handleVideoReady = () => {
       if (hasStarted) return;
       hasStarted = true;
 
-      addLog('Video metadata loaded. Initializing continuous streaming...', LogLevel.SUCCESS);
-
-      // Create streaming capture instance
-      const streamingCapture = new ContinuousStreamingCapture(
+      addLog('Video ready. Initializing continuous streaming...', LogLevel.SUCCESS);
+      const capture = new ContinuousStreamingCapture(
         STREAMING_CONFIG,
         {
-          onTranscript: (text, isFinal) => {
-            if (isFinal) {
-              setTranscript(prev => [...prev, {
-                timestamp: new Date().toLocaleTimeString(),
-                text,
-              }]);
-            }
-          },
-          onModelResponse: (text) => {
-            setReplies(prev => [...prev, {
-              timestamp: new Date().toLocaleTimeString(),
-              text,
-            }]);
-          },
-          onError: (error) => {
-            setError(`Streaming Error: ${error}`);
-            setStatus(AppStatus.ERROR);
-          },
-          onStatusChange: (newStatus) => {
-            setStatus(newStatus);
-          },
+          onError: (error) => { setError(`Streaming Error: ${error}`); setStatus(AppStatus.ERROR); },
+          onStatusChange: (newStatus) => setStatus(newStatus),
         },
         addLog,
-        {
-          videoRef,
-          canvasRef,
-        }
+        { videoRef, canvasRef }
       );
+      
+      // Set both services and the media stream
+      capture.setApiServices({ transcriptService, replyService });
+      capture.setMediaStream(mediaStream);
+      streamingCaptureRef.current = capture;
 
-      streamingCapture.setLiveApiService(liveApiService);
-      streamingCapture.setMediaStream(mediaStream);
-      streamingCaptureRef.current = streamingCapture;
-
-      // Start streaming
-      streamingCapture.start();
-      addLog('Continuous audio/video streaming started!', LogLevel.SUCCESS);
+      capture.start();
+      addLog('Continuous streaming started for both sessions!', LogLevel.SUCCESS);
     };
 
     video.addEventListener('loadedmetadata', handleVideoReady);
-    
-    // If metadata already loaded, trigger immediately
-    if (video.readyState >= 1) {
-      handleVideoReady();
-    }
+    if (video.readyState >= 1) handleVideoReady();
 
-    return () => {
-      video.removeEventListener('loadedmetadata', handleVideoReady);
-    };
-  }, [mediaStream, liveApiService, addLog]);
+    return () => video.removeEventListener('loadedmetadata', handleVideoReady);
+  }, [mediaStream, transcriptService, replyService, addLog]);
 
-  // Cleanup on unmount ONLY
-  React.useEffect(() => {
-    return () => {
-      if (streamingCaptureRef.current) {
-        streamingCaptureRef.current.stop();
-      }
-      if (liveApiService) {
-        liveApiService.disconnect();
-      }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, []); // Empty deps - only on unmount
-
-
-
+  // Main component render (no changes needed here, but included for completeness)
   return (
     <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
-      {/* Left Side - Control Panel and Screen Preview */}
+      {/* Left Side */}
       <div className="lg:w-1/2 flex flex-col gap-4">
-        {/* Control Panel */}
         <Controls 
           status={status} 
           onStart={handleStart} 
@@ -343,108 +221,58 @@ const InterviewMode: React.FC<InterviewModeProps> = () => {
           selectedMode={selectedMode}
           onModeChange={setSelectedMode}
         />
-
-        {/* Error Display */}
         {error && (
           <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded-lg">
             <p className="font-bold">An Error Occurred</p>
             <p className="text-sm">{error}</p>
           </div>
         )}
-
-        {/* Screen Capture Preview - Smaller */}
         <div className="bg-base-200 border border-base-300 rounded-lg shadow-md overflow-hidden" style={{ height: '250px' }}>
           {mediaStream ? (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-contain bg-black"
-            />
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain bg-black" />
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center text-center p-6">
-              <div className="text-base-300 mb-4">
-                <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                </svg>
-              </div>
               <h3 className="text-xl font-bold text-content-100 mb-2">Screen Capture Preview</h3>
-              <p className="text-sm text-content-200">Your selected screen will appear here once you start the analysis.</p>
             </div>
           )}
         </div>
-
-        {/* Transcript Section */}
         <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ height: '300px' }}>
-          <div className="p-4 border-b border-base-300">
-            <h3 className="text-lg font-bold text-content-100">Interviewer Transcript</h3>
-          </div>
+          <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">Interviewer Transcript</h3></div>
           <div className="flex-grow p-6 overflow-y-auto">
-            {transcript.length === 0 && !currentTranscript ? (
-              <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="text-base-300 mb-4">
-                  <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                  </svg>
+            <div className="space-y-4">
+              {transcript.map((item, index) => (
+                <div key={index} className="bg-base-300 p-4 rounded-lg">
+                  <div className="text-xs text-content-200 mb-2">{item.timestamp}</div>
+                  <div>{item.text}</div>
                 </div>
-                <p className="text-content-200">Transcript will appear here</p>
-                <p className="text-sm text-content-200 mt-1">Start the analysis to see the conversation transcript.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {transcript.map((item: any, index: number) => (
-                  <div key={index} className="bg-base-300 p-4 rounded-lg">
-                    <div className="text-xs text-content-200 mb-2">{item.timestamp}</div>
-                    <div className="text-content-100">{item.text}</div>
-                  </div>
-                ))}
-                {/* Show current streaming transcript */}
-                {currentTranscript && (
-                  <div className="bg-base-300/50 p-4 rounded-lg border-l-4 border-blue-500">
-                    <div className="text-xs text-content-200 mb-2">Live...</div>
-                    <div className="text-content-100 italic">{currentTranscript}</div>
-                  </div>
-                )}
-              </div>
-            )}
+              ))}
+              {currentTranscript && (
+                <div className="bg-base-300/50 p-4 rounded-lg italic text-content-200">{currentTranscript}</div>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Right Side - AI Reply */}
+      {/* Right Side */}
       <div className="lg:w-1/2 flex flex-col gap-4">
-        {/* AI Replies Section - Full height */}
         <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col flex-grow">
-          <div className="p-4 border-b border-base-300">
-            <h3 className="text-lg font-bold text-content-100">AI-Generated Replies</h3>
-          </div>
+          <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">AI-Generated Replies</h3></div>
           <div className="flex-grow p-6 overflow-y-auto">
-            {replies.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="text-base-300 mb-4">
-                  <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                  </svg>
-                </div>
-                <h4 className="text-xl font-bold text-content-100 mb-2">Replies will appear here</h4>
-                <p className="text-sm text-content-200">AI responses will be displayed as the conversation progresses.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {replies.map((reply: any, index: number) => (
+             <div className="space-y-4">
+                {replies.map((reply, index) => (
                   <div key={index} className="border-l-4 border-brand-secondary pl-4 py-2">
                     <div className="text-xs text-content-200 mb-2">{reply.timestamp}</div>
-                    <div className="text-content-100">{reply.text}</div>
+                    <div>{reply.text}</div>
                   </div>
                 ))}
+                {currentReply && (
+                  <div className="border-l-4 border-brand-secondary/50 pl-4 py-2 italic text-content-200">{currentReply}</div>
+                )}
               </div>
-            )}
           </div>
         </div>
       </div>
-
-      {/* Hidden canvas for video frame capture */}
       <canvas ref={canvasRef} className="hidden"></canvas>
     </main>
   );

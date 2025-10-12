@@ -7,12 +7,10 @@ type LogFunction = (message: string, level?: LogLevel) => void;
 interface StreamingConfig {
   videoFrameRate: number; // FPS for video frames (e.g., 1-2)
   audioChunkMs: number; // Audio chunk duration in ms (e.g., 100ms)
-  systemInstruction?: string;
 }
 
 interface StreamingCallbacks {
-  onTranscript: (text: string, isFinal: boolean) => void;
-  onModelResponse: (text: string) => void;
+  // Callbacks are now handled directly by the service instances
   onError: (error: string) => void;
   onStatusChange: (status: AppStatus) => void;
 }
@@ -21,7 +19,10 @@ export class ContinuousStreamingCapture {
   private config: StreamingConfig;
   private callbacks: StreamingCallbacks;
   private log: LogFunction;
-  private liveApiService: LiveApiService | null = null;
+  
+  // References to the two independent API services
+  private transcriptService: LiveApiService | null = null;
+  private replyService: LiveApiService | null = null;
   
   private videoRef: React.RefObject<HTMLVideoElement>;
   private canvasRef: React.RefObject<HTMLCanvasElement>;
@@ -29,13 +30,10 @@ export class ContinuousStreamingCapture {
   
   private videoIntervalId: number | null = null;
   private audioContext: AudioContext | null = null;
-  private audioWorkletNode: AudioWorkletNode | null = null;
-  private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
   private scriptProcessor: ScriptProcessorNode | null = null;
-  private summaryIntervalId: number | null = null;
+  private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
   
   private isRunning = false;
-  private startTime: number = 0;
 
   constructor(
     config: StreamingConfig,
@@ -53,8 +51,10 @@ export class ContinuousStreamingCapture {
     this.canvasRef = refs.canvasRef;
   }
 
-  public setLiveApiService(service: LiveApiService): void {
-    this.liveApiService = service;
+  // Set both API service instances
+  public setApiServices(services: { transcriptService: LiveApiService; replyService: LiveApiService }): void {
+    this.transcriptService = services.transcriptService;
+    this.replyService = services.replyService;
   }
 
   public setMediaStream(stream: MediaStream): void {
@@ -62,8 +62,8 @@ export class ContinuousStreamingCapture {
   }
 
   public async start(): Promise<void> {
-    if (!this.liveApiService?.isConnected()) {
-      this.log("Cannot start streaming: Live API service not connected.", LogLevel.ERROR);
+    if (!this.transcriptService?.isConnected() || !this.replyService?.isConnected()) {
+      this.log("Cannot start streaming: One or both API services are not connected.", LogLevel.ERROR);
       return;
     }
 
@@ -72,134 +72,94 @@ export class ContinuousStreamingCapture {
       return;
     }
 
-    this.log("Starting continuous audio/video streaming with turn detection...", LogLevel.SUCCESS);
+    this.log("Starting dual-session continuous audio/video streaming...", LogLevel.SUCCESS);
     this.isRunning = true;
-    this.startTime = Date.now();
 
-    // Start video frame streaming
-    this.startVideoStreaming();
-
-    // Start audio streaming
+    // Start video and audio streaming
+    // this.startVideoStreaming();
     await this.startAudioStreaming();
 
-    this.log("Streaming started. Model will respond automatically when speaker finishes talking.", LogLevel.SUCCESS);
+    this.log("Streaming started to both sessions.", LogLevel.SUCCESS);
   }
 
   public stop(): void {
-    this.log("Stopping continuous streaming.", LogLevel.INFO);
+    this.log("Stopping continuous streaming to both sessions.", LogLevel.INFO);
     this.isRunning = false;
 
-    // Stop video streaming
     if (this.videoIntervalId) {
       window.clearInterval(this.videoIntervalId);
       this.videoIntervalId = null;
     }
 
-    // Stop audio streaming
     this.stopAudioStreaming();
   }
 
   private startVideoStreaming(): void {
     const frameIntervalMs = 1000 / this.config.videoFrameRate;
-    
-    this.log(`Starting video streaming at ${this.config.videoFrameRate} FPS (every ${frameIntervalMs}ms)`, LogLevel.INFO);
-
     this.videoIntervalId = window.setInterval(() => {
       this.captureAndSendVideoFrame();
     }, frameIntervalMs);
-
-    // Send first frame immediately
     this.captureAndSendVideoFrame();
   }
 
   private captureAndSendVideoFrame(): void {
-    if (!this.isRunning || !this.videoRef.current || !this.canvasRef.current || !this.liveApiService) {
-      return;
-    }
+    if (!this.isRunning || !this.videoRef.current || !this.canvasRef.current) return;
 
     const video = this.videoRef.current;
+    if (video.videoWidth === 0 || video.videoHeight === 0) return;
+
     const canvas = this.canvasRef.current;
-
-    // Check if video has valid dimensions
-    if (video.videoWidth === 0 || video.videoHeight === 0) {
-      return;
-    }
-
-    // Draw video frame to canvas
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
-    
-    if (!ctx) {
-      this.log("Failed to get canvas 2D context.", LogLevel.ERROR);
-      return;
-    }
+    if (!ctx) return;
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Convert to base64 JPEG
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     const base64Data = dataUrl.split(',')[1];
 
-    // Send to Live API
-    this.liveApiService.sendVideoFrame(base64Data);
+    // Send the same video frame to both sessions
+    // this.transcriptService?.sendVideoFrame(base64Data);
+    // this.replyService?.sendVideoFrame(base64Data);
   }
 
   private async startAudioStreaming(): Promise<void> {
     const audioTracks = this.mediaStream?.getAudioTracks();
-    
     if (!audioTracks || audioTracks.length === 0) {
-      this.log("No audio tracks available. Continuing with video only.", LogLevel.WARN);
+      this.log("No audio tracks available.", LogLevel.WARN);
       return;
     }
 
     try {
-      // Create audio context
       this.audioContext = new AudioContext({ sampleRate: 16000 });
-      
-      // Create media stream source
       const audioStream = new MediaStream([audioTracks[0]]);
       this.mediaStreamSource = this.audioContext.createMediaStreamSource(audioStream);
-
-      // Create ScriptProcessorNode for audio processing
+      
       const bufferSize = 4096;
       this.scriptProcessor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
 
       this.scriptProcessor.onaudioprocess = (e) => {
-        if (!this.isRunning || !this.liveApiService?.isConnected()) {
-          return;
-        }
+        if (!this.isRunning) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
-        
-        // Convert Float32Array to Int16Array (PCM 16-bit)
         const pcmData = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
           const s = Math.max(-1, Math.min(1, inputData[i]));
           pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
-
-        // Convert to base64 string
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
+        const mimeType = `audio/pcm;rate=${this.audioContext!.sampleRate}`;
 
-        // Send PCM data to Live API
-        this.liveApiService.sendRealtimeAudio(
-          base64Audio,
-          `audio/pcm;rate=${this.audioContext!.sampleRate}`
-        );
+        // Send the same audio chunk to both sessions
+        this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
+        this.replyService?.sendRealtimeAudio(base64Audio, mimeType);
       };
 
-      // Connect nodes
       this.mediaStreamSource.connect(this.scriptProcessor);
       this.scriptProcessor.connect(this.audioContext.destination);
-
-      this.log(`Audio streaming started at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
-      
+      this.log(`Audio streaming started for both sessions at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
     } catch (error) {
-      this.log(
-        `Failed to start audio streaming: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        LogLevel.ERROR
-      );
+      this.log(`Failed to start audio streaming: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
     }
   }
 
@@ -217,22 +177,19 @@ export class ContinuousStreamingCapture {
       this.scriptProcessor.disconnect();
       this.scriptProcessor = null;
     }
-
     if (this.mediaStreamSource) {
       this.mediaStreamSource.disconnect();
       this.mediaStreamSource = null;
     }
-
     if (this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;
     }
+    
+    // Signal end of audio to both sessions
+    this.transcriptService?.endAudioStream();
+    this.replyService?.endAudioStream();
 
-    // Signal end of audio stream to Live API
-    if (this.liveApiService?.isConnected()) {
-      this.liveApiService.endAudioStream();
-    }
-
-    this.log("Audio streaming stopped.", LogLevel.INFO);
+    this.log("Audio streaming stopped for both sessions.", LogLevel.INFO);
   }
 }

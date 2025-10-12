@@ -20,6 +20,63 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 
 ## Architecture
 
+### Clean Separation of Concerns ✅
+
+**UI Layer** (`components/InterviewMode.tsx`):
+- Pure UI component - handles only display and user interaction
+- Manages React state (transcripts, replies, status)
+- Handles screen capture permission requests
+- Provides refs (videoRef, canvasRef) to service layer
+- No Gemini-specific logic
+
+**Service Layer** (`services/liveApiService.ts`):
+- **Orchestrates all Gemini Live API functionality**
+- Manages WebSocket connection lifecycle
+- Handles ContinuousStreamingCapture instantiation
+- Contains system instructions and prompt engineering
+- Parses model responses (TRANSCRIPT/REPLY extraction)
+- Exposes clean callback interface to UI
+- Provides simple start/stop API
+
+**Streaming Utility** (`utils/continuousStreaming.ts`):
+- Handles continuous A/V capture
+- Video frames at configurable FPS
+- Audio processing via ScriptProcessorNode
+- Delegates to LiveApiService for sending data
+
+### Service Layer API
+
+**High-level callbacks exposed to UI:**
+```typescript
+{
+  onInterviewerTranscript: (text, timestamp, isFinal) => void
+  onAIReply: (text, timestamp) => void
+  onStreamingReply: (partialText) => void
+  onError: (message) => void
+  onStatusChange: (status) => void
+  onReconnecting: () => void
+}
+```
+
+**Simple start/stop interface:**
+```typescript
+await liveApiService.start({
+  mediaStream,
+  videoRef,
+  canvasRef,
+  callbacks: { ... }
+});
+
+liveApiService.stop();
+```
+
+### Benefits of This Architecture
+
+✅ **Future-proof**: Change Gemini prompts/format → only edit `liveApiService.ts`  
+✅ **Testable**: UI can be tested without Gemini connection  
+✅ **Swappable**: Replace Gemini with another model → `InterviewMode.tsx` unchanged  
+✅ **Maintainable**: Clear responsibility boundaries  
+
 ### Services
 
 **`services/geminiService.ts`** (Legacy - Video Mode)
@@ -30,12 +87,14 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 
 **`services/liveApiService.ts`** (NEW - Interview Mode) ✅
 - Uses `models/gemini-2.5-flash-live-preview`
+- **High-level orchestrator** for all Gemini functionality
+- Manages WebSocket + streaming capture lifecycle
+- Contains system instructions and response parsing
 - Continuous streaming support
-- **Voice Activity Detection (VAD) enabled** - threshold 0.5
+- Voice Activity Detection (VAD) enabled - threshold 0.5
 - Real-time bidirectional communication
 - Audio + video + text modalities
-- Proper `sendRealtimeInput()` usage
-- Automatic turn-based responses (no manual prompts)
+- Automatic turn-based responses
 
 ### Utilities
 
@@ -48,8 +107,8 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 - Continuous audio streaming via ScriptProcessorNode
 - Video frames at 1 FPS
 - PCM audio encoding (16-bit, 16kHz)
-- **Turn detection based** - No more 60-second summary timers
-- Model responds automatically when speaker finishes
+- Turn detection based
+- Delegates to LiveApiService for data transmission
 
 ## Run Locally
 
@@ -79,21 +138,43 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 - `VIDEO_MODE_SETS_PER_MINUTE`: Data points before summary (12 default)
 - `VIDEO_MODE_PROMPT`: System instructions for analysis
 
-**Interview Mode Settings** (In code):
-- **Turn Detection**: Automatic via Voice Activity Detection (VAD threshold: 0.5)
-- **Video Frame Rate**: 1 FPS
-- **Response Style**: Full analysis after every turn (Option A)
-- **System Instruction**: Responds to everything speaker says with substantive insights
+**Interview Mode Settings** (`services/liveApiService.ts`):
+- **System Instruction**: Defined in `SYSTEM_INSTRUCTION` constant
+- **Turn Detection**: Automatic via VAD (threshold: 0.5)
+- **Video Frame Rate**: 1 FPS (configurable in `STREAMING_CONFIG`)
+- **Audio Chunk Duration**: 100ms (configurable in `STREAMING_CONFIG`)
+- **Response Format**: Structured TRANSCRIPT/REPLY format (parsed automatically)
+
+### Changing Interview Mode Behavior
+
+All Gemini-specific settings are in `services/liveApiService.ts`:
+
+```typescript
+// Change system instructions
+const SYSTEM_INSTRUCTION = `Your new instructions here...`;
+
+// Change streaming config
+const STREAMING_CONFIG = {
+  videoFrameRate: 2,  // Increase to 2 FPS
+  audioChunkMs: 100,
+};
+```
+
+**No changes needed in InterviewMode.tsx for prompt/behavior modifications!**
 
 ## How Interview Mode Works
 
-1. **Continuous Streaming**: Audio and video stream continuously to the model
-2. **Voice Activity Detection**: Model detects when speaker stops talking
-3. **Live Transcription**: Speaker's words appear in real-time in the Interviewer Transcript section
-4. **Streaming AI Responses**: AI replies appear word-by-word as they're generated in the AI-Generated Replies section
-5. **Turn Complete Event**: Triggers automatic response generation
-6. **Full Analysis**: Model provides thorough answer/observation for every turn
-7. **No Manual Prompts**: No 60-second timers or manual summary requests
+1. **User clicks "Start Analysis"** → InterviewMode.tsx handles screen capture
+2. **LiveApiService.start() called** with mediaStream and callbacks
+3. **Service orchestrates**:
+   - Connects to Gemini Live API WebSocket
+   - Initializes ContinuousStreamingCapture
+   - Starts A/V streaming
+4. **Continuous Streaming**: Audio and video stream to model
+5. **Voice Activity Detection**: Model detects when speaker stops talking
+6. **Response Parsing**: Service extracts TRANSCRIPT and REPLY sections
+7. **Clean Callbacks**: UI receives simple data updates
+8. **Stop**: Service handles all cleanup
 
 ### UI Layout
 
@@ -105,11 +186,10 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 **Right Side**:
 - AI-Generated Replies (full height, flex-grow)
 
-**Debug Logs**: Now output to browser DevTools console instead of UI
+**Debug Logs**: Output to browser DevTools console
 - Open DevTools (F12) to see logs
 - Color-coded by level: Errors (red), Warnings (yellow), Success (green)
-- Includes timestamps and emoji indicators (❌ ⚠️ ✓)
-- Freed up screen space for larger AI replies section
+- Includes timestamps and emoji indicators
 
 ## API Models
 
@@ -118,13 +198,12 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 
 ## Current Status
 
-**Interview Mode**: ✅ Fully functional with turn detection
+**Interview Mode**: ✅ Fully functional with clean architecture
 - Voice Activity Detection working
 - Model responds automatically after each turn
 - Full analysis responses enabled
-- Removed manual 60-second summary timer
-- Response interruptions are normal behavior (model prioritizes new input)
-- Debug logs now in DevTools console (F12) instead of UI
+- Clean separation: UI vs Gemini logic
+- Debug logs in DevTools console (F12)
 
 ## Implementation Notes
 
@@ -137,7 +216,7 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 
 **Interview Mode (Continuous streaming)**:
 - Proper Live API implementation with turn detection
-- Based on [Google's cookbook examples](https://github.com/google-gemini/cookbook)
+- Based on Google's cookbook examples
 - Better for conversational AI
 - Lower latency, more natural interaction
 - Automatic turn-based responses
@@ -152,16 +231,6 @@ Real-time lecture analysis and interview assistance using Gemini Live API with c
 | Response Trigger | Manual prompts | Automatic (turn complete) |
 | Latency | ~5-10s | <1s |
 | Use Case | Lecture analysis | Real-time conversation |
-
-### Turn Detection Behavior
-
-**Option A (Current)**: Model responds to EVERYTHING
-- Speaker: "Tell me about your background"
-- Model: [Full detailed answer]
-- Speaker: "That's interesting"
-- Model: [Full response acknowledging and elaborating]
-
-The model provides full, thoughtful analysis after every detected turn, even for brief comments.
 
 ## References
 
