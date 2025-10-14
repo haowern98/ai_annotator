@@ -1,26 +1,7 @@
 import React from 'react';
-import { AppStatus, LogEntry, LogLevel } from '../types';
+import { AppStatus, LogLevel } from '../types';
 import Controls from './Controls';
-import LiveApiService from '../services/liveApiService';
-import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
-
-// Configuration for the two sessions
-const TRANSCRIPT_PROMPT = `You are transcribing audio from an interview. 
-Respond ONLY with a valid JSON object in the following format:
-{
-  "transcript": "[exact words spoken by interviewer]"
-}`;
-
-const REPLY_PROMPT = `You are interviewing for a software engineer position at a software engineering company.
-Respond ONLY with a valid JSON object in the following format:
-{
-  "reply": "[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]"
-}`;
-
-const STREAMING_CONFIG = {
-  videoFrameRate: 1,
-  audioChunkMs: 100,
-};
+import { DualGeminiSessionManager } from '../services/dualGeminiSessionManager';
 
 const InterviewMode: React.FC = () => {
   const [replies, setReplies] = React.useState<any[]>([]);
@@ -31,23 +12,10 @@ const InterviewMode: React.FC = () => {
   const [selectedMode, setSelectedMode] = React.useState<string>('Interview Mode');
   const [mediaStream, setMediaStream] = React.useState<MediaStream | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  
-  // State for the two service instances
-  const [transcriptService, setTranscriptService] = React.useState<LiveApiService | null>(null);
-  const [replyService, setReplyService] = React.useState<LiveApiService | null>(null);
-  
-  // Queue system for managing transcript-to-reply flow
-  const [transcriptQueue, setTranscriptQueue] = React.useState<string[]>([]);
-  const [isReplyGenerating, setIsReplyGenerating] = React.useState<boolean>(false);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const streamingCaptureRef = React.useRef<ContinuousStreamingCapture | null>(null);
-  const statusRef = React.useRef(status);
-
-  React.useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
+  const sessionManagerRef = React.useRef<DualGeminiSessionManager | null>(null);
 
   const addLog = React.useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -60,24 +28,52 @@ const InterviewMode: React.FC = () => {
     }
   }, []);
 
-  const cleanup = React.useCallback(() => {
-    if (streamingCaptureRef.current) {
-      streamingCaptureRef.current.stop();
-      streamingCaptureRef.current = null;
-    }
-    
-    transcriptService?.disconnect();
-    replyService?.disconnect();
-    setTranscriptService(null);
-    setReplyService(null);
+  // Initialize session manager
+  React.useEffect(() => {
+    sessionManagerRef.current = new DualGeminiSessionManager(
+      {
+        onStatusChange: (newStatus) => setStatus(newStatus),
+        onError: (errorMsg) => setError(errorMsg),
+        onTranscriptUpdate: (transcripts, current) => {
+          setTranscript(transcripts);
+          setCurrentTranscript(current);
+        },
+        onReplyUpdate: (replyList, current) => {
+          setReplies(replyList);
+          setCurrentReply(current);
+        },
+      },
+      addLog,
+      { videoRef, canvasRef }
+    );
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((track) => track.stop());
-      setMediaStream(null);
-    }
-  }, [mediaStream, transcriptService, replyService]);
+    return () => {
+      sessionManagerRef.current?.stop();
+    };
+  }, [addLog]);
 
-   const handleStart = async () => {
+  // Update media stream from session manager
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      if (sessionManagerRef.current) {
+        const stream = sessionManagerRef.current.getMediaStream();
+        if (stream !== mediaStream) {
+          setMediaStream(stream);
+        }
+      }
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [mediaStream]);
+
+  // Connect video source when mediaStream changes
+  React.useEffect(() => {
+    if (mediaStream && videoRef.current) {
+      videoRef.current.srcObject = mediaStream;
+    }
+  }, [mediaStream]);
+
+  const handleStart = async () => {
     addLog('Interview Mode: Start Analysis clicked');
     if (!process.env.API_KEY) {
       const msg = "API_KEY environment variable not set.";
@@ -87,181 +83,20 @@ const InterviewMode: React.FC = () => {
       return;
     }
 
-    cleanup();
     setError(null);
     setReplies([]);
     setCurrentReply('');
     setTranscript([]);
     setCurrentTranscript('');
-    addLog('Initializing dual-session Live API...');
-    setStatus(AppStatus.CAPTURING);
 
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-      setMediaStream(stream);
-      setStatus(AppStatus.CONNECTING);
-
-      // --- Create and Connect Both Services ---
-      const service1 = new LiveApiService(process.env.API_KEY, addLog);
-      const service2 = new LiveApiService(process.env.API_KEY, addLog);
-
-      // Connect Transcript Service
-      const connectTranscript = service1.connect({
-        onTranscript: (text, isFinal) => {
-          if (!isFinal) {
-            setCurrentTranscript(text);
-          }
-        },
-        onModelResponse: (text) => {
-           try {
-             // 1. Clean the text: Sometimes the AI wraps JSON in markdown.
-             const cleanText = text.replace(/```json|```/g, '').trim();
-             
-             // 2. Parse the JSON string into a JavaScript object.
-             const parsed = JSON.parse(cleanText);
-             
-             // 3. Safely access the 'transcript' property and update the state.
-             if (parsed.transcript) {
-               const transcriptText = parsed.transcript;
-               setTranscript(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: transcriptText }]);
-               addLog(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
-               
-               // Add transcript to queue for reply service
-               setTranscriptQueue(prev => [...prev, transcriptText]);
-             }
-           } catch (e) {
-             // 4. If parsing fails, log an error to help with debugging.
-             addLog(`Failed to parse JSON from transcript service: ${text}`, LogLevel.ERROR);
-           }
-           setCurrentTranscript('');
-        },
-        onError: (e) => { setError(`Transcript Service Error: ${e}`); setStatus(AppStatus.ERROR); cleanup(); },
-        onClose: () => addLog('Transcript service closed.'),
-      }, TRANSCRIPT_PROMPT);
-      
-      // Connect Reply Service
-      const connectReply = service2.connect({
-        onTranscript: () => {},
-        onPartialResponse: (textChunk) => {
-          // This now shows a placeholder "..." instead of the raw JSON chunks.
-          setCurrentReply(prev => (prev === '' ? '...' : prev));
-          setIsReplyGenerating(true);
-        },
-        onModelResponse: (text) => {
-          try {
-            // 1. Clean the text.
-            const cleanText = text.replace(/```json|```/g, '').trim();
-            
-            // 2. Parse the JSON.
-            const parsed = JSON.parse(cleanText);
-            
-            // 3. Access the 'reply' property and update state.
-            if (parsed.reply) {
-              const replyText = parsed.reply;
-              setReplies(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: replyText }]);
-              addLog(`Parsed reply: ${replyText.substring(0,30)}...`, LogLevel.SUCCESS);
-            }
-          } catch (e) {
-            // 4. Log parsing errors.
-            addLog(`Failed to parse JSON from reply service: ${text}`, LogLevel.ERROR);
-          }
-          // This clears the "..." placeholder once the final reply is ready.
-          setCurrentReply('');
-          setIsReplyGenerating(false);
-        },
-        onError: (e) => { setError(`Reply Service Error: ${e}`); setStatus(AppStatus.ERROR); cleanup(); },
-        onClose: () => addLog('Reply service closed.'),
-      }, REPLY_PROMPT);
-
-      await Promise.all([connectTranscript, connectReply]);
-
-      addLog('Both API services connected successfully.', LogLevel.SUCCESS);
-      setTranscriptService(service1);
-      setReplyService(service2);
-      setStatus(AppStatus.ANALYZING);
-
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error.";
-      addLog(`Failed to start session: ${message}`, LogLevel.ERROR);
-      setError(`Failed to start session: ${message}`);
-      setStatus(AppStatus.ERROR);
-      cleanup();
-    }
+    await sessionManagerRef.current?.start(process.env.API_KEY);
   };
 
   const handleStop = () => {
     addLog('Interview Mode: Stop Analysis clicked');
-    setStatus(AppStatus.STOPPING);
-    cleanup();
-    setTranscriptQueue([]);
-    setIsReplyGenerating(false);
-    setStatus(AppStatus.IDLE);
-    addLog('Analysis stopped', LogLevel.SUCCESS);
+    sessionManagerRef.current?.stop();
   };
-  
-  // Connect video source when mediaStream changes
-  React.useEffect(() => {
-    if (mediaStream && videoRef.current) {
-      videoRef.current.srcObject = mediaStream;
-    }
-  }, [mediaStream]);
 
-  // Initialize streaming when services and video are ready
-  React.useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !mediaStream || !transcriptService || !replyService) return;
-
-    let hasStarted = false;
-    const handleVideoReady = () => {
-      if (hasStarted) return;
-      hasStarted = true;
-
-      addLog('Video ready. Initializing continuous streaming...', LogLevel.SUCCESS);
-      const capture = new ContinuousStreamingCapture(
-        STREAMING_CONFIG,
-        {
-          onError: (error) => { setError(`Streaming Error: ${error}`); setStatus(AppStatus.ERROR); },
-          onStatusChange: (newStatus) => setStatus(newStatus),
-        },
-        addLog,
-        { videoRef, canvasRef }
-      );
-      
-      // Set both services and the media stream
-      capture.setApiServices({ transcriptService, replyService });
-      capture.setMediaStream(mediaStream);
-      streamingCaptureRef.current = capture;
-
-      capture.start();
-      addLog('Continuous streaming started for both sessions!', LogLevel.SUCCESS);
-    };
-
-    video.addEventListener('loadedmetadata', handleVideoReady);
-    if (video.readyState >= 1) handleVideoReady();
-
-    return () => video.removeEventListener('loadedmetadata', handleVideoReady);
-  }, [mediaStream, transcriptService, replyService, addLog]);
-
-  // Process transcript queue and send to reply service
-  React.useEffect(() => {
-    if (!replyService || transcriptQueue.length === 0 || isReplyGenerating) {
-      return;
-    }
-
-    // Take the first transcript from queue
-    const nextTranscript = transcriptQueue[0];
-    
-    addLog(`Sending transcript to reply service: "${nextTranscript.substring(0, 50)}..."`);
-    
-    // Send transcript as text to reply service
-    replyService.sendText(`Interviewer said: "${nextTranscript}". Please provide your response.`);
-    
-    // Remove processed transcript from queue
-    setTranscriptQueue(prev => prev.slice(1));
-    
-  }, [transcriptQueue, isReplyGenerating, replyService, addLog]);
-
-  // Main component render (no changes needed here, but included for completeness)
   return (
     <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
       {/* Left Side */}
