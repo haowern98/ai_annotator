@@ -35,6 +35,10 @@ const InterviewMode: React.FC = () => {
   // State for the two service instances
   const [transcriptService, setTranscriptService] = React.useState<LiveApiService | null>(null);
   const [replyService, setReplyService] = React.useState<LiveApiService | null>(null);
+  
+  // Queue system for managing transcript-to-reply flow
+  const [transcriptQueue, setTranscriptQueue] = React.useState<string[]>([]);
+  const [isReplyGenerating, setIsReplyGenerating] = React.useState<boolean>(false);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -121,6 +125,9 @@ const InterviewMode: React.FC = () => {
                const transcriptText = parsed.transcript;
                setTranscript(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), text: transcriptText }]);
                addLog(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
+               
+               // Add transcript to queue for reply service
+               setTranscriptQueue(prev => [...prev, transcriptText]);
              }
            } catch (e) {
              // 4. If parsing fails, log an error to help with debugging.
@@ -138,6 +145,7 @@ const InterviewMode: React.FC = () => {
         onPartialResponse: (textChunk) => {
           // This now shows a placeholder "..." instead of the raw JSON chunks.
           setCurrentReply(prev => (prev === '' ? '...' : prev));
+          setIsReplyGenerating(true);
         },
         onModelResponse: (text) => {
           try {
@@ -159,6 +167,7 @@ const InterviewMode: React.FC = () => {
           }
           // This clears the "..." placeholder once the final reply is ready.
           setCurrentReply('');
+          setIsReplyGenerating(false);
         },
         onError: (e) => { setError(`Reply Service Error: ${e}`); setStatus(AppStatus.ERROR); cleanup(); },
         onClose: () => addLog('Reply service closed.'),
@@ -184,6 +193,8 @@ const InterviewMode: React.FC = () => {
     addLog('Interview Mode: Stop Analysis clicked');
     setStatus(AppStatus.STOPPING);
     cleanup();
+    setTranscriptQueue([]);
+    setIsReplyGenerating(false);
     setStatus(AppStatus.IDLE);
     addLog('Analysis stopped', LogLevel.SUCCESS);
   };
@@ -230,6 +241,25 @@ const InterviewMode: React.FC = () => {
 
     return () => video.removeEventListener('loadedmetadata', handleVideoReady);
   }, [mediaStream, transcriptService, replyService, addLog]);
+
+  // Process transcript queue and send to reply service
+  React.useEffect(() => {
+    if (!replyService || transcriptQueue.length === 0 || isReplyGenerating) {
+      return;
+    }
+
+    // Take the first transcript from queue
+    const nextTranscript = transcriptQueue[0];
+    
+    addLog(`Sending transcript to reply service: "${nextTranscript.substring(0, 50)}..."`);
+    
+    // Send transcript as text to reply service
+    replyService.sendText(`Interviewer said: "${nextTranscript}". Please provide your response.`);
+    
+    // Remove processed transcript from queue
+    setTranscriptQueue(prev => prev.slice(1));
+    
+  }, [transcriptQueue, isReplyGenerating, replyService, addLog]);
 
   // Main component render (no changes needed here, but included for completeness)
   return (

@@ -150,9 +150,8 @@ export class ContinuousStreamingCapture {
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
         const mimeType = `audio/pcm;rate=${this.audioContext!.sampleRate}`;
 
-        // Send the same audio chunk to both sessions
+        // Send audio ONLY to transcript session (not reply session)
         this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
-        this.replyService?.sendRealtimeAudio(base64Audio, mimeType);
       };
 
       this.mediaStreamSource.connect(this.scriptProcessor);
@@ -186,9 +185,8 @@ export class ContinuousStreamingCapture {
       this.audioContext = null;
     }
     
-    // Signal end of audio to both sessions
+    // Signal end of audio to transcript session only
     this.transcriptService?.endAudioStream();
-    this.replyService?.endAudioStream();
 
     this.log("Audio streaming stopped for both sessions.", LogLevel.INFO);
   }
