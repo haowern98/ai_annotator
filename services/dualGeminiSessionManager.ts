@@ -25,7 +25,6 @@ Respond ONLY with a valid JSON object in the following format:
 }`;
 
 const STREAMING_CONFIG = {
-  videoFrameRate: 1,
   audioChunkMs: 100,
 };
 
@@ -65,21 +64,15 @@ export class DualGeminiSessionManager {
   private callbacks: DualSessionCallbacks;
   private log: LogFunction;
   
-  private videoRef: React.RefObject<HTMLVideoElement>;
-  private canvasRef: React.RefObject<HTMLCanvasElement>;
+  // Track if streaming has been initialized to prevent race conditions
+  private streamingInitialized: boolean = false;
 
   constructor(
     callbacks: DualSessionCallbacks,
-    log: LogFunction,
-    refs: {
-      videoRef: React.RefObject<HTMLVideoElement>;
-      canvasRef: React.RefObject<HTMLCanvasElement>;
-    }
+    log: LogFunction
   ) {
     this.callbacks = callbacks;
     this.log = log;
-    this.videoRef = refs.videoRef;
-    this.canvasRef = refs.canvasRef;
   }
 
   public async start(apiKey: string): Promise<void> {
@@ -101,6 +94,7 @@ export class DualGeminiSessionManager {
     this.currentReply = '';
     this.transcriptQueue = [];
     this.isReplyGenerating = false;
+    this.streamingInitialized = false;
     
     this.callbacks.onTranscriptUpdate([], '');
     this.callbacks.onReplyUpdate([], '');
@@ -111,6 +105,15 @@ export class DualGeminiSessionManager {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       this.mediaStream = stream;
+      
+      // Verify audio tracks are present
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        this.log('WARNING: No audio tracks in media stream. Audio capture may not work.', LogLevel.WARN);
+      } else {
+        this.log(`Audio tracks found: ${audioTracks.length} track(s)`, LogLevel.SUCCESS);
+      }
+      
       this.callbacks.onStatusChange(AppStatus.CONNECTING);
 
       // Create both service instances
@@ -250,8 +253,12 @@ export class DualGeminiSessionManager {
       this.replyService = service2;
       this.callbacks.onStatusChange(AppStatus.ANALYZING);
 
-      // Set up video and streaming
-      this.setupVideoAndStreaming();
+      // CRITICAL: Add a small delay to ensure everything is fully initialized
+      // This prevents race conditions where audio isn't ready yet
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Set up audio streaming
+      this.setupAudioStreaming();
 
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error.";
@@ -262,43 +269,48 @@ export class DualGeminiSessionManager {
     }
   }
 
-  private setupVideoAndStreaming(): void {
-    if (!this.mediaStream || !this.videoRef.current) return;
+  private setupAudioStreaming(): void {
+    // Prevent duplicate initialization
+    if (this.streamingInitialized) {
+      this.log('Streaming already initialized, skipping duplicate setup', LogLevel.WARN);
+      return;
+    }
 
-    const video = this.videoRef.current;
-    video.srcObject = this.mediaStream;
+    if (!this.mediaStream) {
+      this.log('Cannot setup audio streaming: missing mediaStream', LogLevel.ERROR);
+      return;
+    }
 
-    const handleVideoReady = () => {
-      if (!this.mediaStream || !this.transcriptService || !this.replyService) return;
+    if (!this.transcriptService || !this.replyService) {
+      this.log('Cannot setup audio streaming: services not ready', LogLevel.ERROR);
+      return;
+    }
 
-      this.log('Video ready. Initializing continuous streaming...', LogLevel.SUCCESS);
-      const capture = new ContinuousStreamingCapture(
-        STREAMING_CONFIG,
-        {
-          onError: (error) => { 
-            this.callbacks.onError(`Streaming Error: ${error}`);
-            this.callbacks.onStatusChange(AppStatus.ERROR);
-          },
-          onStatusChange: (newStatus) => this.callbacks.onStatusChange(newStatus),
+    this.log('Initializing continuous audio streaming...', LogLevel.SUCCESS);
+    
+    const capture = new ContinuousStreamingCapture(
+      STREAMING_CONFIG,
+      {
+        onError: (error) => { 
+          this.callbacks.onError(`Streaming Error: ${error}`);
+          this.callbacks.onStatusChange(AppStatus.ERROR);
         },
-        this.log,
-        { videoRef: this.videoRef, canvasRef: this.canvasRef }
-      );
-      
-      // Set both services and the media stream
-      capture.setApiServices({ 
-        transcriptService: this.transcriptService, 
-        replyService: this.replyService 
-      });
-      capture.setMediaStream(this.mediaStream);
-      this.streamingCapture = capture;
+        onStatusChange: (newStatus) => this.callbacks.onStatusChange(newStatus),
+      },
+      this.log
+    );
+    
+    // Set both services and the media stream
+    capture.setApiServices({ 
+      transcriptService: this.transcriptService, 
+      replyService: this.replyService 
+    });
+    capture.setMediaStream(this.mediaStream);
+    this.streamingCapture = capture;
 
-      capture.start();
-      this.log('Continuous streaming started for both sessions!', LogLevel.SUCCESS);
-    };
-
-    video.addEventListener('loadedmetadata', handleVideoReady);
-    if (video.readyState >= 1) handleVideoReady();
+    capture.start();
+    this.streamingInitialized = true;
+    this.log('Continuous audio streaming started!', LogLevel.SUCCESS);
   }
 
   private processTranscriptQueue(): void {
@@ -322,6 +334,7 @@ export class DualGeminiSessionManager {
     this.cleanup();
     this.transcriptQueue = [];
     this.isReplyGenerating = false;
+    this.streamingInitialized = false;
     this.callbacks.onStatusChange(AppStatus.IDLE);
     this.log('Analysis stopped', LogLevel.SUCCESS);
   }
@@ -341,6 +354,8 @@ export class DualGeminiSessionManager {
       this.mediaStream.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
     }
+    
+    this.streamingInitialized = false;
   }
 
   public getMediaStream(): MediaStream | null {

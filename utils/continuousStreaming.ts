@@ -5,7 +5,6 @@ import LiveApiService from '../services/liveApiService';
 type LogFunction = (message: string, level?: LogLevel) => void;
 
 interface StreamingConfig {
-  videoFrameRate: number; // FPS for video frames (e.g., 1-2)
   audioChunkMs: number; // Audio chunk duration in ms (e.g., 100ms)
 }
 
@@ -24,11 +23,8 @@ export class ContinuousStreamingCapture {
   private transcriptService: LiveApiService | null = null;
   private replyService: LiveApiService | null = null;
   
-  private videoRef: React.RefObject<HTMLVideoElement>;
-  private canvasRef: React.RefObject<HTMLCanvasElement>;
   private mediaStream: MediaStream | null = null;
   
-  private videoIntervalId: number | null = null;
   private audioContext: AudioContext | null = null;
   private scriptProcessor: ScriptProcessorNode | null = null;
   private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
@@ -42,17 +38,11 @@ export class ContinuousStreamingCapture {
   constructor(
     config: StreamingConfig,
     callbacks: StreamingCallbacks,
-    log: LogFunction,
-    refs: {
-      videoRef: React.RefObject<HTMLVideoElement>;
-      canvasRef: React.RefObject<HTMLCanvasElement>;
-    }
+    log: LogFunction
   ) {
     this.config = config;
     this.callbacks = callbacks;
     this.log = log;
-    this.videoRef = refs.videoRef;
-    this.canvasRef = refs.canvasRef;
   }
 
   // Set both API service instances
@@ -104,59 +94,23 @@ export class ContinuousStreamingCapture {
       return;
     }
 
-    this.log("Starting dual-session continuous audio/video streaming...", LogLevel.SUCCESS);
+    this.log("Starting continuous audio streaming...", LogLevel.SUCCESS);
     this.isRunning = true;
 
-    // Start video and audio streaming
-    // this.startVideoStreaming();
     await this.startAudioStreaming();
 
-    this.log("Streaming started to both sessions.", LogLevel.SUCCESS);
+    this.log("Audio streaming started.", LogLevel.SUCCESS);
   }
 
   public stop(): void {
-    this.log("Stopping continuous streaming to both sessions.", LogLevel.INFO);
+    this.log("Stopping continuous audio streaming.", LogLevel.INFO);
     this.isRunning = false;
-
-    if (this.videoIntervalId) {
-      window.clearInterval(this.videoIntervalId);
-      this.videoIntervalId = null;
-    }
 
     // Clear audio buffer
     this.audioBuffer = [];
     this.isTranscribing = false;
 
     this.stopAudioStreaming();
-  }
-
-  private startVideoStreaming(): void {
-    const frameIntervalMs = 1000 / this.config.videoFrameRate;
-    this.videoIntervalId = window.setInterval(() => {
-      this.captureAndSendVideoFrame();
-    }, frameIntervalMs);
-    this.captureAndSendVideoFrame();
-  }
-
-  private captureAndSendVideoFrame(): void {
-    if (!this.isRunning || !this.videoRef.current || !this.canvasRef.current) return;
-
-    const video = this.videoRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) return;
-
-    const canvas = this.canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-    const base64Data = dataUrl.split(',')[1];
-
-    // Send the same video frame to both sessions
-    // this.transcriptService?.sendVideoFrame(base64Data);
-    // this.replyService?.sendVideoFrame(base64Data);
   }
 
   private async startAudioStreaming(): Promise<void> {
@@ -209,7 +163,7 @@ export class ContinuousStreamingCapture {
 
       this.mediaStreamSource.connect(this.scriptProcessor);
       this.scriptProcessor.connect(this.audioContext.destination);
-      this.log(`Audio streaming started for both sessions at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
+      this.log(`Audio streaming started at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
     } catch (error) {
       this.log(`Failed to start audio streaming: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
     }
@@ -241,6 +195,6 @@ export class ContinuousStreamingCapture {
     // Signal end of audio to transcript session only
     this.transcriptService?.endAudioStream();
 
-    this.log("Audio streaming stopped for both sessions.", LogLevel.INFO);
+    this.log("Audio streaming stopped.", LogLevel.INFO);
   }
 }

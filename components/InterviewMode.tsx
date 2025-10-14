@@ -14,7 +14,6 @@ const InterviewMode: React.FC = () => {
   const [error, setError] = React.useState<string | null>(null);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
-  const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const sessionManagerRef = React.useRef<DualGeminiSessionManager | null>(null);
 
   const addLog = React.useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
@@ -28,7 +27,7 @@ const InterviewMode: React.FC = () => {
     }
   }, []);
 
-  // Initialize session manager
+  // Initialize session manager - FIXED: removed refs parameter
   React.useEffect(() => {
     sessionManagerRef.current = new DualGeminiSessionManager(
       {
@@ -43,8 +42,7 @@ const InterviewMode: React.FC = () => {
           setCurrentReply(current);
         },
       },
-      addLog,
-      { videoRef, canvasRef }
+      addLog
     );
 
     return () => {
@@ -160,7 +158,6 @@ const InterviewMode: React.FC = () => {
           </div>
         </div>
       </div>
-      <canvas ref={canvasRef} className="hidden"></canvas>
     </main>
   );
 };
