@@ -15,6 +15,7 @@ interface LiveApiCallbacks {
   onTranscript: (text: string, isFinal: boolean) => void;
   onModelResponse: (text: string) => void;
   onPartialResponse?: (text: string) => void; // Real-time streaming chunks
+  onModelTurnStart?: () => void; // NEW: Called when model starts responding (before any text)
   onError: (error: string) => void;
   onClose: (reason: string) => void;
   onReconnecting?: () => void;
@@ -35,6 +36,9 @@ class LiveApiService {
   private maxReconnectAttempts = 3;
   private reconnectTimeoutId: number | null = null;
   private currentCallbacks: LiveApiCallbacks | null = null;
+  
+  // Track if we've already signaled the start of this turn
+  private hasSignaledTurnStart = false;
 
   constructor(apiKey: string, log: LogFunction) {
     if (!apiKey) {
@@ -58,7 +62,7 @@ class LiveApiService {
       responseModalities: [Modality.TEXT], // Start with TEXT only to avoid audio issues
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
       voiceActivityDetection: {
-        threshold: 0.5, // Sensitivity (0-1, higher = more strict about detecting speech end)
+        threshold: 0.6, // Sensitivity (0-1, higher = more strict about detecting speech end)
       },
       systemInstruction: systemInstruction || "You are an interview copilot AI assistant. You are observing a live screen and listening to audio. When the speaker finishes talking (turn complete), provide a full, thoughtful answer to the question. Respond to everything they say with substantive insights, answers, or observations about what you see and hear. Be helpful and thorough in every response.",
     };
@@ -77,6 +81,15 @@ class LiveApiService {
             // DEBUG: Log full message structure to understand what we're receiving
             if (message.serverContent) {
               this.log(`Message type: ${JSON.stringify(Object.keys(message.serverContent))}`);
+            }
+            
+            // CRITICAL: Detect when model starts responding (BEFORE any text arrives)
+            if (message.serverContent?.modelTurn && !this.hasSignaledTurnStart) {
+              this.hasSignaledTurnStart = true;
+              if (callbacks.onModelTurnStart) {
+                callbacks.onModelTurnStart();
+                this.log("Model turn started - buffering should begin now", LogLevel.INFO);
+              }
             }
             
             // Handle model content (streaming AI responses)
@@ -114,6 +127,9 @@ class LiveApiService {
             
             // Handle turn complete
             if (message.serverContent?.turnComplete) {
+              // Reset the turn start flag for next turn
+              this.hasSignaledTurnStart = false;
+              
               if (this.currentMessage.trim()) {
                 const completeMessage = this.currentMessage.trim();
                 callbacks.onModelResponse(completeMessage);
@@ -125,6 +141,8 @@ class LiveApiService {
             // Handle interruptions
             if (message.serverContent?.interrupted) {
               this.log("Model response interrupted.", LogLevel.INFO);
+              // Reset turn start flag on interruption
+              this.hasSignaledTurnStart = false;
               // Keep currentMessage accumulated - don't clear it
             }
 

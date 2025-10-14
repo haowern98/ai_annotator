@@ -125,10 +125,29 @@ export class DualGeminiSessionManager {
             this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
           }
         },
+        onModelTurnStart: () => {
+          // CRITICAL: Model started responding - start buffering IMMEDIATELY
+          if (this.streamingCapture) {
+            this.streamingCapture.setTranscribing(true);
+          }
+        },
+        onPartialResponse: (textChunk) => {
+          // Partial text arriving - buffering should already be active from onModelTurnStart
+        },
         onModelResponse: (text) => {
           try {
             // Clean the text: Sometimes the AI wraps JSON in markdown
             const cleanText = text.replace(/```json|```/g, '').trim();
+            
+            // Skip obviously incomplete responses (interrupted)
+            if (cleanText === '{"transcript": "' || cleanText === '{"' || cleanText === '{"..."' || !cleanText.endsWith('}')) {
+              this.log('Ignoring incomplete/interrupted transcript', LogLevel.WARN);
+              // Resume audio streaming for incomplete responses
+              if (this.streamingCapture) {
+                this.streamingCapture.setTranscribing(false);
+              }
+              return;
+            }
             
             // Parse the JSON string into a JavaScript object
             const parsed = JSON.parse(cleanText);
@@ -136,6 +155,17 @@ export class DualGeminiSessionManager {
             // Safely access the 'transcript' property and update the state
             if (parsed.transcript) {
               const transcriptText = parsed.transcript;
+              
+              // Filter out empty transcripts
+              if (!transcriptText || transcriptText.trim().length === 0) {
+                this.log('Ignoring empty transcript', LogLevel.WARN);
+                // Resume audio streaming for empty transcripts
+                if (this.streamingCapture) {
+                  this.streamingCapture.setTranscribing(false);
+                }
+                return;
+              }
+              
               this.transcripts.push({ 
                 timestamp: new Date().toLocaleTimeString(), 
                 text: transcriptText 
@@ -148,10 +178,16 @@ export class DualGeminiSessionManager {
             }
           } catch (e) {
             // If parsing fails, log an error to help with debugging
-            this.log(`Failed to parse JSON from transcript service: ${text}`, LogLevel.ERROR);
+            this.log(`Failed to parse JSON from transcript service: ${text.substring(0,50)}`, LogLevel.ERROR);
           }
+          
           this.currentTranscript = '';
           this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
+          
+          // Transcription complete - resume audio streaming and flush buffer
+          if (this.streamingCapture) {
+            this.streamingCapture.setTranscribing(false);
+          }
         },
         onError: (e) => { 
           this.callbacks.onError(`Transcript Service Error: ${e}`);

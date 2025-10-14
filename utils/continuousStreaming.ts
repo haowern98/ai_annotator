@@ -34,6 +34,10 @@ export class ContinuousStreamingCapture {
   private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
   
   private isRunning = false;
+  
+  // Audio buffering for transcription
+  private isTranscribing = false;
+  private audioBuffer: Array<{data: string, mimeType: string}> = [];
 
   constructor(
     config: StreamingConfig,
@@ -59,6 +63,34 @@ export class ContinuousStreamingCapture {
 
   public setMediaStream(stream: MediaStream): void {
     this.mediaStream = stream;
+  }
+
+  // Control transcription state and manage audio buffering
+  public setTranscribing(isTranscribing: boolean): void {
+    const wasTranscribing = this.isTranscribing;
+    this.isTranscribing = isTranscribing;
+    
+    if (isTranscribing && !wasTranscribing) {
+      this.log("Buffering audio - transcription in progress", LogLevel.INFO);
+    } else if (!isTranscribing && wasTranscribing) {
+      this.log(`Flushing ${this.audioBuffer.length} buffered audio chunks - transcription complete`, LogLevel.SUCCESS);
+      this.flushAudioBuffer();
+    }
+  }
+
+  // Send all buffered audio to transcript service
+  private flushAudioBuffer(): void {
+    if (this.audioBuffer.length === 0) return;
+    
+    const bufferSize = this.audioBuffer.length;
+    
+    // Send all buffered audio chunks
+    while (this.audioBuffer.length > 0) {
+      const buffered = this.audioBuffer.shift()!;
+      this.transcriptService?.sendRealtimeAudio(buffered.data, buffered.mimeType);
+    }
+    
+    this.log(`Sent ${bufferSize} buffered audio chunks to transcript service`, LogLevel.SUCCESS);
   }
 
   public async start(): Promise<void> {
@@ -90,6 +122,10 @@ export class ContinuousStreamingCapture {
       window.clearInterval(this.videoIntervalId);
       this.videoIntervalId = null;
     }
+
+    // Clear audio buffer
+    this.audioBuffer = [];
+    this.isTranscribing = false;
 
     this.stopAudioStreaming();
   }
@@ -150,8 +186,25 @@ export class ContinuousStreamingCapture {
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
         const mimeType = `audio/pcm;rate=${this.audioContext!.sampleRate}`;
 
-        // Send audio ONLY to transcript session (not reply session)
-        this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
+        // Audio buffering logic
+        if (this.isTranscribing) {
+          // Buffer audio during transcription
+          this.audioBuffer.push({ data: base64Audio, mimeType });
+          
+          // Prevent buffer from growing too large (max 50 chunks ~5 seconds at 100ms chunks)
+          if (this.audioBuffer.length > 50) {
+            this.log("Audio buffer full, dropping oldest chunk", LogLevel.WARN);
+            this.audioBuffer.shift();
+          }
+        } else {
+          // Not transcribing - flush any buffered audio first
+          if (this.audioBuffer.length > 0) {
+            this.flushAudioBuffer();
+          }
+          
+          // Send current audio chunk to transcript session
+          this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
+        }
       };
 
       this.mediaStreamSource.connect(this.scriptProcessor);
