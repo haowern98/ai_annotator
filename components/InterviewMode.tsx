@@ -125,15 +125,15 @@ const InterviewMode: React.FC = () => {
           <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">Interviewer Transcript</h3></div>
           <div className="flex-grow p-6 overflow-y-auto">
             <div className="space-y-4">
-              {transcript.map((item, index) => (
+              {currentTranscript && (
+                <div className="bg-base-300/50 p-4 rounded-lg italic text-content-200">{currentTranscript}</div>
+              )}
+              {[...transcript].reverse().map((item, index) => (
                 <div key={index} className="bg-base-300 p-4 rounded-lg">
                   <div className="text-xs text-content-200 mb-2">{item.timestamp}</div>
                   <div>{item.text}</div>
                 </div>
               ))}
-              {currentTranscript && (
-                <div className="bg-base-300/50 p-4 rounded-lg italic text-content-200">{currentTranscript}</div>
-              )}
             </div>
           </div>
         </div>
@@ -145,15 +145,15 @@ const InterviewMode: React.FC = () => {
           <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">AI-Generated Replies</h3></div>
           <div className="flex-grow p-6 overflow-y-auto">
              <div className="space-y-4">
-                {replies.map((reply, index) => (
+                {currentReply && (
+                  <div className="border-l-4 border-brand-secondary/50 pl-4 py-2 italic text-content-200">{currentReply}</div>
+                )}
+                {[...replies].reverse().map((reply, index) => (
                   <div key={index} className="border-l-4 border-brand-secondary pl-4 py-2">
                     <div className="text-xs text-content-200 mb-2">{reply.timestamp}</div>
                     <div>{reply.text}</div>
                   </div>
                 ))}
-                {currentReply && (
-                  <div className="border-l-4 border-brand-secondary/50 pl-4 py-2 italic text-content-200">{currentReply}</div>
-                )}
               </div>
           </div>
         </div>
