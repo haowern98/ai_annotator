@@ -31,25 +31,71 @@ class LiveApiService {
   private isIntentionallyClosing = false;
   private currentMessage = '';
   
+  // Session resumption state
+  private sessionHandleKey: string; // Unique localStorage key for this service instance
+  private currentSessionHandle: string | null = null;
+  
   // Reconnection state
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 3;
   private reconnectTimeoutId: number | null = null;
   private currentCallbacks: LiveApiCallbacks | null = null;
+  private currentSystemInstruction: string | undefined = undefined;
   
   // Track if we've already signaled the start of this turn
   private hasSignaledTurnStart = false;
 
-  constructor(apiKey: string, log: LogFunction) {
+  constructor(apiKey: string, log: LogFunction, sessionKey: string = 'default') {
     if (!apiKey) {
       log("API key is missing.", LogLevel.ERROR);
       throw new Error("API key is missing.");
     }
     this.ai = new GoogleGenAI({ apiKey });
     this.log = log;
+    
+    // Create unique session handle key for this service instance (transcript vs reply)
+    this.sessionHandleKey = `gemini_live_session_${sessionKey}`;
+    
+    // Try to load existing session handle from localStorage
+    this.loadSessionHandle();
+  }
+  
+  // Load session handle from localStorage
+  private loadSessionHandle(): void {
+    try {
+      const savedHandle = localStorage.getItem(this.sessionHandleKey);
+      if (savedHandle) {
+        this.currentSessionHandle = savedHandle;
+        this.log(`[${this.sessionHandleKey}] Loaded existing session handle: ${savedHandle.substring(0, 8)}...`, LogLevel.INFO);
+      }
+    } catch (error) {
+      this.log(`[${this.sessionHandleKey}] Could not load session handle from localStorage`, LogLevel.WARN);
+    }
+  }
+  
+  // Save session handle to localStorage
+  private saveSessionHandle(handle: string): void {
+    try {
+      localStorage.setItem(this.sessionHandleKey, handle);
+      this.currentSessionHandle = handle;
+      this.log(`[${this.sessionHandleKey}] Saved session handle: ${handle.substring(0, 8)}...`, LogLevel.SUCCESS);
+    } catch (error) {
+      this.log(`[${this.sessionHandleKey}] Could not save session handle to localStorage`, LogLevel.WARN);
+    }
+  }
+  
+  // Clear session handle
+  private clearSessionHandle(): void {
+    try {
+      localStorage.removeItem(this.sessionHandleKey);
+      this.currentSessionHandle = null;
+      this.log(`[${this.sessionHandleKey}] Cleared session handle`, LogLevel.INFO);
+    } catch (error) {
+      this.log(`[${this.sessionHandleKey}] Could not clear session handle from localStorage`, LogLevel.WARN);
+    }
   }
 
-  public async connect(callbacks: LiveApiCallbacks, systemInstruction?: string): Promise<void> {
+  public async connect(callbacks: LiveApiCallbacks, systemInstruction?: string, resumeHandle?: string | null): Promise<void> {
     if (this.session) {
       this.log("Session already exists. Disconnect first.", LogLevel.WARN);
       return;
@@ -57,6 +103,10 @@ class LiveApiService {
     
     this.isIntentionallyClosing = false;
     this.currentCallbacks = callbacks;
+    this.currentSystemInstruction = systemInstruction;
+    
+    // Use provided handle, or fall back to saved handle, or null for new session
+    const handleToUse = resumeHandle !== undefined ? resumeHandle : this.currentSessionHandle;
 
     const config = {
       responseModalities: [Modality.TEXT], // Start with TEXT only to avoid audio issues
@@ -68,20 +118,45 @@ class LiveApiService {
         triggerTokens: '25600',
         slidingWindow: { targetTokens: '12800' },
       },
+      sessionResumption: handleToUse ? { handle: handleToUse } : {},
       systemInstruction: systemInstruction || "You are an interview copilot AI assistant. You are observing a live screen and listening to audio. When the speaker finishes talking (turn complete), provide a full, thoughtful answer to the question. Respond to everything they say with substantive insights, answers, or observations about what you see and hear. Be helpful and thorough in every response.",
     };
 
     try {
-      this.log("Starting new Live API session...");
+      if (handleToUse) {
+        this.log(`[${this.sessionHandleKey}] Attempting to resume session with handle: ${handleToUse.substring(0, 8)}...`);
+      } else {
+        this.log(`[${this.sessionHandleKey}] Starting new session...`);
+      }
       
       this.session = await this.ai.live.connect({
         model: MODEL_NAME,
         callbacks: {
           onopen: () => {
-            this.log("Live API connection opened successfully.", LogLevel.SUCCESS);
+            if (handleToUse) {
+              this.log(`[${this.sessionHandleKey}] Connection resumed successfully with previous context.`, LogLevel.SUCCESS);
+            } else {
+              this.log(`[${this.sessionHandleKey}] New connection opened successfully.`, LogLevel.SUCCESS);
+            }
             this.reconnectAttempts = 0;
           },
           onmessage: (message: LiveServerMessage) => {
+            // Handle session resumption updates
+            if (message.sessionResumptionUpdate) {
+              const update = message.sessionResumptionUpdate;
+              if (update.resumable && update.newHandle) {
+                this.saveSessionHandle(update.newHandle);
+                this.log(`[${this.sessionHandleKey}] Session handle updated: ${update.newHandle.substring(0, 8)}...`, LogLevel.INFO);
+              }
+            }
+            
+            // Handle GoAway message (connection about to close)
+            if (message.goAway) {
+              const timeLeft = message.goAway.timeLeft || 'unknown';
+              this.log(`[${this.sessionHandleKey}] ⚠️ Connection will close in ${timeLeft}. Preparing to reconnect...`, LogLevel.WARN);
+              // The connection will close soon, we'll handle reconnection in onclose
+            }
+            
             // DEBUG: Log full message structure to understand what we're receiving
             if (message.serverContent) {
               this.log(`Message type: ${JSON.stringify(Object.keys(message.serverContent))}`);
@@ -164,15 +239,18 @@ class LiveApiService {
               this.log("Session disconnected successfully.", LogLevel.SUCCESS);
               this.session = undefined;
             } else {
-              this.log(`Session closed unexpectedly. Reason: ${e.reason || 'Connection lost'}`, LogLevel.WARN);
+              this.log(`[${this.sessionHandleKey}] Session closed unexpectedly. Reason: ${e.reason || 'Connection timeout (~10 min limit)'}`, LogLevel.WARN);
               this.session = undefined;
               
-              // Attempt reconnection
-              if (this.reconnectAttempts < this.maxReconnectAttempts) {
+              // Attempt automatic reconnection if we have a session handle
+              if (this.currentSessionHandle && this.reconnectAttempts < this.maxReconnectAttempts) {
                 this.attemptReconnection(callbacks, systemInstruction);
-              } else {
-                this.log(`Max reconnection attempts (${this.maxReconnectAttempts}) reached.`, LogLevel.ERROR);
+              } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                this.log(`[${this.sessionHandleKey}] Max reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`, LogLevel.ERROR);
+                this.clearSessionHandle();
                 callbacks.onClose(e.reason || 'Max reconnection attempts reached');
+              } else {
+                callbacks.onClose(e.reason || 'Unknown');
               }
             }
           },
@@ -183,17 +261,31 @@ class LiveApiService {
       this.log("Session object assigned. Connection is fully ready.", LogLevel.SUCCESS);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error during connection.";
-      this.log(`Connection failed: ${errorMessage}`, LogLevel.ERROR);
+      
+      // Check if this is a "session not found" error (handle expired or invalid)
+      if (errorMessage.includes('session not found') || errorMessage.includes('not found')) {
+        this.log(`[${this.sessionHandleKey}] Session handle invalid or expired. Starting fresh session.`, LogLevel.WARN);
+        this.clearSessionHandle();
+        
+        // Retry connection without handle (new session)
+        if (handleToUse && this.reconnectAttempts === 0) {
+          this.reconnectAttempts++;
+          return this.connect(callbacks, systemInstruction, null);
+        }
+      }
+      
+      this.log(`[${this.sessionHandleKey}] Connection failed: ${errorMessage}`, LogLevel.ERROR);
       callbacks.onError(errorMessage);
       throw new Error(errorMessage);
     }
   }
 
+  // Attempt to reconnect with saved session handle
   private attemptReconnection(callbacks: LiveApiCallbacks, systemInstruction?: string): void {
     this.reconnectAttempts++;
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 5000);
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 5000); // Exponential backoff, max 5s
     
-    this.log(`Reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms...`, LogLevel.INFO);
+    this.log(`[${this.sessionHandleKey}] Reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms...`, LogLevel.INFO);
     
     if (callbacks.onReconnecting) {
       callbacks.onReconnecting();
@@ -201,9 +293,15 @@ class LiveApiService {
     
     this.reconnectTimeoutId = window.setTimeout(async () => {
       try {
-        await this.connect(callbacks, systemInstruction);
+        await this.connect(callbacks, systemInstruction, this.currentSessionHandle);
       } catch (error) {
-        this.log(`Reconnection attempt ${this.reconnectAttempts} failed.`, LogLevel.ERROR);
+        this.log(`[${this.sessionHandleKey}] Reconnection attempt ${this.reconnectAttempts} failed.`, LogLevel.ERROR);
+        
+        // If we still have attempts left, the onclose handler will retry
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          this.clearSessionHandle();
+          callbacks.onError('Failed to reconnect after multiple attempts');
+        }
       }
     }, delay);
   }
@@ -297,16 +395,31 @@ class LiveApiService {
     }
     
     if (this.session) {
-      this.log("Disconnecting session intentionally.", LogLevel.INFO);
+      this.log(`[${this.sessionHandleKey}] Disconnecting session intentionally.`, LogLevel.INFO);
       this.isIntentionallyClosing = true;
       this.currentMessage = '';
       this.session.close();
       this.session = undefined;
     }
+    
+    // Don't clear session handle on intentional disconnect
+    // This allows resuming the session later if needed
+  }
+  
+  // Force clear session and start fresh
+  public clearSession(): void {
+    this.disconnect();
+    this.clearSessionHandle();
+    this.reconnectAttempts = 0;
+    this.log(`[${this.sessionHandleKey}] Session cleared completely. Next connection will be a new session.`, LogLevel.INFO);
   }
 
   public isConnected(): boolean {
     return !!this.session;
+  }
+  
+  public getSessionHandle(): string | null {
+    return this.currentSessionHandle;
   }
 }
 

@@ -18,7 +18,7 @@ If the turn contains no clear speech, do NOT respond.
 
 Format: {"transcript": "[complete turn from start to finish]"}`;
 
-const REPLY_PROMPT = `You are interviewing for a software engineer position at a software engineering company.
+const REPLY_PROMPT = `You are a Malaysian who is studying at National University of Singapore who is interviewing for a software engineer position at a software engineering company.
 Respond ONLY with a valid JSON object in the following format:
 {
   "reply": "[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]"
@@ -116,9 +116,9 @@ export class DualGeminiSessionManager {
       
       this.callbacks.onStatusChange(AppStatus.CONNECTING);
 
-      // Create both service instances
-      const service1 = new LiveApiService(apiKey, this.log);
-      const service2 = new LiveApiService(apiKey, this.log);
+      // Create both service instances with unique session keys for separate handle storage
+      const service1 = new LiveApiService(apiKey, this.log, 'transcript');
+      const service2 = new LiveApiService(apiKey, this.log, 'reply');
 
       // Connect Transcript Service
       const connectTranscript = service1.connect({
