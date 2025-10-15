@@ -98,7 +98,7 @@ const InterviewMode: React.FC = () => {
   return (
     <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
       {/* Left Side */}
-      <div className="lg:w-1/2 flex flex-col gap-4">
+      <div className="lg:w-1/3 flex flex-col gap-4">
         <Controls 
           status={status} 
           onStart={handleStart} 
@@ -121,26 +121,10 @@ const InterviewMode: React.FC = () => {
             </div>
           )}
         </div>
-        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ height: '300px' }}>
-          <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">Interviewer Transcript</h3></div>
-          <div className="flex-grow p-6 overflow-y-auto">
-            <div className="space-y-4">
-              {currentTranscript && (
-                <div className="bg-base-300/50 p-4 rounded-lg italic text-content-200">{currentTranscript}</div>
-              )}
-              {[...transcript].reverse().map((item, index) => (
-                <div key={index} className="bg-base-300 p-4 rounded-lg">
-                  <div className="text-xs text-content-200 mb-2">{item.timestamp}</div>
-                  <div>{item.text}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
       </div>
 
-      {/* Right Side */}
-      <div className="lg:w-1/2 flex flex-col gap-4">
+      {/* Middle - AI Replies */}
+      <div className="lg:w-1/3 flex flex-col gap-4">
         <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ height: '700px' }}>
           <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">AI-Generated Replies</h3></div>
           <div className="flex-grow p-6 overflow-y-auto">
@@ -155,6 +139,26 @@ const InterviewMode: React.FC = () => {
                   </div>
                 ))}
               </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Right Side - Interview Transcript */}
+      <div className="lg:w-1/3 flex flex-col gap-4">
+        <div className="bg-base-200 border border-base-300 rounded-lg shadow-md flex flex-col" style={{ height: '700px' }}>
+          <div className="p-4 border-b border-base-300"><h3 className="text-lg font-bold">Interviewer Transcript</h3></div>
+          <div className="flex-grow p-6 overflow-y-auto">
+            <div className="space-y-4">
+              {currentTranscript && (
+                <div className="bg-base-300/50 p-4 rounded-lg italic text-content-200">{currentTranscript}</div>
+              )}
+              {[...transcript].reverse().map((item, index) => (
+                <div key={index} className="bg-base-300 p-4 rounded-lg">
+                  <div className="text-xs text-content-200 mb-2">{item.timestamp}</div>
+                  <div>{item.text}</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
