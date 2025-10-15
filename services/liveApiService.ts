@@ -64,6 +64,10 @@ class LiveApiService {
       voiceActivityDetection: {
         threshold: 0.6, // Sensitivity (0-1, higher = more strict about detecting speech end)
       },
+      contextWindowCompression: {
+        triggerTokens: '25600',
+        slidingWindow: { targetTokens: '12800' },
+      },
       systemInstruction: systemInstruction || "You are an interview copilot AI assistant. You are observing a live screen and listening to audio. When the speaker finishes talking (turn complete), provide a full, thoughtful answer to the question. Respond to everything they say with substantive insights, answers, or observations about what you see and hear. Be helpful and thorough in every response.",
     };
 
