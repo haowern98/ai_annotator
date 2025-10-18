@@ -253,9 +253,38 @@ export class DualGeminiSessionManager {
       this.replyService = service2;
       this.callbacks.onStatusChange(AppStatus.ANALYZING);
 
-      // CRITICAL: Add a small delay to ensure everything is fully initialized
-      // This prevents race conditions where audio isn't ready yet
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // CRITICAL: Add delay and validate connections are still active
+      // This prevents race conditions where services disconnect immediately after connecting
+      this.log('Waiting for services to stabilize...', LogLevel.INFO);
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Validate both services are still connected after delay
+      if (!service1.isConnected() || !service2.isConnected()) {
+        const disconnected = [];
+        if (!service1.isConnected()) disconnected.push('transcript');
+        if (!service2.isConnected()) disconnected.push('reply');
+
+        this.log(`Services disconnected during initialization: ${disconnected.join(', ')}. Waiting for reconnection...`, LogLevel.WARN);
+
+        // Wait up to 5 seconds for reconnection
+        for (let i = 0; i < 10; i++) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          if (service1.isConnected() && service2.isConnected()) {
+            this.log('Both services reconnected successfully!', LogLevel.SUCCESS);
+            break;
+          }
+        }
+
+        // Final check
+        if (!service1.isConnected() || !service2.isConnected()) {
+          const stillDisconnected = [];
+          if (!service1.isConnected()) stillDisconnected.push('transcript');
+          if (!service2.isConnected()) stillDisconnected.push('reply');
+          throw new Error(`Failed to establish stable connection. Services still disconnected: ${stillDisconnected.join(', ')}`);
+        }
+      }
+
+      this.log('Services are stable. Starting audio streaming...', LogLevel.SUCCESS);
 
       // Set up audio streaming
       this.setupAudioStreaming();
@@ -286,31 +315,44 @@ export class DualGeminiSessionManager {
       return;
     }
 
-    this.log('Initializing continuous audio streaming...', LogLevel.SUCCESS);
-    
-    const capture = new ContinuousStreamingCapture(
-      STREAMING_CONFIG,
-      {
-        onError: (error) => { 
-          this.callbacks.onError(`Streaming Error: ${error}`);
-          this.callbacks.onStatusChange(AppStatus.ERROR);
-        },
-        onStatusChange: (newStatus) => this.callbacks.onStatusChange(newStatus),
-      },
-      this.log
-    );
-    
-    // Set both services and the media stream
-    capture.setApiServices({ 
-      transcriptService: this.transcriptService, 
-      replyService: this.replyService 
-    });
-    capture.setMediaStream(this.mediaStream);
-    this.streamingCapture = capture;
+    // Double-check services are actually connected
+    if (!this.transcriptService.isConnected() || !this.replyService.isConnected()) {
+      this.log('Cannot setup audio streaming: services not connected', LogLevel.ERROR);
+      return;
+    }
 
-    capture.start();
-    this.streamingInitialized = true;
-    this.log('Continuous audio streaming started!', LogLevel.SUCCESS);
+    this.log('Initializing continuous audio streaming...', LogLevel.SUCCESS);
+
+    try {
+      const capture = new ContinuousStreamingCapture(
+        STREAMING_CONFIG,
+        {
+          onError: (error) => {
+            this.callbacks.onError(`Streaming Error: ${error}`);
+            this.callbacks.onStatusChange(AppStatus.ERROR);
+          },
+          onStatusChange: (newStatus) => this.callbacks.onStatusChange(newStatus),
+        },
+        this.log
+      );
+
+      // Set both services and the media stream
+      capture.setApiServices({
+        transcriptService: this.transcriptService,
+        replyService: this.replyService
+      });
+      capture.setMediaStream(this.mediaStream);
+      this.streamingCapture = capture;
+
+      capture.start();
+      this.streamingInitialized = true;
+      this.log('Continuous audio streaming started!', LogLevel.SUCCESS);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.log(`Failed to start audio streaming: ${message}`, LogLevel.ERROR);
+      this.callbacks.onError(`Failed to start audio streaming: ${message}`);
+      throw error;
+    }
   }
 
   private processTranscriptQueue(): void {

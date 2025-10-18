@@ -41,6 +41,7 @@ class LiveApiService {
   private reconnectTimeoutId: number | null = null;
   private currentCallbacks: LiveApiCallbacks | null = null;
   private currentSystemInstruction: string | undefined = undefined;
+  private hasRetriedWithFreshSession = false; // Track if we've already tried a fresh session
   
   // Track if we've already signaled the start of this turn
   private hasSignaledTurnStart = false;
@@ -100,10 +101,11 @@ class LiveApiService {
       this.log("Session already exists. Disconnect first.", LogLevel.WARN);
       return;
     }
-    
+
     this.isIntentionallyClosing = false;
     this.currentCallbacks = callbacks;
     this.currentSystemInstruction = systemInstruction;
+    this.hasRetriedWithFreshSession = false; // Reset fresh session flag on new connection
     
     // Use provided handle, or fall back to saved handle, or null for new session
     const handleToUse = resumeHandle !== undefined ? resumeHandle : this.currentSessionHandle;
@@ -112,7 +114,7 @@ class LiveApiService {
       responseModalities: [Modality.TEXT], // Start with TEXT only to avoid audio issues
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
       voiceActivityDetection: {
-        threshold: 0.6, // Sensitivity (0-1, higher = more strict about detecting speech end)
+        threshold: 0.5, // Sensitivity (0-1, higher = more strict about detecting speech end)
       },
       contextWindowCompression: {
         triggerTokens: '25600',
@@ -239,10 +241,34 @@ class LiveApiService {
               this.log("Session disconnected successfully.", LogLevel.SUCCESS);
               this.session = undefined;
             } else {
-              this.log(`[${this.sessionHandleKey}] Session closed unexpectedly. Reason: ${e.reason || 'Connection timeout (~10 min limit)'}`, LogLevel.WARN);
+              const closeReason = e.reason || 'Connection timeout (~10 min limit)';
+              this.log(`[${this.sessionHandleKey}] Session closed unexpectedly. Reason: ${closeReason}`, LogLevel.WARN);
               this.session = undefined;
-              
-              // Attempt automatic reconnection if we have a session handle
+
+              // Check if close reason indicates invalid/expired session handle
+              const isInvalidSession = closeReason.includes('session not found') ||
+                                       closeReason.includes('BidiGenerateContent session not found') ||
+                                       closeReason.includes('not found');
+
+              if (isInvalidSession && this.currentSessionHandle) {
+                this.log(`[${this.sessionHandleKey}] Session handle is invalid or expired. Clearing it.`, LogLevel.WARN);
+                this.clearSessionHandle();
+
+                // Try ONE more time with a fresh session (no handle)
+                if (!this.hasRetriedWithFreshSession) {
+                  this.hasRetriedWithFreshSession = true;
+                  this.log(`[${this.sessionHandleKey}] Retrying with fresh session...`, LogLevel.INFO);
+                  this.reconnectAttempts = 0; // Reset attempts for fresh session
+                  this.attemptReconnection(callbacks, systemInstruction);
+                  return;
+                } else {
+                  this.log(`[${this.sessionHandleKey}] Fresh session retry failed. Giving up.`, LogLevel.ERROR);
+                  callbacks.onClose('Invalid session handle - fresh session failed');
+                  return;
+                }
+              }
+
+              // Normal reconnection logic for valid handles
               if (this.currentSessionHandle && this.reconnectAttempts < this.maxReconnectAttempts) {
                 this.attemptReconnection(callbacks, systemInstruction);
               } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
@@ -307,10 +333,10 @@ class LiveApiService {
   }
 
   // Send audio in real-time (continuous streaming)
-  public async sendRealtimeAudio(audioData: string, mimeType: string = 'audio/pcm;rate=16000'): Promise<void> {
+  public async sendRealtimeAudio(audioData: string, mimeType: string = 'audio/pcm;rate=16000'): Promise<boolean> {
     if (!this.session) {
-      this.log("Cannot send audio. Session is not connected.", LogLevel.ERROR);
-      return;
+      // Silently fail - this is expected during reconnection
+      return false;
     }
 
     try {
@@ -323,9 +349,11 @@ class LiveApiService {
         audio: audioBlob,
       });
 
-      this.log(`Sent audio chunk: ${Math.round(audioData.length * 3 / 4 / 1024)}KB`);
+      this.log(`Sent audio chunk: ${Math.round(audioData.length * 3 / 4 / 1024)}KB`, LogLevel.SUCCESS);
+      return true;
     } catch (error) {
-      this.log(`Error sending audio: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
+      this.log(`[${this.sessionHandleKey}] Error sending audio: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
+      return false;
     }
   }
 

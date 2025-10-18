@@ -30,10 +30,14 @@ export class ContinuousStreamingCapture {
   private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
   
   private isRunning = false;
-  
+
   // Audio buffering for transcription
   private isTranscribing = false;
   private audioBuffer: Array<{data: string, mimeType: string}> = [];
+
+  // Connection monitoring
+  private lastErrorLogTime = 0;
+  private consecutiveFailures = 0;
 
   constructor(
     config: StreamingConfig,
@@ -96,6 +100,8 @@ export class ContinuousStreamingCapture {
 
     this.log("Starting continuous audio streaming...", LogLevel.SUCCESS);
     this.isRunning = true;
+    this.consecutiveFailures = 0;
+    this.lastErrorLogTime = 0;
 
     await this.startAudioStreaming();
 
@@ -140,11 +146,31 @@ export class ContinuousStreamingCapture {
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
         const mimeType = `audio/pcm;rate=${this.audioContext!.sampleRate}`;
 
+        // Check if transcript service is connected before sending
+        const isConnected = this.transcriptService?.isConnected();
+        if (!isConnected) {
+          // Service disconnected - buffer audio instead of losing it
+          this.audioBuffer.push({ data: base64Audio, mimeType });
+
+          // Prevent buffer from growing too large (max 100 chunks ~10 seconds)
+          if (this.audioBuffer.length > 100) {
+            this.audioBuffer.shift();
+          }
+
+          // Log disconnection status occasionally (throttled to once every 5 seconds)
+          const now = Date.now();
+          if (now - this.lastErrorLogTime > 5000) {
+            this.log("Transcript service disconnected. Buffering audio until reconnection...", LogLevel.WARN);
+            this.lastErrorLogTime = now;
+          }
+          return;
+        }
+
         // Audio buffering logic
         if (this.isTranscribing) {
           // Buffer audio during transcription
           this.audioBuffer.push({ data: base64Audio, mimeType });
-          
+
           // Prevent buffer from growing too large (max 50 chunks ~5 seconds at 100ms chunks)
           if (this.audioBuffer.length > 50) {
             this.log("Audio buffer full, dropping oldest chunk", LogLevel.WARN);
@@ -153,11 +179,27 @@ export class ContinuousStreamingCapture {
         } else {
           // Not transcribing - flush any buffered audio first
           if (this.audioBuffer.length > 0) {
+            this.log(`Reconnected! Flushing ${this.audioBuffer.length} buffered chunks...`, LogLevel.SUCCESS);
             this.flushAudioBuffer();
+            this.consecutiveFailures = 0;
           }
-          
+
           // Send current audio chunk to transcript session
-          this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
+          const success = this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
+
+          // Track failures
+          if (!success) {
+            this.consecutiveFailures++;
+            if (this.consecutiveFailures > 10) {
+              const now = Date.now();
+              if (now - this.lastErrorLogTime > 5000) {
+                this.log(`Failed to send ${this.consecutiveFailures} consecutive audio chunks`, LogLevel.WARN);
+                this.lastErrorLogTime = now;
+              }
+            }
+          } else {
+            this.consecutiveFailures = 0;
+          }
         }
       };
 
