@@ -34,8 +34,14 @@ const InterviewMode: React.FC = () => {
         onStatusChange: (newStatus) => setStatus(newStatus),
         onError: (errorMsg) => setError(errorMsg),
         onTranscriptUpdate: (transcripts, current) => {
+          const timestamp = new Date().toISOString();
+          console.log(`[${timestamp}] 🎨 REACT STATE UPDATE: currentTranscript.length=${current.length}`);
+          console.log(`[${timestamp}] 🎨 Preview text: "${current.substring(0, 100)}${current.length > 100 ? '...' : ''}"`);
+
           setTranscript(transcripts);
           setCurrentTranscript(current);
+
+          console.log(`[${timestamp}] ✅ React setState called`);
         },
         onReplyUpdate: (replyList, current) => {
           setReplies(replyList);

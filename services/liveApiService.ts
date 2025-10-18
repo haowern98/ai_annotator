@@ -49,6 +49,7 @@ class LiveApiService {
   // Track current turn state for transcript accumulation
   private isUserSpeaking = false;
   private accumulatedTranscript = '';
+  private fragmentCounter = 0; // Track fragment count for debugging
 
   constructor(apiKey: string, log: LogFunction, sessionKey: string = 'default') {
     if (!apiKey) {
@@ -171,6 +172,14 @@ class LiveApiService {
                 const transcript = serverContentAny.inputTranscription;
                 const fragmentText = transcript.text || '';
 
+                // DETAILED LOGGING - Track every fragment
+                this.fragmentCounter++;
+                const prevLength = this.accumulatedTranscript.length;
+
+                this.log(`[Fragment #${this.fragmentCounter}] Text: "${fragmentText}"`, LogLevel.INFO);
+                this.log(`[Fragment #${this.fragmentCounter}] Finished: ${transcript.finished}`, LogLevel.INFO);
+                this.log(`[Fragment #${this.fragmentCounter}] Current accumulated length BEFORE: ${prevLength} chars`, LogLevel.INFO);
+
                 // Check if this is the start of a new turn (first fragment after previous turn ended)
                 const isNewTurn = !this.isUserSpeaking && fragmentText.length > 0;
 
@@ -178,18 +187,23 @@ class LiveApiService {
                   // First fragment of new turn - reset accumulation
                   this.isUserSpeaking = true;
                   this.accumulatedTranscript = fragmentText;
+                  this.fragmentCounter = 1; // Reset counter for new turn
                   this.log(`🎤 NEW TURN STARTED with: "${fragmentText}"`, LogLevel.SUCCESS);
                 } else if (this.isUserSpeaking) {
                   // Subsequent fragment - accumulate
                   this.accumulatedTranscript += fragmentText;
                 }
 
+                this.log(`[Fragment #${this.fragmentCounter}] Current accumulated length AFTER: ${this.accumulatedTranscript.length} chars`, LogLevel.INFO);
+
                 // Send accumulated text to callback for real-time display (not final)
                 if (this.accumulatedTranscript.length > 0) {
+                  this.log(`[Fragment #${this.fragmentCounter}] 📞 CALLING onTranscript with ${this.accumulatedTranscript.length} chars (isFinal=false)`, LogLevel.INFO);
                   callbacks.onTranscript(this.accumulatedTranscript, false);
+                  this.log(`[Fragment #${this.fragmentCounter}] ✅ onTranscript callback completed`, LogLevel.SUCCESS);
                 }
 
-                this.log(`📝 Accumulated: "${this.accumulatedTranscript.substring(0, 50)}${this.accumulatedTranscript.length > 50 ? '...' : ''}"`);
+                this.log(`📝 Accumulated: "${this.accumulatedTranscript.substring(0, 50)}${this.accumulatedTranscript.length > 50 ? '...' : ''}" (${this.accumulatedTranscript.length} chars total)`, LogLevel.INFO);
               }
 
               // DEBUG: Log full message structure to understand what we're receiving

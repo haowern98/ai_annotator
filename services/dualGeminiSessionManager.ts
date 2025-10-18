@@ -129,12 +129,23 @@ export class DualGeminiSessionManager {
       // Connect Transcript Service
       const connectTranscript = service1.connect({
         onTranscript: (text, isFinal) => {
+          const timestamp = new Date().toISOString();
+
           if (!isFinal) {
             // Partial transcript - update currentTranscript for real-time display
+            this.log(`[${timestamp}] 📥 onTranscript RECEIVED: ${text.length} chars, isFinal=false`, LogLevel.INFO);
+            this.log(`[${timestamp}] 📥 Text preview: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`, LogLevel.INFO);
+
             this.currentTranscript = text;
+
+            this.log(`[${timestamp}] 🔄 Calling onTranscriptUpdate with currentTranscript.length=${this.currentTranscript.length}`, LogLevel.INFO);
             this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
+            this.log(`[${timestamp}] ✅ onTranscriptUpdate completed`, LogLevel.SUCCESS);
           } else {
             // Final transcript - VAD detected end of turn
+            this.log(`[${timestamp}] 🏁 onTranscript RECEIVED: ${text.length} chars, isFinal=TRUE (FINAL)`, LogLevel.SUCCESS);
+            this.log(`[${timestamp}] 🏁 Final text: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`, LogLevel.INFO);
+
             // Create new timestamped box with the complete transcript
             this.transcripts.push({
               timestamp: new Date().toLocaleTimeString(),
