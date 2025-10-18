@@ -141,7 +141,7 @@ export class DualGeminiSessionManager {
           try {
             // Clean the text: Sometimes the AI wraps JSON in markdown
             const cleanText = text.replace(/```json|```/g, '').trim();
-            
+
             // Skip obviously incomplete responses (interrupted)
             if (cleanText === '{"transcript": "' || cleanText === '{"' || cleanText === '{"..."' || !cleanText.endsWith('}')) {
               this.log('Ignoring incomplete/interrupted transcript', LogLevel.WARN);
@@ -151,14 +151,14 @@ export class DualGeminiSessionManager {
               }
               return;
             }
-            
+
             // Parse the JSON string into a JavaScript object
             const parsed = JSON.parse(cleanText);
-            
+
             // Safely access the 'transcript' property and update the state
             if (parsed.transcript) {
               const transcriptText = parsed.transcript;
-              
+
               // Filter out empty transcripts
               if (!transcriptText || transcriptText.trim().length === 0) {
                 this.log('Ignoring empty transcript', LogLevel.WARN);
@@ -168,25 +168,54 @@ export class DualGeminiSessionManager {
                 }
                 return;
               }
-              
-              this.transcripts.push({ 
-                timestamp: new Date().toLocaleTimeString(), 
-                text: transcriptText 
+
+              this.transcripts.push({
+                timestamp: new Date().toLocaleTimeString(),
+                text: transcriptText
               });
               this.log(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
-              
+
               // Add transcript to queue for reply service
               this.transcriptQueue.push(transcriptText);
               this.processTranscriptQueue();
+            } else {
+              // JSON parsed but no 'transcript' field - show the whole thing
+              this.log(`JSON missing 'transcript' field. Showing raw response.`, LogLevel.WARN);
+              const rawText = text.trim();
+
+              // Don't show empty responses
+              if (rawText.length === 0) return;
+
+              this.transcripts.push({
+                timestamp: new Date().toLocaleTimeString(),
+                text: rawText
+              });
+
+              // Add to queue for reply service
+              this.transcriptQueue.push(rawText);
+              this.processTranscriptQueue();
             }
           } catch (e) {
-            // If parsing fails, log an error to help with debugging
-            this.log(`Failed to parse JSON from transcript service: ${text.substring(0,50)}`, LogLevel.ERROR);
+            // JSON parsing failed - show the raw response as fallback
+            this.log(`Failed to parse JSON from transcript service. Showing raw response.`, LogLevel.WARN);
+            const rawText = text.trim();
+
+            // Don't show empty responses
+            if (rawText.length === 0) return;
+
+            this.transcripts.push({
+              timestamp: new Date().toLocaleTimeString(),
+              text: rawText
+            });
+
+            // Add to queue for reply service
+            this.transcriptQueue.push(rawText);
+            this.processTranscriptQueue();
           }
-          
+
           this.currentTranscript = '';
           this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
-          
+
           // Transcription complete - resume audio streaming and flush buffer
           if (this.streamingCapture) {
             this.streamingCapture.setTranscribing(false);
