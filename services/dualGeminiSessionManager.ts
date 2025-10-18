@@ -213,28 +213,39 @@ export class DualGeminiSessionManager {
           try {
             // Clean the text
             const cleanText = text.replace(/```json|```/g, '').trim();
-            
+
             // Parse the JSON
             const parsed = JSON.parse(cleanText);
-            
+
             // Access the 'reply' property and update state
             if (parsed.reply) {
               const replyText = parsed.reply;
-              this.replies.push({ 
-                timestamp: new Date().toLocaleTimeString(), 
-                text: replyText 
+              this.replies.push({
+                timestamp: new Date().toLocaleTimeString(),
+                text: replyText
               });
               this.log(`Parsed reply: ${replyText.substring(0,30)}...`, LogLevel.SUCCESS);
+            } else {
+              // JSON parsed but no 'reply' field - show the whole thing
+              this.log(`JSON missing 'reply' field. Showing raw response.`, LogLevel.WARN);
+              this.replies.push({
+                timestamp: new Date().toLocaleTimeString(),
+                text: text
+              });
             }
           } catch (e) {
-            // Log parsing errors
-            this.log(`Failed to parse JSON from reply service: ${text}`, LogLevel.ERROR);
+            // JSON parsing failed - show the raw response as fallback
+            this.log(`Failed to parse JSON from reply service. Showing raw response.`, LogLevel.WARN);
+            this.replies.push({
+              timestamp: new Date().toLocaleTimeString(),
+              text: text
+            });
           }
           // Clear the "..." placeholder once the final reply is ready
           this.currentReply = '';
           this.isReplyGenerating = false;
           this.callbacks.onReplyUpdate(this.replies, this.currentReply);
-          
+
           // Process next item in queue
           this.processTranscriptQueue();
         },
