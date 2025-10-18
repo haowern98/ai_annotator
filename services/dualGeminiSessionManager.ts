@@ -4,6 +4,11 @@ import LiveApiService from './liveApiService';
 import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
 
 // Configuration for the two sessions
+
+// NOTE: TRANSCRIPT_PROMPT is commented out because we now use inputAudioTranscription
+// for real-time transcript accumulation. The model no longer needs to format transcripts as JSON.
+// Uncomment this block if you need to revert to JSON-based transcripts.
+/*
 const TRANSCRIPT_PROMPT = `You are transcribing audio from an interview.
 
 When the speaker finishes talking (turn complete), transcribe their ENTIRE statement from start to finish. Accumulate all words spoken during this complete turn.
@@ -17,6 +22,7 @@ Do NOT respond with partial sentences or fragments. Wait for the complete turn, 
 If the turn contains no clear speech, do NOT respond.
 
 Format: {"transcript": "[complete turn from start to finish]"}`;
+*/
 
 const REPLY_PROMPT = `You are a Malaysian who is studying at National University of Singapore who is interviewing for a software engineer position at a software engineering company.
 Respond ONLY with a valid JSON object in the following format:
@@ -124,7 +130,23 @@ export class DualGeminiSessionManager {
       const connectTranscript = service1.connect({
         onTranscript: (text, isFinal) => {
           if (!isFinal) {
+            // Partial transcript - update currentTranscript for real-time display
             this.currentTranscript = text;
+            this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
+          } else {
+            // Final transcript - VAD detected end of turn
+            // Create new timestamped box with the complete transcript
+            this.transcripts.push({
+              timestamp: new Date().toLocaleTimeString(),
+              text: text
+            });
+
+            // Add to reply queue
+            this.transcriptQueue.push(text);
+            this.processTranscriptQueue();
+
+            // Clear current transcript after finalizing
+            this.currentTranscript = '';
             this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
           }
         },
@@ -138,6 +160,13 @@ export class DualGeminiSessionManager {
           // Partial text arriving - buffering should already be active from onModelTurnStart
         },
         onModelResponse: (text) => {
+          /*
+          COMMENTED OUT: This fallback JSON transcript parsing is disabled because
+          inputAudioTranscription is working perfectly. This was causing duplicate transcripts.
+          Uncomment this entire block if you need to revert to JSON-based transcripts.
+
+          // This is now a fallback in case the API doesn't send userTranscription
+          // or if we're using a system instruction that returns JSON format
           try {
             // Clean the text: Sometimes the AI wraps JSON in markdown
             const cleanText = text.replace(/```json|```/g, '').trim();
@@ -169,15 +198,22 @@ export class DualGeminiSessionManager {
                 return;
               }
 
-              this.transcripts.push({
-                timestamp: new Date().toLocaleTimeString(),
-                text: transcriptText
-              });
-              this.log(`Parsed transcript: ${transcriptText.substring(0,30)}...`);
+              // Only add if not already handled by onTranscript callback
+              // Check if this transcript is already in the list
+              const isDuplicate = this.transcripts.some(t => t.text === transcriptText);
+              if (!isDuplicate) {
+                this.transcripts.push({
+                  timestamp: new Date().toLocaleTimeString(),
+                  text: transcriptText
+                });
+                this.log(`Parsed transcript (fallback): ${transcriptText.substring(0,30)}...`);
 
-              // Add transcript to queue for reply service
-              this.transcriptQueue.push(transcriptText);
-              this.processTranscriptQueue();
+                // Add transcript to queue for reply service
+                this.transcriptQueue.push(transcriptText);
+                this.processTranscriptQueue();
+
+                this.callbacks.onTranscriptUpdate(this.transcripts, '');
+              }
             } else {
               // JSON parsed but no 'transcript' field - show the whole thing
               this.log(`JSON missing 'transcript' field. Showing raw response.`, LogLevel.WARN);
@@ -186,14 +222,19 @@ export class DualGeminiSessionManager {
               // Don't show empty responses
               if (rawText.length === 0) return;
 
-              this.transcripts.push({
-                timestamp: new Date().toLocaleTimeString(),
-                text: rawText
-              });
+              const isDuplicate = this.transcripts.some(t => t.text === rawText);
+              if (!isDuplicate) {
+                this.transcripts.push({
+                  timestamp: new Date().toLocaleTimeString(),
+                  text: rawText
+                });
 
-              // Add to queue for reply service
-              this.transcriptQueue.push(rawText);
-              this.processTranscriptQueue();
+                // Add to queue for reply service
+                this.transcriptQueue.push(rawText);
+                this.processTranscriptQueue();
+
+                this.callbacks.onTranscriptUpdate(this.transcripts, '');
+              }
             }
           } catch (e) {
             // JSON parsing failed - show the raw response as fallback
@@ -203,20 +244,24 @@ export class DualGeminiSessionManager {
             // Don't show empty responses
             if (rawText.length === 0) return;
 
-            this.transcripts.push({
-              timestamp: new Date().toLocaleTimeString(),
-              text: rawText
-            });
+            const isDuplicate = this.transcripts.some(t => t.text === rawText);
+            if (!isDuplicate) {
+              this.transcripts.push({
+                timestamp: new Date().toLocaleTimeString(),
+                text: rawText
+              });
 
-            // Add to queue for reply service
-            this.transcriptQueue.push(rawText);
-            this.processTranscriptQueue();
+              // Add to queue for reply service
+              this.transcriptQueue.push(rawText);
+              this.processTranscriptQueue();
+
+              this.callbacks.onTranscriptUpdate(this.transcripts, '');
+            }
           }
 
-          this.currentTranscript = '';
-          this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
+          END OF COMMENTED BLOCK */
 
-          // Transcription complete - resume audio streaming and flush buffer
+          // Still need to resume audio streaming after model responds
           if (this.streamingCapture) {
             this.streamingCapture.setTranscribing(false);
           }
@@ -227,7 +272,7 @@ export class DualGeminiSessionManager {
           this.cleanup();
         },
         onClose: () => this.log('Transcript service closed.'),
-      }, TRANSCRIPT_PROMPT);
+      }, undefined); // TRANSCRIPT_PROMPT is commented out - using default system instruction
       
       // Connect Reply Service
       const connectReply = service2.connect({

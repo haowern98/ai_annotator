@@ -30,11 +30,11 @@ class LiveApiService {
   private log: LogFunction;
   private isIntentionallyClosing = false;
   private currentMessage = '';
-  
+
   // Session resumption state
   private sessionHandleKey: string; // Unique localStorage key for this service instance
   private currentSessionHandle: string | null = null;
-  
+
   // Reconnection state
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 3;
@@ -42,9 +42,13 @@ class LiveApiService {
   private currentCallbacks: LiveApiCallbacks | null = null;
   private currentSystemInstruction: string | undefined = undefined;
   private hasRetriedWithFreshSession = false; // Track if we've already tried a fresh session
-  
+
   // Track if we've already signaled the start of this turn
   private hasSignaledTurnStart = false;
+
+  // Track current turn state for transcript accumulation
+  private isUserSpeaking = false;
+  private accumulatedTranscript = '';
 
   constructor(apiKey: string, log: LogFunction, sessionKey: string = 'default') {
     if (!apiKey) {
@@ -113,8 +117,9 @@ class LiveApiService {
     const config = {
       responseModalities: [Modality.TEXT], // Start with TEXT only to avoid audio issues
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+      inputAudioTranscription: {}, // Enable real-time input audio transcription
       voiceActivityDetection: {
-        threshold: 0.5, // Sensitivity (0-1, higher = more strict about detecting speech end)
+        threshold: 0.4, // Sensitivity (0-1, higher = more strict about detecting speech end)
       },
       contextWindowCompression: {
         triggerTokens: '25600',
@@ -151,19 +156,46 @@ class LiveApiService {
                 this.log(`[${this.sessionHandleKey}] Session handle updated: ${update.newHandle.substring(0, 8)}...`, LogLevel.INFO);
               }
             }
-            
+
             // Handle GoAway message (connection about to close)
             if (message.goAway) {
               const timeLeft = message.goAway.timeLeft || 'unknown';
               this.log(`[${this.sessionHandleKey}] ⚠️ Connection will close in ${timeLeft}. Preparing to reconnect...`, LogLevel.WARN);
               // The connection will close soon, we'll handle reconnection in onclose
             }
-            
-            // DEBUG: Log full message structure to understand what we're receiving
+
+            // Handle inputTranscription - accumulate word fragments in real-time
             if (message.serverContent) {
+              const serverContentAny = message.serverContent as any;
+              if (serverContentAny.inputTranscription) {
+                const transcript = serverContentAny.inputTranscription;
+                const fragmentText = transcript.text || '';
+
+                // Check if this is the start of a new turn (first fragment after previous turn ended)
+                const isNewTurn = !this.isUserSpeaking && fragmentText.length > 0;
+
+                if (isNewTurn) {
+                  // First fragment of new turn - reset accumulation
+                  this.isUserSpeaking = true;
+                  this.accumulatedTranscript = fragmentText;
+                  this.log(`🎤 NEW TURN STARTED with: "${fragmentText}"`, LogLevel.SUCCESS);
+                } else if (this.isUserSpeaking) {
+                  // Subsequent fragment - accumulate
+                  this.accumulatedTranscript += fragmentText;
+                }
+
+                // Send accumulated text to callback for real-time display (not final)
+                if (this.accumulatedTranscript.length > 0) {
+                  callbacks.onTranscript(this.accumulatedTranscript, false);
+                }
+
+                this.log(`📝 Accumulated: "${this.accumulatedTranscript.substring(0, 50)}${this.accumulatedTranscript.length > 50 ? '...' : ''}"`);
+              }
+
+              // DEBUG: Log full message structure to understand what we're receiving
               this.log(`Message type: ${JSON.stringify(Object.keys(message.serverContent))}`);
             }
-            
+
             // CRITICAL: Detect when model starts responding (BEFORE any text arrives)
             if (message.serverContent?.modelTurn && !this.hasSignaledTurnStart) {
               this.hasSignaledTurnStart = true;
@@ -187,30 +219,25 @@ class LiveApiService {
               }
             }
             
-            // Handle user transcription (speech-to-text from interviewer)
-            // Check multiple possible locations for transcript data
-            const serverContent = message.serverContent as any; // Type assertion to access potential transcript properties
-            if (serverContent?.userTranscription) {
-              const transcript = serverContent.userTranscription;
-              if (transcript.text) {
-                const isFinal = transcript.isFinal || false;
-                this.log(`User transcript (${isFinal ? 'final' : 'partial'}): "${transcript.text.substring(0, 50)}..."`);
-                callbacks.onTranscript(transcript.text, isFinal);
-              }
-            }
-            
-            // Alternative: Check if transcript is in turnComplete
-            if (serverContent?.turnComplete && serverContent.transcript) {
-              const transcriptText = serverContent.transcript;
-              this.log(`Turn complete with transcript: "${transcriptText.substring(0, 50)}..."`);
-              callbacks.onTranscript(transcriptText, true);
-            }
             
             // Handle turn complete
             if (message.serverContent?.turnComplete) {
               // Reset the turn start flag for next turn
               this.hasSignaledTurnStart = false;
-              
+
+              // Finalize accumulated user transcript (VAD detected end of turn)
+              if (this.isUserSpeaking && this.accumulatedTranscript.length > 0) {
+                this.log(`✅ TURN COMPLETE - Final transcript: "${this.accumulatedTranscript.substring(0, 50)}${this.accumulatedTranscript.length > 50 ? '...' : ''}"`, LogLevel.SUCCESS);
+
+                // Send final transcript with isFinal=true
+                callbacks.onTranscript(this.accumulatedTranscript, true);
+
+                // Reset turn state for next turn
+                this.isUserSpeaking = false;
+                this.accumulatedTranscript = '';
+              }
+
+              // Handle model response completion
               if (this.currentMessage.trim()) {
                 const completeMessage = this.currentMessage.trim();
                 callbacks.onModelResponse(completeMessage);
@@ -417,11 +444,12 @@ class LiveApiService {
   }
 
   public disconnect(): void {
+
     if (this.reconnectTimeoutId) {
       window.clearTimeout(this.reconnectTimeoutId);
       this.reconnectTimeoutId = null;
     }
-    
+
     if (this.session) {
       this.log(`[${this.sessionHandleKey}] Disconnecting session intentionally.`, LogLevel.INFO);
       this.isIntentionallyClosing = true;
@@ -429,7 +457,7 @@ class LiveApiService {
       this.session.close();
       this.session = undefined;
     }
-    
+
     // Don't clear session handle on intentional disconnect
     // This allows resuming the session later if needed
   }
