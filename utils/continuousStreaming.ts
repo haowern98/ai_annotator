@@ -26,7 +26,7 @@ export class ContinuousStreamingCapture {
   private mediaStream: MediaStream | null = null;
   
   private audioContext: AudioContext | null = null;
-  private scriptProcessor: ScriptProcessorNode | null = null;
+  private audioWorkletNode: AudioWorkletNode | null = null;
   private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
   
   private isRunning = false;
@@ -130,19 +130,18 @@ export class ContinuousStreamingCapture {
       this.audioContext = new AudioContext({ sampleRate: 16000 });
       const audioStream = new MediaStream([audioTracks[0]]);
       this.mediaStreamSource = this.audioContext.createMediaStreamSource(audioStream);
-      
-      const bufferSize = 4096;
-      this.scriptProcessor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
 
-      this.scriptProcessor.onaudioprocess = (e) => {
+      // Load AudioWorklet processor module
+      await this.audioContext.audioWorklet.addModule('/audio-processor.js');
+
+      // Create AudioWorkletNode
+      this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'audio-capture-processor');
+
+      // Handle messages from audio worklet (runs on main thread)
+      this.audioWorkletNode.port.onmessage = (event) => {
         if (!this.isRunning) return;
 
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
+        const pcmData: Int16Array = event.data.pcmData;
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
         const mimeType = `audio/pcm;rate=${this.audioContext!.sampleRate}`;
 
@@ -203,15 +202,17 @@ export class ContinuousStreamingCapture {
         }
       };
 
-      this.mediaStreamSource.connect(this.scriptProcessor);
-      this.scriptProcessor.connect(this.audioContext.destination);
-      this.log(`Audio streaming started at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
+      // Connect audio graph
+      this.mediaStreamSource.connect(this.audioWorkletNode);
+      this.audioWorkletNode.connect(this.audioContext.destination);
+
+      this.log(`Audio streaming started with AudioWorklet at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
     } catch (error) {
       this.log(`Failed to start audio streaming: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
     }
   }
 
-  private arrayBufferToBase64(buffer: ArrayBuffer): string {
+  private arrayBufferToBase64(buffer: ArrayBuffer | SharedArrayBuffer): string {
     const bytes = new Uint8Array(buffer);
     let binary = '';
     for (let i = 0; i < bytes.byteLength; i++) {
@@ -221,9 +222,10 @@ export class ContinuousStreamingCapture {
   }
 
   private stopAudioStreaming(): void {
-    if (this.scriptProcessor) {
-      this.scriptProcessor.disconnect();
-      this.scriptProcessor = null;
+    if (this.audioWorkletNode) {
+      this.audioWorkletNode.port.onmessage = null; // Clean up message handler
+      this.audioWorkletNode.disconnect();
+      this.audioWorkletNode = null;
     }
     if (this.mediaStreamSource) {
       this.mediaStreamSource.disconnect();
@@ -233,7 +235,7 @@ export class ContinuousStreamingCapture {
       this.audioContext.close();
       this.audioContext = null;
     }
-    
+
     // Signal end of audio to transcript session only
     this.transcriptService?.endAudioStream();
 
