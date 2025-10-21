@@ -51,6 +51,9 @@ class LiveApiService {
   private accumulatedTranscript = '';
   private fragmentCounter = 0; // Track fragment count for debugging
 
+  // Character limit for automatic session reset during long speech
+  private readonly MAX_TRANSCRIPT_CHARS = 300;
+
   constructor(apiKey: string, log: LogFunction, sessionKey: string = 'default') {
     if (!apiKey) {
       log("API key is missing.", LogLevel.ERROR);
@@ -120,7 +123,7 @@ class LiveApiService {
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
       inputAudioTranscription: {}, // Enable real-time input audio transcription
       voiceActivityDetection: {
-        threshold: 0.4, // Sensitivity (0-1, higher = more strict about detecting speech end)
+        threshold: 0.5, // Sensitivity (0-1, higher = more strict about detecting speech end)
       },
       contextWindowCompression: {
         triggerTokens: '25600',
@@ -204,6 +207,29 @@ class LiveApiService {
                 }
 
                 this.log(`📝 Accumulated: "${this.accumulatedTranscript.substring(0, 50)}${this.accumulatedTranscript.length > 50 ? '...' : ''}" (${this.accumulatedTranscript.length} chars total)`, LogLevel.INFO);
+
+                // Check if accumulated transcript exceeds character limit during speech
+                if (this.isUserSpeaking && this.accumulatedTranscript.length >= this.MAX_TRANSCRIPT_CHARS) {
+                  this.log(`⚠️ Character limit reached (${this.accumulatedTranscript.length}/${this.MAX_TRANSCRIPT_CHARS}). Finalizing current transcript and resetting session...`, LogLevel.WARN);
+
+                  // Send current accumulated text as final transcript
+                  callbacks.onTranscript(this.accumulatedTranscript, true);
+
+                  // Reset turn state
+                  this.isUserSpeaking = false;
+                  this.accumulatedTranscript = '';
+                  this.fragmentCounter = 0;
+
+                  // Clear and reset session for fresh start
+                  this.log(`[${this.sessionHandleKey}] Clearing session due to character limit...`, LogLevel.INFO);
+                  this.clearSession();
+
+                  // Reconnect with fresh session
+                  this.log(`[${this.sessionHandleKey}] Reconnecting with fresh session after character limit reset...`, LogLevel.INFO);
+                  this.attemptReconnection(callbacks, this.currentSystemInstruction);
+
+                  return; // Stop processing this fragment
+                }
               }
 
               // DEBUG: Log full message structure to understand what we're receiving
