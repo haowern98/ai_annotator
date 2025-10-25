@@ -27,7 +27,7 @@ Format: {"transcript": "[complete turn from start to finish]"}`;
 const REPLY_PROMPT = `You are a Malaysian who is studying at National University of Singapore who is interviewing for a software engineer position at a software engineering company.
 Respond ONLY with a valid JSON object in the following format:
 {
-  "reply": "[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, provide a more detailed response with examples and elaboration, but still be concise]"
+  "reply": "[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, use the STAR framework to provide a more detailed response with examples and elaboration, but still be concise]"
 }`;
 
 const STREAMING_CONFIG = {

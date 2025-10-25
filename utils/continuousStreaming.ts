@@ -151,8 +151,8 @@ export class ContinuousStreamingCapture {
           // Service disconnected - buffer audio instead of losing it
           this.audioBuffer.push({ data: base64Audio, mimeType });
 
-          // Prevent buffer from growing too large (max 100 chunks ~10 seconds)
-          if (this.audioBuffer.length > 100) {
+          // Prevent buffer from growing too large (max 200 chunks ~20 seconds)
+          if (this.audioBuffer.length > 200) {
             this.audioBuffer.shift();
           }
 
@@ -170,8 +170,8 @@ export class ContinuousStreamingCapture {
           // Buffer audio during transcription
           this.audioBuffer.push({ data: base64Audio, mimeType });
 
-          // Prevent buffer from growing too large (max 50 chunks ~5 seconds at 100ms chunks)
-          if (this.audioBuffer.length > 50) {
+          // Prevent buffer from growing too large (max 200 chunks ~20 seconds at 100ms chunks)
+          if (this.audioBuffer.length > 200) {
             this.log("Audio buffer full, dropping oldest chunk", LogLevel.WARN);
             this.audioBuffer.shift();
           }
