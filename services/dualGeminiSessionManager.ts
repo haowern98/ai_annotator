@@ -288,10 +288,17 @@ export class DualGeminiSessionManager {
       // Connect Reply Service
       const connectReply = service2.connect({
         onTranscript: () => {},
+        onModelTurnStart: () => {
+          // Reply is starting - pause audio streaming
+          if (this.streamingCapture) {
+            this.streamingCapture.setTranscribing(true);
+          }
+          this.isReplyGenerating = true;
+          this.log('Reply generation started - buffering audio', LogLevel.INFO);
+        },
         onPartialResponse: (textChunk) => {
           // Show a placeholder "..." instead of the raw JSON chunks
           this.currentReply = this.currentReply === '' ? '...' : this.currentReply;
-          this.isReplyGenerating = true;
           this.callbacks.onReplyUpdate(this.replies, this.currentReply);
         },
         onModelResponse: (text) => {
@@ -329,6 +336,13 @@ export class DualGeminiSessionManager {
           // Clear the "..." placeholder once the final reply is ready
           this.currentReply = '';
           this.isReplyGenerating = false;
+          
+          // Resume audio streaming - reply is complete
+          if (this.streamingCapture) {
+            this.streamingCapture.setTranscribing(false);
+            this.log('Reply generation complete - resuming audio streaming', LogLevel.SUCCESS);
+          }
+          
           this.callbacks.onReplyUpdate(this.replies, this.currentReply);
 
           // Process next item in queue
