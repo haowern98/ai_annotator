@@ -1,11 +1,11 @@
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
-import basicSsl from '@vitejs/plugin-basic-ssl';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+
     return {
-      plugins: [basicSsl()],
+      plugins: [],
       server: {
         host: '0.0.0.0',
         port: 5173,
@@ -18,6 +18,15 @@ export default defineConfig(({ mode }) => {
         alias: {
           '@': path.resolve(__dirname, '.'),
         }
-      }
+      },
+      base: './', // Important for Electron to load files correctly
+      build: {
+        rollupOptions: {
+          input: {
+            main: path.resolve(__dirname, 'index.html'),
+            overlay: path.resolve(__dirname, 'overlay.html'),
+          },
+        },
+      },
     };
 });

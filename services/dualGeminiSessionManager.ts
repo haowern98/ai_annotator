@@ -1,7 +1,10 @@
 import React from 'react';
 import { AppStatus, LogLevel } from '../types';
 import LiveApiService from './liveApiService';
+import NativeWhisperService from './nativeWhisperService';
 import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
+import { captureScreen, isElectron } from '../utils/screenCapture';
+import { float32ToPCM16, resampleAudio, mergeFloat32Arrays, isSilence } from '../utils/audioConverter';
 
 // Configuration for the two sessions
 
@@ -54,7 +57,7 @@ interface DualSessionCallbacks {
 }
 
 export class DualGeminiSessionManager {
-  private transcriptService: LiveApiService | null = null;
+  private whisperService: NativeWhisperService | null = null;  // NEW: Local Whisper for transcription
   private replyService: LiveApiService | null = null;
   private streamingCapture: ContinuousStreamingCapture | null = null;
   
@@ -72,6 +75,15 @@ export class DualGeminiSessionManager {
   
   // Track if streaming has been initialized to prevent race conditions
   private streamingInitialized: boolean = false;
+  
+  // Audio buffering for native Whisper processing
+  private audioChunks: Float32Array[] = [];
+  private readonly CHUNK_DURATION_MS = 6000; // 6 seconds per chunk for better context
+  private readonly OVERLAP_DURATION_MS = 2000; // Keep 2 seconds of overlap
+  private readonly SAMPLE_RATE = 16000; // Whisper expects 16kHz
+  private processingAudio: boolean = false;
+  private partialTranscript: string = ''; // Accumulate within session
+  private overlapBuffer: Float32Array[] = []; // Store last 2 seconds for overlap
 
   constructor(
     callbacks: DualSessionCallbacks,
@@ -81,8 +93,11 @@ export class DualGeminiSessionManager {
     this.log = log;
   }
 
-  public async start(apiKey: string): Promise<void> {
-    this.log('Dual Session Manager: Starting...');
+  public async start(
+    apiKey: string,
+    onSourceRequired?: (sources: any[]) => Promise<string>
+  ): Promise<void> {
+    this.log('Dual Session Manager: Starting with native Whisper transcription...');
     
     if (!apiKey) {
       const msg = "API_KEY environment variable not set.";
@@ -101,15 +116,22 @@ export class DualGeminiSessionManager {
     this.transcriptQueue = [];
     this.isReplyGenerating = false;
     this.streamingInitialized = false;
+    this.audioChunks = [];
+    this.processingAudio = false;
     
     this.callbacks.onTranscriptUpdate([], '');
     this.callbacks.onReplyUpdate([], '');
     
-    this.log('Initializing dual-session Live API...');
+    this.log('Initializing native Whisper + Gemini reply service...');
     this.callbacks.onStatusChange(AppStatus.CAPTURING);
 
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      this.log(`Requesting screen capture... ${isElectron() ? '(Electron mode)' : '(Browser mode)'}`);
+      const stream = await captureScreen({
+        video: true,
+        audio: true,
+        onSourceRequired
+      });
       this.mediaStream = stream;
       
       // Verify audio tracks are present
@@ -119,197 +141,47 @@ export class DualGeminiSessionManager {
       } else {
         this.log(`Audio tracks found: ${audioTracks.length} track(s)`, LogLevel.SUCCESS);
       }
+
+      // Verify video tracks are present
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length === 0) {
+        this.log('WARNING: No video tracks in media stream. Video preview may not work.', LogLevel.WARN);
+      } else {
+        this.log(`Video tracks found: ${videoTracks.length} track(s)`, LogLevel.SUCCESS);
+      }
       
       this.callbacks.onStatusChange(AppStatus.CONNECTING);
 
-      // Create both service instances with unique session keys for separate handle storage
-      const service1 = new LiveApiService(apiKey, this.log, 'transcript');
-      const service2 = new LiveApiService(apiKey, this.log, 'reply');
-
-      // Connect Transcript Service
-      const connectTranscript = service1.connect({
-        onTranscript: (text, isFinal) => {
-          const timestamp = new Date().toISOString();
-
-          if (!isFinal) {
-            // Partial transcript - update currentTranscript for real-time display
-            this.log(`[${timestamp}] 📥 onTranscript RECEIVED: ${text.length} chars, isFinal=false`, LogLevel.INFO);
-            this.log(`[${timestamp}] 📥 Text preview: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`, LogLevel.INFO);
-
-            this.currentTranscript = text;
-
-            this.log(`[${timestamp}] 🔄 Calling onTranscriptUpdate with currentTranscript.length=${this.currentTranscript.length}`, LogLevel.INFO);
-            this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
-            this.log(`[${timestamp}] ✅ onTranscriptUpdate completed`, LogLevel.SUCCESS);
-          } else {
-            // Final transcript - VAD detected end of turn
-            this.log(`[${timestamp}] 🏁 onTranscript RECEIVED: ${text.length} chars, isFinal=TRUE (FINAL)`, LogLevel.SUCCESS);
-            this.log(`[${timestamp}] 🏁 Final text: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`, LogLevel.INFO);
-
-            // Create new timestamped box with the complete transcript
-            this.transcripts.push({
-              timestamp: new Date().toLocaleTimeString(),
-              text: text
-            });
-
-            // Add to reply queue
-            this.transcriptQueue.push(text);
-            this.processTranscriptQueue();
-
-            // Clear current transcript after finalizing
-            this.currentTranscript = '';
-            this.callbacks.onTranscriptUpdate(this.transcripts, this.currentTranscript);
-          }
-        },
-        onModelTurnStart: () => {
-          // CRITICAL: Model started responding - start buffering IMMEDIATELY
-          if (this.streamingCapture) {
-            this.streamingCapture.setTranscribing(true);
-          }
-        },
-        onPartialResponse: (textChunk) => {
-          // Partial text arriving - buffering should already be active from onModelTurnStart
-        },
-        onModelResponse: (text) => {
-          /*
-          COMMENTED OUT: This fallback JSON transcript parsing is disabled because
-          inputAudioTranscription is working perfectly. This was causing duplicate transcripts.
-          Uncomment this entire block if you need to revert to JSON-based transcripts.
-
-          // This is now a fallback in case the API doesn't send userTranscription
-          // or if we're using a system instruction that returns JSON format
-          try {
-            // Clean the text: Sometimes the AI wraps JSON in markdown
-            const cleanText = text.replace(/```json|```/g, '').trim();
-
-            // Skip obviously incomplete responses (interrupted)
-            if (cleanText === '{"transcript": "' || cleanText === '{"' || cleanText === '{"..."' || !cleanText.endsWith('}')) {
-              this.log('Ignoring incomplete/interrupted transcript', LogLevel.WARN);
-              // Resume audio streaming for incomplete responses
-              if (this.streamingCapture) {
-                this.streamingCapture.setTranscribing(false);
-              }
-              return;
-            }
-
-            // Parse the JSON string into a JavaScript object
-            const parsed = JSON.parse(cleanText);
-
-            // Safely access the 'transcript' property and update the state
-            if (parsed.transcript) {
-              const transcriptText = parsed.transcript;
-
-              // Filter out empty transcripts
-              if (!transcriptText || transcriptText.trim().length === 0) {
-                this.log('Ignoring empty transcript', LogLevel.WARN);
-                // Resume audio streaming for empty transcripts
-                if (this.streamingCapture) {
-                  this.streamingCapture.setTranscribing(false);
-                }
-                return;
-              }
-
-              // Only add if not already handled by onTranscript callback
-              // Check if this transcript is already in the list
-              const isDuplicate = this.transcripts.some(t => t.text === transcriptText);
-              if (!isDuplicate) {
-                this.transcripts.push({
-                  timestamp: new Date().toLocaleTimeString(),
-                  text: transcriptText
-                });
-                this.log(`Parsed transcript (fallback): ${transcriptText.substring(0,30)}...`);
-
-                // Add transcript to queue for reply service
-                this.transcriptQueue.push(transcriptText);
-                this.processTranscriptQueue();
-
-                this.callbacks.onTranscriptUpdate(this.transcripts, '');
-              }
-            } else {
-              // JSON parsed but no 'transcript' field - show the whole thing
-              this.log(`JSON missing 'transcript' field. Showing raw response.`, LogLevel.WARN);
-              const rawText = text.trim();
-
-              // Don't show empty responses
-              if (rawText.length === 0) return;
-
-              const isDuplicate = this.transcripts.some(t => t.text === rawText);
-              if (!isDuplicate) {
-                this.transcripts.push({
-                  timestamp: new Date().toLocaleTimeString(),
-                  text: rawText
-                });
-
-                // Add to queue for reply service
-                this.transcriptQueue.push(rawText);
-                this.processTranscriptQueue();
-
-                this.callbacks.onTranscriptUpdate(this.transcripts, '');
-              }
-            }
-          } catch (e) {
-            // JSON parsing failed - show the raw response as fallback
-            this.log(`Failed to parse JSON from transcript service. Showing raw response.`, LogLevel.WARN);
-            const rawText = text.trim();
-
-            // Don't show empty responses
-            if (rawText.length === 0) return;
-
-            const isDuplicate = this.transcripts.some(t => t.text === rawText);
-            if (!isDuplicate) {
-              this.transcripts.push({
-                timestamp: new Date().toLocaleTimeString(),
-                text: rawText
-              });
-
-              // Add to queue for reply service
-              this.transcriptQueue.push(rawText);
-              this.processTranscriptQueue();
-
-              this.callbacks.onTranscriptUpdate(this.transcripts, '');
-            }
-          }
-
-          END OF COMMENTED BLOCK */
-
-          // Still need to resume audio streaming after model responds
-          if (this.streamingCapture) {
-            this.streamingCapture.setTranscribing(false);
-          }
-        },
-        onError: (e) => { 
-          this.callbacks.onError(`Transcript Service Error: ${e}`);
-          this.callbacks.onStatusChange(AppStatus.ERROR);
-          this.cleanup();
-        },
-        onClose: () => this.log('Transcript service closed.'),
-      }, undefined); // TRANSCRIPT_PROMPT is commented out - using default system instruction
+      // Initialize Native Whisper Service
+      this.log('Initializing native Whisper service...', LogLevel.INFO);
+      const whisperService = new NativeWhisperService(this.log, {
+        modelSize: 'small',  // Fast, ~75MB model
+        language: 'en',
+        temperature: 0.0,
+      });
       
-      // Connect Reply Service
-      const connectReply = service2.connect({
-        onTranscript: () => {},
+      await whisperService.initialize();
+      this.whisperService = whisperService;
+      this.log('Native Whisper service initialized successfully', LogLevel.SUCCESS);
+
+      // Connect Reply Service (Gemini for AI responses only)
+      const replyService = new LiveApiService(apiKey, this.log, 'reply');
+      
+      await replyService.connect({
+        onTranscript: () => {},  // Not used - Whisper handles transcription
         onModelTurnStart: () => {
-          // Reply is starting - pause audio streaming
-          if (this.streamingCapture) {
-            this.streamingCapture.setTranscribing(true);
-          }
           this.isReplyGenerating = true;
-          this.log('Reply generation started - buffering audio', LogLevel.INFO);
+          this.log('Reply generation started', LogLevel.INFO);
         },
         onPartialResponse: (textChunk) => {
-          // Show a placeholder "..." instead of the raw JSON chunks
           this.currentReply = this.currentReply === '' ? '...' : this.currentReply;
           this.callbacks.onReplyUpdate(this.replies, this.currentReply);
         },
         onModelResponse: (text) => {
           try {
-            // Clean the text
             const cleanText = text.replace(/```json|```/g, '').trim();
-
-            // Parse the JSON
             const parsed = JSON.parse(cleanText);
 
-            // Access the 'reply' property and update state
             if (parsed.reply) {
               const replyText = parsed.reply;
               this.replies.push({
@@ -318,7 +190,6 @@ export class DualGeminiSessionManager {
               });
               this.log(`Parsed reply: ${replyText.substring(0,30)}...`, LogLevel.SUCCESS);
             } else {
-              // JSON parsed but no 'reply' field - show the whole thing
               this.log(`JSON missing 'reply' field. Showing raw response.`, LogLevel.WARN);
               this.replies.push({
                 timestamp: new Date().toLocaleTimeString(),
@@ -326,26 +197,18 @@ export class DualGeminiSessionManager {
               });
             }
           } catch (e) {
-            // JSON parsing failed - show the raw response as fallback
             this.log(`Failed to parse JSON from reply service. Showing raw response.`, LogLevel.WARN);
             this.replies.push({
               timestamp: new Date().toLocaleTimeString(),
               text: text
             });
           }
-          // Clear the "..." placeholder once the final reply is ready
+          
           this.currentReply = '';
           this.isReplyGenerating = false;
-          
-          // Resume audio streaming - reply is complete
-          if (this.streamingCapture) {
-            this.streamingCapture.setTranscribing(false);
-            this.log('Reply generation complete - resuming audio streaming', LogLevel.SUCCESS);
-          }
+          this.log('Reply generation complete', LogLevel.SUCCESS);
           
           this.callbacks.onReplyUpdate(this.replies, this.currentReply);
-
-          // Process next item in queue
           this.processTranscriptQueue();
         },
         onError: (e) => { 
@@ -356,48 +219,22 @@ export class DualGeminiSessionManager {
         onClose: () => this.log('Reply service closed.'),
       }, REPLY_PROMPT);
 
-      await Promise.all([connectTranscript, connectReply]);
-
-      this.log('Both API services connected successfully.', LogLevel.SUCCESS);
-      this.transcriptService = service1;
-      this.replyService = service2;
+      this.log('Reply service connected successfully.', LogLevel.SUCCESS);
+      this.replyService = replyService;
       this.callbacks.onStatusChange(AppStatus.ANALYZING);
 
-      // CRITICAL: Add delay and validate connections are still active
-      // This prevents race conditions where services disconnect immediately after connecting
-      this.log('Waiting for services to stabilize...', LogLevel.INFO);
+      // Wait for service to stabilize
+      this.log('Waiting for service to stabilize...', LogLevel.INFO);
       await new Promise(resolve => setTimeout(resolve, 500));
 
-      // Validate both services are still connected after delay
-      if (!service1.isConnected() || !service2.isConnected()) {
-        const disconnected = [];
-        if (!service1.isConnected()) disconnected.push('transcript');
-        if (!service2.isConnected()) disconnected.push('reply');
-
-        this.log(`Services disconnected during initialization: ${disconnected.join(', ')}. Waiting for reconnection...`, LogLevel.WARN);
-
-        // Wait up to 5 seconds for reconnection
-        for (let i = 0; i < 10; i++) {
-          await new Promise(resolve => setTimeout(resolve, 500));
-          if (service1.isConnected() && service2.isConnected()) {
-            this.log('Both services reconnected successfully!', LogLevel.SUCCESS);
-            break;
-          }
-        }
-
-        // Final check
-        if (!service1.isConnected() || !service2.isConnected()) {
-          const stillDisconnected = [];
-          if (!service1.isConnected()) stillDisconnected.push('transcript');
-          if (!service2.isConnected()) stillDisconnected.push('reply');
-          throw new Error(`Failed to establish stable connection. Services still disconnected: ${stillDisconnected.join(', ')}`);
-        }
+      if (!replyService.isConnected()) {
+        throw new Error('Failed to establish stable connection to reply service');
       }
 
-      this.log('Services are stable. Starting audio streaming...', LogLevel.SUCCESS);
+      this.log('Service is stable. Starting audio streaming...', LogLevel.SUCCESS);
 
-      // Set up audio streaming
-      this.setupAudioStreaming();
+      // Set up audio streaming with Whisper processing
+      this.setupAudioStreamingWithWhisper();
 
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error.";
@@ -408,7 +245,7 @@ export class DualGeminiSessionManager {
     }
   }
 
-  private setupAudioStreaming(): void {
+  private setupAudioStreamingWithWhisper(): void {
     // Prevent duplicate initialization
     if (this.streamingInitialized) {
       this.log('Streaming already initialized, skipping duplicate setup', LogLevel.WARN);
@@ -420,48 +257,115 @@ export class DualGeminiSessionManager {
       return;
     }
 
-    if (!this.transcriptService || !this.replyService) {
-      this.log('Cannot setup audio streaming: services not ready', LogLevel.ERROR);
+    if (!this.whisperService) {
+      this.log('Cannot setup audio streaming: Whisper service not ready', LogLevel.ERROR);
       return;
     }
 
-    // Double-check services are actually connected
-    if (!this.transcriptService.isConnected() || !this.replyService.isConnected()) {
-      this.log('Cannot setup audio streaming: services not connected', LogLevel.ERROR);
-      return;
-    }
-
-    this.log('Initializing continuous audio streaming...', LogLevel.SUCCESS);
+    this.log('Initializing continuous audio streaming with native Whisper...', LogLevel.SUCCESS);
 
     try {
-      const capture = new ContinuousStreamingCapture(
-        STREAMING_CONFIG,
-        {
-          onError: (error) => {
-            this.callbacks.onError(`Streaming Error: ${error}`);
-            this.callbacks.onStatusChange(AppStatus.ERROR);
-          },
-          onStatusChange: (newStatus) => this.callbacks.onStatusChange(newStatus),
-        },
-        this.log
-      );
-
-      // Set both services and the media stream
-      capture.setApiServices({
-        transcriptService: this.transcriptService,
-        replyService: this.replyService
-      });
-      capture.setMediaStream(this.mediaStream);
-      this.streamingCapture = capture;
-
-      capture.start();
+      const audioContext = new AudioContext({ sampleRate: this.SAMPLE_RATE });
+      const source = audioContext.createMediaStreamSource(this.mediaStream);
+      
+      // Create ScriptProcessorNode for audio capture (will be replaced by AudioWorklet in production)
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        this.audioChunks.push(new Float32Array(inputData));
+        
+        // Check if we have 3 seconds of audio
+        const totalSamples = this.audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const durationMs = (totalSamples / this.SAMPLE_RATE) * 1000;
+        
+        // Log every 2 seconds
+        if (Math.floor(durationMs / 2000) !== Math.floor((durationMs - 100) / 2000)) {
+          this.log(`Audio buffered: ${durationMs.toFixed(0)}ms`, LogLevel.INFO);
+        }
+        
+        if (durationMs >= this.CHUNK_DURATION_MS && !this.processingAudio) {
+          this.log(`6 seconds reached, starting transcription...`, LogLevel.INFO);
+          this.processAudioChunk();
+        }
+      };
+      
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      
       this.streamingInitialized = true;
-      this.log('Continuous audio streaming started!', LogLevel.SUCCESS);
+      this.log('Continuous audio streaming with Whisper started!', LogLevel.SUCCESS);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.log(`Failed to start audio streaming: ${message}`, LogLevel.ERROR);
       this.callbacks.onError(`Failed to start audio streaming: ${message}`);
       throw error;
+    }
+  }
+
+  private async processAudioChunk(): Promise<void> {
+    if (this.processingAudio || !this.whisperService || this.audioChunks.length === 0) {
+      return;
+    }
+
+    this.processingAudio = true;
+    this.log('Processing 6-second audio chunk with 2s overlap...', LogLevel.INFO);
+
+    try {
+      // Merge current audio chunks
+      const currentAudio = mergeFloat32Arrays(this.audioChunks);
+      
+      // Combine with overlap from previous segment
+      const audioWithOverlap = this.overlapBuffer.length > 0 
+        ? mergeFloat32Arrays([...this.overlapBuffer, currentAudio])
+        : currentAudio;
+      
+      // Check if audio is silence
+      if (isSilence(audioWithOverlap, 0.01)) {
+        this.log('Skipping silent audio chunk', LogLevel.INFO);
+        this.audioChunks = [];
+        this.processingAudio = false;
+        return;
+      }
+      
+      // Save last 2 seconds for next overlap
+      const overlapSamples = (this.OVERLAP_DURATION_MS / 1000) * this.SAMPLE_RATE;
+      const startOverlapIndex = Math.max(0, currentAudio.length - overlapSamples);
+      this.overlapBuffer = [currentAudio.slice(startOverlapIndex)];
+      
+      this.log(`Audio with overlap: ${(audioWithOverlap.length / this.SAMPLE_RATE).toFixed(1)}s`, LogLevel.INFO);
+      
+      // Convert to PCM16 buffer
+      const pcm16Buffer = float32ToPCM16(audioWithOverlap);
+      
+      // Transcribe using Whisper
+      const transcript = await this.whisperService.transcribe(pcm16Buffer);
+      
+      if (transcript && transcript.trim().length > 0) {
+        this.log(`Transcribed: "${transcript}"`, LogLevel.SUCCESS);
+        
+        // Add each new segment as a separate transcript entry (newest at top)
+        this.transcripts.unshift({
+          timestamp: new Date().toLocaleTimeString(),
+          text: transcript.trim()
+        });
+        
+        // Update UI with all transcript segments
+        this.callbacks.onTranscriptUpdate(this.transcripts, '');
+        
+        // Add to queue for AI reply
+        this.transcriptQueue.push(transcript);
+        this.processTranscriptQueue();
+      }
+      
+      // Clear processed audio chunks
+      this.audioChunks = [];
+      this.processingAudio = false;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.log(`Error processing audio chunk: ${message}`, LogLevel.ERROR);
+      this.audioChunks = [];
+      this.processingAudio = false;
     }
   }
 
@@ -487,6 +391,8 @@ export class DualGeminiSessionManager {
     this.transcriptQueue = [];
     this.isReplyGenerating = false;
     this.streamingInitialized = false;
+    this.audioChunks = [];
+    this.processingAudio = false;
     this.callbacks.onStatusChange(AppStatus.IDLE);
     this.log('Analysis stopped', LogLevel.SUCCESS);
   }
@@ -497,9 +403,9 @@ export class DualGeminiSessionManager {
       this.streamingCapture = null;
     }
     
-    this.transcriptService?.disconnect();
+    this.whisperService?.dispose();
     this.replyService?.disconnect();
-    this.transcriptService = null;
+    this.whisperService = null;
     this.replyService = null;
 
     if (this.mediaStream) {
@@ -508,6 +414,9 @@ export class DualGeminiSessionManager {
     }
     
     this.streamingInitialized = false;
+    this.audioChunks = [];
+    this.overlapBuffer = [];
+    this.processingAudio = false;
   }
 
   public getMediaStream(): MediaStream | null {

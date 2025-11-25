@@ -149,14 +149,17 @@ screenshots/
 *.svg
 temp_images/
 
-# Model files and AI artifacts
+# Model files and AI artifacts (but keep public/*.onnx for VAD)
 models/
 *.pkl
 *.joblib
 *.h5
 *.pb
-*.onnx
 checkpoints/
+
+# Whisper model downloads (will be downloaded at runtime)
+whisper-models/
+.whisper/
 
 # Data files
 data/
@@ -208,6 +211,12 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# Electron build outputs
+dist/
+dist-electron/
+out/
+release/
 
 # Temporary files
 tmp/
