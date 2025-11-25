@@ -1,31 +1,12 @@
 import React from 'react';
 import { AppStatus, LogLevel } from '../types';
 import LiveApiService from './liveApiService';
-import NativeWhisperService from './nativeWhisperService';
 import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
 import { captureScreen, isElectron } from '../utils/screenCapture';
-import { float32ToPCM16, resampleAudio, mergeFloat32Arrays, isSilence } from '../utils/audioConverter';
 
-// Configuration for the two sessions
-
-// NOTE: TRANSCRIPT_PROMPT is commented out because we now use inputAudioTranscription
-// for real-time transcript accumulation. The model no longer needs to format transcripts as JSON.
-// Uncomment this block if you need to revert to JSON-based transcripts.
-/*
-const TRANSCRIPT_PROMPT = `You are transcribing audio from an interview.
-
-When the speaker finishes talking (turn complete), transcribe their ENTIRE statement from start to finish. Accumulate all words spoken during this complete turn.
-
-Example:
-- Speaker says: "Hello, how are you doing today? I wanted to ask about your experience."
-- You respond: {"transcript": "Hello, how are you doing today? I wanted to ask about your experience."}
-
-Do NOT respond with partial sentences or fragments. Wait for the complete turn, then provide everything.
-
-If the turn contains no clear speech, do NOT respond.
-
-Format: {"transcript": "[complete turn from start to finish]"}`;
-*/
+// Configuration for the two Gemini sessions:
+// 1. Transcript Service: Uses inputAudioTranscription for real-time speech-to-text
+// 2. Reply Service: Generates AI responses to interviewer questions
 
 const REPLY_PROMPT = `You are a Malaysian who is studying at National University of Singapore who is interviewing for a software engineer position at a software engineering company.
 Respond ONLY with a valid JSON object in the following format:
@@ -57,8 +38,8 @@ interface DualSessionCallbacks {
 }
 
 export class DualGeminiSessionManager {
-  private whisperService: NativeWhisperService | null = null;  // NEW: Local Whisper for transcription
-  private replyService: LiveApiService | null = null;
+  private transcriptService: LiveApiService | null = null;  // Gemini for transcription
+  private replyService: LiveApiService | null = null;        // Gemini for AI replies
   private streamingCapture: ContinuousStreamingCapture | null = null;
   
   private transcripts: TranscriptItem[] = [];
@@ -72,18 +53,6 @@ export class DualGeminiSessionManager {
   private mediaStream: MediaStream | null = null;
   private callbacks: DualSessionCallbacks;
   private log: LogFunction;
-  
-  // Track if streaming has been initialized to prevent race conditions
-  private streamingInitialized: boolean = false;
-  
-  // Audio buffering for native Whisper processing
-  private audioChunks: Float32Array[] = [];
-  private readonly CHUNK_DURATION_MS = 6000; // 6 seconds per chunk for better context
-  private readonly OVERLAP_DURATION_MS = 2000; // Keep 2 seconds of overlap
-  private readonly SAMPLE_RATE = 16000; // Whisper expects 16kHz
-  private processingAudio: boolean = false;
-  private partialTranscript: string = ''; // Accumulate within session
-  private overlapBuffer: Float32Array[] = []; // Store last 2 seconds for overlap
 
   constructor(
     callbacks: DualSessionCallbacks,
@@ -115,14 +84,11 @@ export class DualGeminiSessionManager {
     this.currentReply = '';
     this.transcriptQueue = [];
     this.isReplyGenerating = false;
-    this.streamingInitialized = false;
-    this.audioChunks = [];
-    this.processingAudio = false;
     
     this.callbacks.onTranscriptUpdate([], '');
     this.callbacks.onReplyUpdate([], '');
     
-    this.log('Initializing native Whisper + Gemini reply service...');
+    this.log('Initializing dual Gemini sessions (transcription + reply)...');
     this.callbacks.onStatusChange(AppStatus.CAPTURING);
 
     try {
@@ -152,19 +118,43 @@ export class DualGeminiSessionManager {
       
       this.callbacks.onStatusChange(AppStatus.CONNECTING);
 
-      // Initialize Native Whisper Service
-      this.log('Initializing native Whisper service...', LogLevel.INFO);
-      const whisperService = new NativeWhisperService(this.log, {
-        modelSize: 'small',  // Fast, ~75MB model
-        language: 'en',
-        temperature: 0.0,
-      });
+      // Initialize Transcript Service (Gemini for speech-to-text)
+      this.log('Initializing Gemini transcription service...', LogLevel.INFO);
+      const transcriptService = new LiveApiService(apiKey, this.log, 'transcript');
       
-      await whisperService.initialize();
-      this.whisperService = whisperService;
-      this.log('Native Whisper service initialized successfully', LogLevel.SUCCESS);
+      await transcriptService.connect({
+        onTranscript: (text, isFinal) => {
+          if (isFinal) {
+            // Turn complete - add to transcript history
+            this.log(`Final transcript received: "${text.substring(0, 50)}..."`, LogLevel.SUCCESS);
+            this.transcripts.unshift({
+              timestamp: new Date().toLocaleTimeString(),
+              text: text.trim()
+            });
+            this.callbacks.onTranscriptUpdate(this.transcripts, '');
+            
+            // Queue for AI reply
+            this.transcriptQueue.push(text);
+            this.processTranscriptQueue();
+          } else {
+            // Streaming update - show in UI
+            this.currentTranscript = text;
+            this.callbacks.onTranscriptUpdate(this.transcripts, text);
+          }
+        },
+        onModelResponse: () => {}, // Not used for transcript service
+        onError: (e) => {
+          this.callbacks.onError(`Transcription Service Error: ${e}`);
+          this.callbacks.onStatusChange(AppStatus.ERROR);
+          this.cleanup();
+        },
+        onClose: () => this.log('Transcription service closed.'),
+      }, 'You are a transcription service. Your only job is to transcribe audio accurately.');
+      
+      this.transcriptService = transcriptService;
+      this.log('Gemini transcription service connected', LogLevel.SUCCESS);
 
-      // Connect Reply Service (Gemini for AI responses only)
+      // Connect Reply Service (Gemini for AI responses)
       const replyService = new LiveApiService(apiKey, this.log, 'reply');
       
       await replyService.connect({
@@ -231,10 +221,10 @@ export class DualGeminiSessionManager {
         throw new Error('Failed to establish stable connection to reply service');
       }
 
-      this.log('Service is stable. Starting audio streaming...', LogLevel.SUCCESS);
+      this.log('Service is stable. Starting continuous audio/video streaming...', LogLevel.SUCCESS);
 
-      // Set up audio streaming with Whisper processing
-      this.setupAudioStreamingWithWhisper();
+      // Set up continuous streaming to Gemini
+      this.setupContinuousStreaming();
 
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error.";
@@ -245,129 +235,56 @@ export class DualGeminiSessionManager {
     }
   }
 
-  private setupAudioStreamingWithWhisper(): void {
-    // Prevent duplicate initialization
-    if (this.streamingInitialized) {
-      this.log('Streaming already initialized, skipping duplicate setup', LogLevel.WARN);
-      return;
-    }
-
+  private async setupContinuousStreaming(): Promise<void> {
     if (!this.mediaStream) {
-      this.log('Cannot setup audio streaming: missing mediaStream', LogLevel.ERROR);
+      this.log('Cannot setup streaming: missing mediaStream', LogLevel.ERROR);
       return;
     }
 
-    if (!this.whisperService) {
-      this.log('Cannot setup audio streaming: Whisper service not ready', LogLevel.ERROR);
+    if (!this.transcriptService) {
+      this.log('Cannot setup streaming: transcription service not ready', LogLevel.ERROR);
       return;
     }
 
-    this.log('Initializing continuous audio streaming with native Whisper...', LogLevel.SUCCESS);
+    this.log('Initializing continuous A/V streaming to Gemini...', LogLevel.SUCCESS);
 
     try {
-      const audioContext = new AudioContext({ sampleRate: this.SAMPLE_RATE });
-      const source = audioContext.createMediaStreamSource(this.mediaStream);
-      
-      // Create ScriptProcessorNode for audio capture (will be replaced by AudioWorklet in production)
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        this.audioChunks.push(new Float32Array(inputData));
-        
-        // Check if we have 3 seconds of audio
-        const totalSamples = this.audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
-        const durationMs = (totalSamples / this.SAMPLE_RATE) * 1000;
-        
-        // Log every 2 seconds
-        if (Math.floor(durationMs / 2000) !== Math.floor((durationMs - 100) / 2000)) {
-          this.log(`Audio buffered: ${durationMs.toFixed(0)}ms`, LogLevel.INFO);
-        }
-        
-        if (durationMs >= this.CHUNK_DURATION_MS && !this.processingAudio) {
-          this.log(`6 seconds reached, starting transcription...`, LogLevel.INFO);
-          this.processAudioChunk();
-        }
-      };
-      
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-      
-      this.streamingInitialized = true;
-      this.log('Continuous audio streaming with Whisper started!', LogLevel.SUCCESS);
+      // Initialize continuous streaming capture
+      this.streamingCapture = new ContinuousStreamingCapture(
+        {
+          audioChunkMs: 100, // Send audio every 100ms for low latency
+        },
+        {
+          onError: (error: string) => {
+            this.log(`Streaming error: ${error}`, LogLevel.ERROR);
+            this.callbacks.onError(error);
+          },
+          onStatusChange: (status: AppStatus) => {
+            this.callbacks.onStatusChange(status);
+          },
+        },
+        this.log
+      );
+
+      // Set the media stream and API services
+      this.streamingCapture.setMediaStream(this.mediaStream);
+      this.streamingCapture.setApiServices({
+        transcriptService: this.transcriptService,
+        replyService: this.replyService!,
+      });
+
+      // Start streaming
+      await this.streamingCapture.start();
+      this.log('Continuous A/V streaming started!', LogLevel.SUCCESS);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      this.log(`Failed to start audio streaming: ${message}`, LogLevel.ERROR);
-      this.callbacks.onError(`Failed to start audio streaming: ${message}`);
+      this.log(`Failed to start streaming: ${message}`, LogLevel.ERROR);
+      this.callbacks.onError(`Failed to start streaming: ${message}`);
       throw error;
     }
   }
 
-  private async processAudioChunk(): Promise<void> {
-    if (this.processingAudio || !this.whisperService || this.audioChunks.length === 0) {
-      return;
-    }
 
-    this.processingAudio = true;
-    this.log('Processing 6-second audio chunk with 2s overlap...', LogLevel.INFO);
-
-    try {
-      // Merge current audio chunks
-      const currentAudio = mergeFloat32Arrays(this.audioChunks);
-      
-      // Combine with overlap from previous segment
-      const audioWithOverlap = this.overlapBuffer.length > 0 
-        ? mergeFloat32Arrays([...this.overlapBuffer, currentAudio])
-        : currentAudio;
-      
-      // Check if audio is silence
-      if (isSilence(audioWithOverlap, 0.01)) {
-        this.log('Skipping silent audio chunk', LogLevel.INFO);
-        this.audioChunks = [];
-        this.processingAudio = false;
-        return;
-      }
-      
-      // Save last 2 seconds for next overlap
-      const overlapSamples = (this.OVERLAP_DURATION_MS / 1000) * this.SAMPLE_RATE;
-      const startOverlapIndex = Math.max(0, currentAudio.length - overlapSamples);
-      this.overlapBuffer = [currentAudio.slice(startOverlapIndex)];
-      
-      this.log(`Audio with overlap: ${(audioWithOverlap.length / this.SAMPLE_RATE).toFixed(1)}s`, LogLevel.INFO);
-      
-      // Convert to PCM16 buffer
-      const pcm16Buffer = float32ToPCM16(audioWithOverlap);
-      
-      // Transcribe using Whisper
-      const transcript = await this.whisperService.transcribe(pcm16Buffer);
-      
-      if (transcript && transcript.trim().length > 0) {
-        this.log(`Transcribed: "${transcript}"`, LogLevel.SUCCESS);
-        
-        // Add each new segment as a separate transcript entry (newest at top)
-        this.transcripts.unshift({
-          timestamp: new Date().toLocaleTimeString(),
-          text: transcript.trim()
-        });
-        
-        // Update UI with all transcript segments
-        this.callbacks.onTranscriptUpdate(this.transcripts, '');
-        
-        // Add to queue for AI reply
-        this.transcriptQueue.push(transcript);
-        this.processTranscriptQueue();
-      }
-      
-      // Clear processed audio chunks
-      this.audioChunks = [];
-      this.processingAudio = false;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.log(`Error processing audio chunk: ${message}`, LogLevel.ERROR);
-      this.audioChunks = [];
-      this.processingAudio = false;
-    }
-  }
 
   private processTranscriptQueue(): void {
     if (!this.replyService || this.transcriptQueue.length === 0 || this.isReplyGenerating) {
@@ -390,9 +307,6 @@ export class DualGeminiSessionManager {
     this.cleanup();
     this.transcriptQueue = [];
     this.isReplyGenerating = false;
-    this.streamingInitialized = false;
-    this.audioChunks = [];
-    this.processingAudio = false;
     this.callbacks.onStatusChange(AppStatus.IDLE);
     this.log('Analysis stopped', LogLevel.SUCCESS);
   }
@@ -403,20 +317,15 @@ export class DualGeminiSessionManager {
       this.streamingCapture = null;
     }
     
-    this.whisperService?.dispose();
+    this.transcriptService?.disconnect();
     this.replyService?.disconnect();
-    this.whisperService = null;
+    this.transcriptService = null;
     this.replyService = null;
 
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
     }
-    
-    this.streamingInitialized = false;
-    this.audioChunks = [];
-    this.overlapBuffer = [];
-    this.processingAudio = false;
   }
 
   public getMediaStream(): MediaStream | null {
