@@ -1,6 +1,6 @@
 import React, { useRef, useEffect } from 'react';
-import { marked } from 'https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.esm.js';
-import DOMPurify from 'https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.es.mjs';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { Summary, AppStatus, LogEntry } from '../types';
 import { BotMessageSquareIcon, SparklesIcon } from './icons';
 import LogPanel from './LogPanel';

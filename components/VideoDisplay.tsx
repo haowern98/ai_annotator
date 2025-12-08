@@ -23,6 +23,8 @@ const VideoDisplay: React.FC<VideoDisplayProps> = ({ stream, videoRef, status })
       <video
         ref={videoRef}
         autoPlay
+        muted
+        playsInline
         className={`w-full h-full object-contain transition-opacity duration-300 ${showVideo ? 'opacity-100' : 'opacity-0'}`}
       />
       

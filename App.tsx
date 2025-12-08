@@ -1,12 +1,15 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { AppStatus, Summary, LogEntry, LogLevel } from './types';
+import { AppStatus, Summary, LogEntry, LogLevel, NavigationView, NavigationState } from './types';
 import GeminiService from './services/geminiService';
 import { VideoModeCapture } from './utils/videoMode';
-import Header from './components/Header';
-import Controls from './components/Controls';
-import VideoDisplay from './components/VideoDisplay';
-import SummaryDisplay from './components/SummaryDisplay';
+import { captureScreen, isElectron, ScreenSource } from './utils/screenCapture';
+import TitleBar from './components/TitleBar';
+import { Sidebar } from './components/Sidebar';
+import InterviewHome from './components/InterviewHome';
+import LectureHome from './components/LectureHome';
+import HistoryHome from './components/HistoryHome';
+import { ScreenSourcePicker } from './components/ScreenSourcePicker';
 import config from './config.json';
 
 const VIDEO_MODE_CONFIG = {
@@ -23,8 +26,56 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [geminiService, setGeminiService] = useState<GeminiService | null>(null);
   const [selectedMode, setSelectedMode] = useState<string>('Lecture Mode');
+  const [sidebarMode, setSidebarMode] = useState<'lecture' | 'interview' | 'history'>('lecture');
+
+  // Navigation state for browser-like back/forward
+  const [navigation, setNavigation] = useState<NavigationState>({
+    history: ['home'],
+    currentIndex: 0
+  });
+
+  const canGoBack = navigation.currentIndex > 0;
+  const canGoForward = navigation.currentIndex < navigation.history.length - 1;
+  const currentView = navigation.history[navigation.currentIndex];
+
+  const navigateTo = useCallback((view: NavigationView) => {
+    setNavigation(prev => {
+      // Remove any forward history when navigating to a new page
+      const newHistory = prev.history.slice(0, prev.currentIndex + 1);
+      newHistory.push(view);
+      return {
+        history: newHistory,
+        currentIndex: newHistory.length - 1
+      };
+    });
+  }, []);
+
+  const goBack = useCallback(() => {
+    setNavigation(prev => ({
+      ...prev,
+      currentIndex: Math.max(0, prev.currentIndex - 1)
+    }));
+  }, []);
+
+  const goForward = useCallback(() => {
+    setNavigation(prev => ({
+      ...prev,
+      currentIndex: Math.min(prev.history.length - 1, prev.currentIndex + 1)
+    }));
+  }, []);
+
+  const handleSidebarModeChange = (mode: 'lecture' | 'interview' | 'history') => {
+    setSidebarMode(mode);
+    // Reset navigation to home when switching modes
+    setNavigation({ history: ['home'], currentIndex: 0 });
+  };
 
   const [isVideoReady, setIsVideoReady] = useState(false);
+
+  // Screen source picker state (for Electron)
+  const [isPickerOpen, setIsPickerOpen] = useState(false);
+  const [pickerSources, setPickerSources] = useState<ScreenSource[] | null>(null);
+  const pickerResolveRef = useRef<((sourceId: string) => void) | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -46,7 +97,7 @@ export default function App() {
     statusRef.current = status;
   }, [status]);
   
-  const cleanup = useCallback(() => {
+  const cleanup = useCallback((clearSession: boolean = false) => {
     if (videoModeRef.current) {
       videoModeRef.current.stop();
       videoModeRef.current = null;
@@ -56,7 +107,13 @@ export default function App() {
       mediaRecorderRef.current = null;
     }
     if (geminiService) {
-      geminiService.disconnect();
+      if (clearSession) {
+        // Completely clear session - next connection will be fresh
+        geminiService.clearSession();
+      } else {
+        // Just disconnect - can resume later
+        geminiService.disconnect();
+      }
       setGeminiService(null);
     }
     if (mediaStream) {
@@ -69,9 +126,10 @@ export default function App() {
   const handleStop = useCallback(() => {
     addLog("Stop Analysis triggered.");
     setStatus(AppStatus.STOPPING);
-    cleanup();
+    // Don't clear session - allow resuming later if user restarts
+    cleanup(false);
     setStatus(AppStatus.IDLE);
-    addLog("Analysis stopped and resources cleaned up.", LogLevel.SUCCESS);
+    addLog("Analysis stopped. Session preserved for potential resume.", LogLevel.SUCCESS);
   }, [addLog, cleanup]);
 
 
@@ -84,6 +142,12 @@ export default function App() {
     const video = videoRef.current;
     const handleVideoReady = () => {
         addLog("Video metadata loaded. Setting video ready flag.", LogLevel.SUCCESS);
+
+        // Explicitly start video playback
+        video.play().catch(err => {
+          addLog(`Video autoplay blocked: ${err.message}. Attempting muted playback...`, LogLevel.WARN);
+        });
+
         setIsVideoReady(true);
     };
 
@@ -112,7 +176,7 @@ export default function App() {
           onError: (error) => {
             setError(`Video Mode Error: ${error}`);
             setStatus(AppStatus.ERROR);
-            cleanup();
+            cleanup(true); // Clear session on video mode error
           },
           onStatusChange: (newStatus) => {
             setStatus(newStatus);
@@ -137,7 +201,29 @@ export default function App() {
       addLog("Lecture Mode selected but not yet implemented.", LogLevel.INFO);
     }
   }, [isVideoReady, geminiService, selectedMode, addLog, cleanup]);
-  
+
+  // Picker handlers
+  const handlePickerSelect = useCallback((sourceId: string) => {
+    setIsPickerOpen(false);
+    if (pickerResolveRef.current) {
+      pickerResolveRef.current(sourceId);
+      pickerResolveRef.current = null;
+    }
+    setPickerSources(null);
+  }, []);
+
+  const handlePickerCancel = useCallback(() => {
+    setIsPickerOpen(false);
+    if (pickerResolveRef.current) {
+      // Resolve with empty string to signal cancellation
+      pickerResolveRef.current('');
+      pickerResolveRef.current = null;
+    }
+    setPickerSources(null);
+    setStatus(AppStatus.IDLE);
+    addLog('Screen selection cancelled', LogLevel.INFO);
+  }, [addLog]);
+
   const handleStart = async () => {
     addLog("Start Analysis clicked.");
     if (!process.env.API_KEY) {
@@ -156,10 +242,18 @@ export default function App() {
     setStatus(AppStatus.CAPTURING);
 
     try {
-      addLog("Requesting screen capture permission...");
-      const stream = await navigator.mediaDevices.getDisplayMedia({
+      addLog(`Requesting screen capture permission... ${isElectron() ? '(Electron mode)' : '(Browser mode)'}`);
+      const stream = await captureScreen({
         video: true,
         audio: true,
+        onSourceRequired: async (sources) => {
+          // Show picker modal and wait for user selection
+          return new Promise<string>((resolve) => {
+            setPickerSources(sources);
+            setIsPickerOpen(true);
+            pickerResolveRef.current = resolve;
+          });
+        },
       });
       addLog("Screen capture permission granted.", LogLevel.SUCCESS);
       
@@ -231,7 +325,7 @@ export default function App() {
         onError: (e) => {
           setError(`Session Error: ${e}`);
           setStatus(AppStatus.ERROR);
-          cleanup();
+          cleanup(true); // Clear session on error
         },
         onClose: (reason) => {
           if (statusRef.current !== AppStatus.STOPPING && statusRef.current !== AppStatus.IDLE) {
@@ -239,8 +333,12 @@ export default function App() {
              addLog(msg, LogLevel.ERROR);
              setError(msg);
              setStatus(AppStatus.IDLE);
-             cleanup();
+             cleanup(true); // Clear session on unexpected close
           }
+        },
+        onReconnecting: () => {
+          addLog('Connection lost. Attempting to reconnect with session context...', LogLevel.WARN);
+          setStatus(AppStatus.CONNECTING);
         },
       });
 
@@ -259,7 +357,7 @@ export default function App() {
         setError(`Failed to start session: ${message}`);
       }
       setStatus(AppStatus.ERROR);
-      cleanup();
+      cleanup(true); // Clear session on startup error
     }
   };
   
@@ -275,30 +373,61 @@ export default function App() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-base-100 flex flex-col font-sans">
-      <Header />
-      <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8 flex flex-col lg:flex-row gap-8">
-        <div className="lg:w-3/5 flex flex-col gap-4">
-          <Controls 
-            status={status} 
-            onStart={handleStart} 
-            onStop={handleStop}
-            selectedMode={selectedMode}
-            onModeChange={setSelectedMode}
+    <div style={{
+      height: '100vh',
+      backgroundColor: '#1a1a1a',
+      display: 'flex',
+      flexDirection: 'column',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      overflow: 'hidden',
+      borderRadius: '10px',
+      border: '1px solid #3a3a3a'
+    }}>
+      {/* Custom Title Bar */}
+      <TitleBar 
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onBack={goBack}
+        onForward={goForward}
+      />
+      
+      {/* Main Content Area */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* Sidebar */}
+        <Sidebar 
+          onModeChange={handleSidebarModeChange}
+          currentMode={sidebarMode}
+        />
+        
+        {/* Content */}
+        {sidebarMode === 'lecture' ? (
+          <LectureHome 
+            onSidebarModeChange={handleSidebarModeChange}
           />
-           {error && (
-            <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded-lg">
-              <p className="font-bold">An Error Occurred</p>
-              <p className="text-sm">{error}</p>
-            </div>
-          )}
-          <VideoDisplay stream={mediaStream} videoRef={videoRef} status={status} />
-        </div>
-        <div className="lg:w-2/5">
-          <SummaryDisplay summaries={summaries} status={status} logs={logs} />
-        </div>
-      </main>
+        ) : sidebarMode === 'history' ? (
+          <HistoryHome 
+            currentView={currentView}
+            onNavigate={navigateTo}
+          />
+        ) : (
+          <InterviewHome 
+            currentView={currentView}
+            onNavigate={navigateTo}
+          />
+        )}
+      </div>
+
       <canvas ref={canvasRef} className="hidden"></canvas>
+
+      {/* Screen Source Picker Modal (Electron only) */}
+      {isPickerOpen && pickerSources && (
+        <ScreenSourcePicker
+          isOpen={isPickerOpen}
+          sources={pickerSources}
+          onSelect={handlePickerSelect}
+          onCancel={handlePickerCancel}
+        />
+      )}
     </div>
   );
 }

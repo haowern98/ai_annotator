@@ -1,0 +1,36 @@
+appId: com.livelecturesummarizer.app
+productName: Live Lecture Summarizer
+
+directories:
+  output: release-audio-video-fix
+  buildResources: build
+
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
+  signAndEditExecutable: false
+
+mac:
+  target:
+    - dmg
+  icon: build/icon.icns
+  category: public.app-category.productivity
+
+linux:
+  target:
+    - AppImage
+  icon: build/icon.png
+  category: Office
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: true
+
+publish: null

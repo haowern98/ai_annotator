@@ -1,0 +1,265 @@
+import React from 'react';
+import { AppStatus, LogLevel } from '../types';
+import LiveApiService from '../services/liveApiService';
+
+type LogFunction = (message: string, level?: LogLevel) => void;
+
+interface StreamingConfig {
+  audioChunkMs: number; // Audio chunk duration in ms (e.g., 100ms)
+}
+
+interface StreamingCallbacks {
+  // Callbacks are now handled directly by the service instances
+  onError: (error: string) => void;
+  onStatusChange: (status: AppStatus) => void;
+}
+
+export class ContinuousStreamingCapture {
+  private config: StreamingConfig;
+  private callbacks: StreamingCallbacks;
+  private log: LogFunction;
+  
+  // References to the two independent API services
+  private transcriptService: LiveApiService | null = null;
+  private replyService: LiveApiService | null = null;
+  
+  private mediaStream: MediaStream | null = null;
+  
+  private audioContext: AudioContext | null = null;
+  private audioWorkletNode: AudioWorkletNode | null = null;
+  private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
+  
+  private isRunning = false;
+  private isPaused = false;
+
+  // Audio buffering for transcription
+  private isTranscribing = false;
+  private audioBuffer: Array<{data: string, mimeType: string}> = [];
+
+  // Connection monitoring
+  private lastErrorLogTime = 0;
+  private consecutiveFailures = 0;
+
+  constructor(
+    config: StreamingConfig,
+    callbacks: StreamingCallbacks,
+    log: LogFunction
+  ) {
+    this.config = config;
+    this.callbacks = callbacks;
+    this.log = log;
+  }
+
+  // Set both API service instances
+  public setApiServices(services: { transcriptService: LiveApiService; replyService: LiveApiService }): void {
+    this.transcriptService = services.transcriptService;
+    this.replyService = services.replyService;
+  }
+
+  public setMediaStream(stream: MediaStream): void {
+    this.mediaStream = stream;
+  }
+
+  // Control transcription state and manage audio buffering
+  public setTranscribing(isTranscribing: boolean): void {
+    const wasTranscribing = this.isTranscribing;
+    this.isTranscribing = isTranscribing;
+    
+    if (isTranscribing && !wasTranscribing) {
+      this.log("Buffering audio - transcription in progress", LogLevel.INFO);
+    } else if (!isTranscribing && wasTranscribing) {
+      this.log(`Flushing ${this.audioBuffer.length} buffered audio chunks - transcription complete`, LogLevel.SUCCESS);
+      this.flushAudioBuffer();
+    }
+  }
+
+  // Send all buffered audio to transcript service
+  private flushAudioBuffer(): void {
+    if (this.audioBuffer.length === 0) return;
+    
+    const bufferSize = this.audioBuffer.length;
+    
+    // Send all buffered audio chunks
+    while (this.audioBuffer.length > 0) {
+      const buffered = this.audioBuffer.shift()!;
+      this.transcriptService?.sendRealtimeAudio(buffered.data, buffered.mimeType);
+    }
+    
+    this.log(`Sent ${bufferSize} buffered audio chunks to transcript service`, LogLevel.SUCCESS);
+  }
+
+  public async start(): Promise<void> {
+    if (!this.transcriptService?.isConnected() || !this.replyService?.isConnected()) {
+      this.log("Cannot start streaming: One or both API services are not connected.", LogLevel.ERROR);
+      return;
+    }
+
+    if (!this.mediaStream) {
+      this.log("Cannot start streaming: Media stream not available.", LogLevel.ERROR);
+      return;
+    }
+
+    this.log("Starting continuous audio streaming...", LogLevel.SUCCESS);
+    this.isRunning = true;
+    this.consecutiveFailures = 0;
+    this.lastErrorLogTime = 0;
+
+    await this.startAudioStreaming();
+
+    this.log("Audio streaming started.", LogLevel.SUCCESS);
+  }
+
+  public stop(): void {
+    this.log("Stopping continuous audio streaming.", LogLevel.INFO);
+    this.isRunning = false;
+    this.isPaused = false;
+
+    // Clear audio buffer
+    this.audioBuffer = [];
+    this.isTranscribing = false;
+
+    this.stopAudioStreaming();
+  }
+
+  public pause(): void {
+    if (!this.isRunning) return;
+    this.isPaused = true;
+    this.log("Audio streaming paused", LogLevel.INFO);
+  }
+
+  public resume(): void {
+    if (!this.isRunning) return;
+    this.isPaused = false;
+    this.log("Audio streaming resumed", LogLevel.INFO);
+  }
+
+  public getIsPaused(): boolean {
+    return this.isPaused;
+  }
+
+  private async startAudioStreaming(): Promise<void> {
+    const audioTracks = this.mediaStream?.getAudioTracks();
+    if (!audioTracks || audioTracks.length === 0) {
+      this.log("No audio tracks available.", LogLevel.WARN);
+      return;
+    }
+
+    try {
+      this.audioContext = new AudioContext({ sampleRate: 16000 });
+      const audioStream = new MediaStream([audioTracks[0]]);
+      this.mediaStreamSource = this.audioContext.createMediaStreamSource(audioStream);
+
+      // Load AudioWorklet processor module
+      await this.audioContext.audioWorklet.addModule('/audio-processor.js');
+
+      // Create AudioWorkletNode
+      this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'audio-capture-processor');
+
+      // Handle messages from audio worklet (runs on main thread)
+      this.audioWorkletNode.port.onmessage = (event) => {
+        if (!this.isRunning) return;
+        
+        // Skip sending audio when paused (but keep VAD running)
+        if (this.isPaused) return;
+
+        const pcmData: Int16Array = event.data.pcmData;
+        const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
+        const mimeType = `audio/pcm;rate=${this.audioContext!.sampleRate}`;
+
+        // Check if transcript service is connected before sending
+        const isConnected = this.transcriptService?.isConnected();
+        if (!isConnected) {
+          // Service disconnected - buffer audio instead of losing it
+          this.audioBuffer.push({ data: base64Audio, mimeType });
+
+          // Prevent buffer from growing too large (max 200 chunks ~20 seconds)
+          if (this.audioBuffer.length > 200) {
+            this.audioBuffer.shift();
+          }
+
+          // Log disconnection status occasionally (throttled to once every 5 seconds)
+          const now = Date.now();
+          if (now - this.lastErrorLogTime > 5000) {
+            this.log("Transcript service disconnected. Buffering audio until reconnection...", LogLevel.WARN);
+            this.lastErrorLogTime = now;
+          }
+          return;
+        }
+
+        // Audio buffering logic
+        if (this.isTranscribing) {
+          // Buffer audio during transcription
+          this.audioBuffer.push({ data: base64Audio, mimeType });
+
+          // Prevent buffer from growing too large (max 200 chunks ~20 seconds at 100ms chunks)
+          if (this.audioBuffer.length > 200) {
+            this.log("Audio buffer full, dropping oldest chunk", LogLevel.WARN);
+            this.audioBuffer.shift();
+          }
+        } else {
+          // Not transcribing - flush any buffered audio first
+          if (this.audioBuffer.length > 0) {
+            this.log(`Reconnected! Flushing ${this.audioBuffer.length} buffered chunks...`, LogLevel.SUCCESS);
+            this.flushAudioBuffer();
+            this.consecutiveFailures = 0;
+          }
+
+          // Send current audio chunk to transcript session
+          const success = this.transcriptService?.sendRealtimeAudio(base64Audio, mimeType);
+
+          // Track failures
+          if (!success) {
+            this.consecutiveFailures++;
+            if (this.consecutiveFailures > 10) {
+              const now = Date.now();
+              if (now - this.lastErrorLogTime > 5000) {
+                this.log(`Failed to send ${this.consecutiveFailures} consecutive audio chunks`, LogLevel.WARN);
+                this.lastErrorLogTime = now;
+              }
+            }
+          } else {
+            this.consecutiveFailures = 0;
+          }
+        }
+      };
+
+      // Connect audio graph
+      this.mediaStreamSource.connect(this.audioWorkletNode);
+      this.audioWorkletNode.connect(this.audioContext.destination);
+
+      this.log(`Audio streaming started with AudioWorklet at ${this.audioContext.sampleRate}Hz`, LogLevel.SUCCESS);
+    } catch (error) {
+      this.log(`Failed to start audio streaming: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
+    }
+  }
+
+  private arrayBufferToBase64(buffer: ArrayBuffer | SharedArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  private stopAudioStreaming(): void {
+    if (this.audioWorkletNode) {
+      this.audioWorkletNode.port.onmessage = null; // Clean up message handler
+      this.audioWorkletNode.disconnect();
+      this.audioWorkletNode = null;
+    }
+    if (this.mediaStreamSource) {
+      this.mediaStreamSource.disconnect();
+      this.mediaStreamSource = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
+
+    // Signal end of audio to transcript session only
+    this.transcriptService?.endAudioStream();
+
+    this.log("Audio streaming stopped.", LogLevel.INFO);
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "INITIAL_PROMPT": "You are an AI assistant analyzing a live screen share of a lecture. Your task is to provide concise summaries of the key points presented.\nIMPORTANT: You MUST analyze the visual content first, then the audio content.\n1. VISUAL ANALYSIS (REQUIRED): Start by describing what you actually see in the frame:\n   - What text, diagrams, slides, code, or interface elements are visible?\n   - Describe specific visual details: colors, layouts, UI elements, text content\n   - If it's a presentation, describe the slide content and any transitions\n   - If it's software/code, describe what's being shown on screen\n2. AUDIO ANALYSIS: Then describe what the speaker is saying and how it relates to the visual content.\n3. SYNTHESIS: Combine the visual progression with the spoken content for a complete summary.\nFormat your response as:\n**Visual Content:**\n[Describe exactly what you see in the frames]\n**Audio Content:**\n[Describe what the speaker is saying]\n**Combined Analysis:**\n[How the visual and audio work together]\"\nUse Markdown formatting. Be specific about what you observe visually - don't just infer from audio.",
+  "LECTURE_MODE_PROMPT": "You are an AI assistant analyzing a live screen share of a lecture. Your task is to provide concise summaries of the key points presented.\nIMPORTANT: You MUST analyze the visual content first, then the audio content.\n1. VISUAL ANALYSIS (REQUIRED): Start by describing what you actually see in the frame:\n   - What text, diagrams, slides, code, or interface elements are visible?\n   - Describe specific visual details: colors, layouts, UI elements, text content\n   - If it's a presentation, describe the slide content and any transitions\n   - If it's software/code, describe what's being shown on screen\n2. AUDIO ANALYSIS: Then describe what the speaker is saying and how it relates to the visual content.\n3. SYNTHESIS: Combine the visual progression with the spoken content for a complete summary.\nFormat your response as:\n**Visual Content:**\n[Describe exactly what you see in the frames]\n**Audio Content:**\n[Describe what the speaker is saying]\n**Combined Analysis:**\n[How the visual and audio work together]\"\nUse Markdown formatting. Be specific about what you observe visually - don't just infer from audio.",
+  "VIDEO_MODE_PROMPT": "You are analyzing a lecture/presentation through 5-second data segments. You will receive 12 sets of data per minute (screenshot + 5-second audio). I will send sets 1-11 for you to hold in context, then set 12 will request a comprehensive summary.\n\nFor context sets (1-11): Add the screenshot and audio to your memory without responding.\nFor summary request (set 6): Provide a detailed educational summary of the entire minute based on all 12 data sets.\n\nAnalyze:\n1. Visual progression across all 12 screenshots (what changed, evolved, or was presented)\n2. Complete audio narrative from all 12 segments (key explanations, concepts, discussions)\n3. Educational flow and teaching progression throughout the full minute\n\nFormat your summary response as:\n**Visual Evolution (0-60 seconds):**\n[Describe the visual progression across all screenshots]\n**Audio Summary (Complete Minute):**\n[Key educational content from all audio segments]\n**Teaching Flow:**\n[How the content built up and developed over the minute]\n**Key Takeaways:**\n[Important concepts, definitions, or insights covered]\n\nFocus on creating a comprehensive educational summary that captures the complete learning experience from this 1-minute segment",
+  "SUMMARY_INTERVAL_MS": 60000,
+  "VIDEO_MODE_DATA_COLLECTION_INTERVAL_MS": 5000,
+  "VIDEO_MODE_SETS_PER_MINUTE": 12,
+  "REALTIME_MODE_CONFIG": {
+    "screenIntervalMs": 2000,
+    "audioIntervalMs": 2000,
+    "realtimePrompt": "Analyze what's happening in this screen capture and audio. You must reply wtih the following format: \n **Audio Analysis**\n \n**Frame Analysis** \n"
+  },
+  "DYNAMIC_SAMPLING_PROMPT": "You are analyzing a lecture/presentation using dynamic content-based sampling. Captures are taken at adaptive intervals based on visual change detection - more frequent during periods of change, less frequent when content is static. This allows for efficient capture of important moments while reducing redundancy during static periods.",
+  "DYNAMIC_SAMPLING_CONFIG": {
+    "minIntervalMs": 1000,
+    "maxIntervalMs": 20000,
+    "highChangeIntervalMs": 2000,
+    "mediumChangeIntervalMs": 5000,
+    "lowChangeIntervalMs": 10000,
+    "changeThreshold": 0.1,
+    "analysisWindowMs": 60000
+  },
+  "SLIDE_DETECTION_POLL_INTERVAL_MS": 500,
+  "SLIDE_CHANGE_THRESHOLD": 0.08
+}
