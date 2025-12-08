@@ -30,6 +30,7 @@ export class ContinuousStreamingCapture {
   private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
   
   private isRunning = false;
+  private isPaused = false;
 
   // Audio buffering for transcription
   private isTranscribing = false;
@@ -111,12 +112,29 @@ export class ContinuousStreamingCapture {
   public stop(): void {
     this.log("Stopping continuous audio streaming.", LogLevel.INFO);
     this.isRunning = false;
+    this.isPaused = false;
 
     // Clear audio buffer
     this.audioBuffer = [];
     this.isTranscribing = false;
 
     this.stopAudioStreaming();
+  }
+
+  public pause(): void {
+    if (!this.isRunning) return;
+    this.isPaused = true;
+    this.log("Audio streaming paused", LogLevel.INFO);
+  }
+
+  public resume(): void {
+    if (!this.isRunning) return;
+    this.isPaused = false;
+    this.log("Audio streaming resumed", LogLevel.INFO);
+  }
+
+  public getIsPaused(): boolean {
+    return this.isPaused;
   }
 
   private async startAudioStreaming(): Promise<void> {
@@ -140,6 +158,9 @@ export class ContinuousStreamingCapture {
       // Handle messages from audio worklet (runs on main thread)
       this.audioWorkletNode.port.onmessage = (event) => {
         if (!this.isRunning) return;
+        
+        // Skip sending audio when paused (but keep VAD running)
+        if (this.isPaused) return;
 
         const pcmData: Int16Array = event.data.pcmData;
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer);

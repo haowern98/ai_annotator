@@ -51,8 +51,14 @@ class LiveApiService {
   private accumulatedTranscript = '';
   private fragmentCounter = 0; // Track fragment count for debugging
 
-  // Character limit for automatic session reset during long speech
-  private readonly MAX_TRANSCRIPT_CHARS = 300;
+  // Smart buffer flush configuration
+  private readonly FLUSH_CHECK_START_CHARS = 250; // Start looking for punctuation at this threshold
+  private readonly FLUSH_FORCE_CHARS = 350; // Force flush at this threshold (with comma as fallback)
+  private readonly SENTENCE_END_PATTERN = /[.?!]$/; // Primary punctuation to trigger flush
+  private readonly COMMA_PATTERN = /,$/; // Secondary punctuation (only after FLUSH_FORCE_CHARS)
+  
+  // Language hint for post-flush context recovery
+  private readonly LANGUAGE_HINT = "Continue transcribing in English.";
 
   constructor(apiKey: string, log: LogFunction, sessionKey: string = 'default') {
     if (!apiKey) {
@@ -208,27 +214,27 @@ class LiveApiService {
 
                 this.log(`📝 Accumulated: "${this.accumulatedTranscript.substring(0, 50)}${this.accumulatedTranscript.length > 50 ? '...' : ''}" (${this.accumulatedTranscript.length} chars total)`, LogLevel.INFO);
 
-                // Check if accumulated transcript exceeds character limit during speech
-                if (this.isUserSpeaking && this.accumulatedTranscript.length >= this.MAX_TRANSCRIPT_CHARS) {
-                  this.log(`⚠️ Character limit reached (${this.accumulatedTranscript.length}/${this.MAX_TRANSCRIPT_CHARS}). Finalizing current transcript and resetting session...`, LogLevel.WARN);
+                // Smart buffer flush: Start looking for punctuation at 250 chars
+                // Flush on sentence-ending punctuation (. ? !) or comma at 350+ chars
+                if (this.isUserSpeaking && this.accumulatedTranscript.length >= this.FLUSH_CHECK_START_CHARS) {
+                  const trimmedTranscript = this.accumulatedTranscript.trimEnd();
+                  const shouldFlushOnSentenceEnd = this.SENTENCE_END_PATTERN.test(trimmedTranscript);
+                  const shouldFlushOnComma = this.accumulatedTranscript.length >= this.FLUSH_FORCE_CHARS && this.COMMA_PATTERN.test(trimmedTranscript);
+                  
+                  if (shouldFlushOnSentenceEnd || shouldFlushOnComma) {
+                    const punctuation = shouldFlushOnSentenceEnd ? 'sentence-end' : 'comma';
+                    this.log(`🔄 Smart buffer flush at ${this.accumulatedTranscript.length} chars (triggered by ${punctuation}). Flushing server audio buffer...`, LogLevel.INFO);
 
-                  // Send current accumulated text as final transcript
-                  callbacks.onTranscript(this.accumulatedTranscript, true);
+                    // Signal audioStreamEnd to flush server-side audio buffer
+                    this.session?.sendRealtimeInput({ audioStreamEnd: true });
+                    
+                    // Inject language hint to help recover context after flush
+                    this.injectPostFlushContext();
 
-                  // Reset turn state
-                  this.isUserSpeaking = false;
-                  this.accumulatedTranscript = '';
-                  this.fragmentCounter = 0;
-
-                  // Clear and reset session for fresh start
-                  this.log(`[${this.sessionHandleKey}] Clearing session due to character limit...`, LogLevel.INFO);
-                  this.clearSession();
-
-                  // Reconnect with fresh session
-                  this.log(`[${this.sessionHandleKey}] Reconnecting with fresh session after character limit reset...`, LogLevel.INFO);
-                  this.attemptReconnection(callbacks, this.currentSystemInstruction);
-
-                  return; // Stop processing this fragment
+                    // DON'T finalize transcript - keep accumulating!
+                    // DON'T reset isUserSpeaking - stay in same turn
+                    // DON'T call onTranscript(..., true) - box stays open
+                  }
                 }
               }
 
@@ -467,6 +473,50 @@ class LiveApiService {
     }
   }
 
+  // Send text message with options (for Lecture Mode - does not affect Interview Mode)
+  // Use this when you need to control whether the model should respond
+  public async sendTextWithOptions(text: string, options: { triggerResponse?: boolean } = {}): Promise<void> {
+    if (!this.session) {
+      this.log("Cannot send text. Session is not connected.", LogLevel.ERROR);
+      return;
+    }
+
+    const { triggerResponse = true } = options;
+
+    try {
+      this.session.sendClientContent({
+        turns: [{
+          parts: [{ text }],
+        }],
+        turnComplete: triggerResponse,
+      });
+
+      this.log(`Sent text (turnComplete=${triggerResponse}): "${text.substring(0, 50)}..."`);
+    } catch (error) {
+      this.log(`Error sending text: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.ERROR);
+    }
+  }
+
+  // Inject language hint after buffer flush to help recover context
+  private injectPostFlushContext(): void {
+    if (!this.session) {
+      return;
+    }
+
+    try {
+      this.session.sendClientContent({
+        turns: [{
+          parts: [{ text: this.LANGUAGE_HINT }],
+        }],
+        turnComplete: false, // Don't trigger model response
+      });
+
+      this.log(`💬 Injected post-flush language hint: "${this.LANGUAGE_HINT}"`, LogLevel.INFO);
+    } catch (error) {
+      this.log(`Error injecting post-flush context: ${error instanceof Error ? error.message : 'Unknown'}`, LogLevel.WARN);
+    }
+  }
+
   // Signal end of audio stream (e.g., when mic is paused)
   public async endAudioStream(): Promise<void> {
     if (!this.session) {
@@ -519,4 +569,4 @@ class LiveApiService {
   }
 }
 
-export default LiveApiService;
+export default LiveApiService;   

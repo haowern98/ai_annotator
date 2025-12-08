@@ -3,6 +3,8 @@ import { AppStatus, LogLevel } from '../types';
 import Controls from './Controls';
 import { DualGeminiSessionManager } from '../services/dualGeminiSessionManager';
 import { ScreenSourcePicker } from './ScreenSourcePicker';
+import { screenAnalysisService } from '../services/screenAnalysisService';
+import { captureScreen } from '../utils/screenCapture';
 
 const InterviewMode: React.FC = () => {
   const [replies, setReplies] = React.useState<any[]>([]);
@@ -20,8 +22,16 @@ const InterviewMode: React.FC = () => {
   const pickerResolveRef = React.useRef<((sourceId: string) => void) | null>(null);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const sessionManagerRef = React.useRef<DualGeminiSessionManager | null>(null);
   const overlayCreatedRef = React.useRef<boolean>(false);
+  const analysisFrameIntervalRef = React.useRef<NodeJS.Timeout | null>(null);
+  const analysisActiveRef = React.useRef<boolean>(false);
+  
+  // Independent screen capture for Screen Analysis (auto-captures primary display)
+  const analysisVideoRef = React.useRef<HTMLVideoElement | null>(null);
+  const analysisCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const analysisStreamRef = React.useRef<MediaStream | null>(null);
 
   const addLog = React.useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -98,8 +108,11 @@ const InterviewMode: React.FC = () => {
       if (command === 'stop') {
         handleStopFromOverlay();
       } else if (command === 'pause') {
-        // TODO: Implement pause functionality
-        addLog('Pause requested from overlay (not yet implemented)', LogLevel.WARN);
+        sessionManagerRef.current?.pause();
+        addLog('Audio streaming paused from overlay', LogLevel.INFO);
+      } else if (command === 'resume') {
+        sessionManagerRef.current?.resume();
+        addLog('Audio streaming resumed from overlay', LogLevel.INFO);
       }
     };
 
@@ -107,15 +120,196 @@ const InterviewMode: React.FC = () => {
       window.electronAPI.onOverlayControl(handleOverlayControl);
     }
 
+    // Listen for screen analysis control commands
+    const handleAnalysisControl = async (_event: any, command: string | { command: string; text: string }) => {
+      if (command === 'start') {
+        addLog('Starting Screen Analysis service...', LogLevel.INFO);
+        
+        try {
+          // Get primary screen source directly (without hide/show overlay)
+          addLog('Capturing primary display...', LogLevel.INFO);
+          
+          let primarySourceId: string | undefined;
+          
+          // Get sources directly without hiding overlay
+          if (window.electronAPI?.getScreenSources) {
+            const sources = await window.electronAPI.getScreenSources();
+            if (sources && sources.length > 0) {
+              // Find first "screen" source (not a window)
+              const screenSource = sources.find(s => s.id.startsWith('screen:')) || sources[0];
+              primarySourceId = screenSource.id;
+              addLog(`Using source: ${screenSource.name}`, LogLevel.INFO);
+            }
+          }
+          
+          // Capture with the specific sourceId to skip getScreenSources call
+          const stream = await captureScreen({
+            video: true,
+            audio: false,
+            sourceId: primarySourceId  // Pass sourceId to skip internal source fetching
+          });
+          
+          analysisStreamRef.current = stream;
+          
+          // Create hidden video element for frame capture
+          if (!analysisVideoRef.current) {
+            analysisVideoRef.current = document.createElement('video');
+            analysisVideoRef.current.autoplay = true;
+            analysisVideoRef.current.playsInline = true;
+            analysisVideoRef.current.muted = true;
+          }
+          
+          analysisVideoRef.current.srcObject = stream;
+          await analysisVideoRef.current.play();
+          
+          addLog('Screen capture started', LogLevel.SUCCESS);
+          
+          // Wait for video dimensions to be available
+          await new Promise(resolve => setTimeout(resolve, 300));
+          
+          analysisActiveRef.current = true;
+          
+          const connected = await screenAnalysisService.connect({
+            onAnalysisReady: (analysis: string) => {
+              addLog('Analysis received, sending to overlay', LogLevel.SUCCESS);
+              if ((window.electronAPI as any)?.updateOverlayAnalysis) {
+                (window.electronAPI as any).updateOverlayAnalysis(JSON.stringify({
+                  text: analysis,
+                  isGenerating: false
+                }));
+              }
+            },
+            onError: (error: Error) => {
+              addLog(`Screen Analysis error: ${error.message}`, LogLevel.ERROR);
+            },
+            onConnectionChange: (isConnected: boolean) => {
+              addLog(`Screen Analysis ${isConnected ? 'connected' : 'disconnected'}`, isConnected ? LogLevel.SUCCESS : LogLevel.WARN);
+              if ((window.electronAPI as any)?.updateOverlayAnalysis) {
+                (window.electronAPI as any).updateOverlayAnalysis(JSON.stringify({
+                  isConnected: isConnected
+                }));
+              }
+            }
+          });
+          
+          if (connected) {
+            addLog('Screen Analysis service connected, starting frame capture', LogLevel.SUCCESS);
+            startAnalysisFrameCapture();
+          }
+        } catch (err: any) {
+          addLog(`Failed to start screen capture: ${err.message}`, LogLevel.ERROR);
+          analysisActiveRef.current = false;
+        }
+      } else if (command === 'stop') {
+        addLog('Stopping Screen Analysis service...', LogLevel.INFO);
+        analysisActiveRef.current = false;
+        stopAnalysisFrameCapture();
+        
+        // Clean up analysis stream
+        if (analysisStreamRef.current) {
+          analysisStreamRef.current.getTracks().forEach(track => track.stop());
+          analysisStreamRef.current = null;
+        }
+        if (analysisVideoRef.current) {
+          analysisVideoRef.current.srcObject = null;
+        }
+        
+        await screenAnalysisService.disconnect();
+      } else if (command === 'generate') {
+        addLog('Generating analysis reply...', LogLevel.INFO);
+        await screenAnalysisService.generateReply();
+      } else if (typeof command === 'object' && command.command === 'question') {
+        addLog(`Sending user question: ${command.text.substring(0, 50)}...`, LogLevel.INFO);
+        await screenAnalysisService.sendUserQuestion(command.text);
+      }
+    };
+
+    if ((window.electronAPI as any)?.onAnalysisControl) {
+      (window.electronAPI as any).onAnalysisControl(handleAnalysisControl);
+    }
+
     return () => {
       sessionManagerRef.current?.stop();
+      
+      // Stop analysis frame capture and disconnect
+      stopAnalysisFrameCapture();
+      screenAnalysisService.disconnect();
+      
+      // Clean up analysis stream
+      if (analysisStreamRef.current) {
+        analysisStreamRef.current.getTracks().forEach(track => track.stop());
+        analysisStreamRef.current = null;
+      }
 
       // Remove overlay control listener
       if (window.electronAPI?.removeOverlayControlListener) {
         window.electronAPI.removeOverlayControlListener(handleOverlayControl);
       }
+      
+      // Remove analysis control listener
+      if ((window.electronAPI as any)?.removeAnalysisControlListener) {
+        (window.electronAPI as any).removeAnalysisControlListener();
+      }
     };
   }, [addLog, handleStopFromOverlay]);
+
+  // Frame capture for screen analysis (uses independent analysis stream)
+  const captureAnalysisFrame = React.useCallback((): string | null => {
+    const video = analysisVideoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      return null;
+    }
+
+    // Create canvas if not exists
+    if (!analysisCanvasRef.current) {
+      analysisCanvasRef.current = document.createElement('canvas');
+    }
+    const canvas = analysisCanvasRef.current;
+    
+    // Scale down for efficiency (max 1280px width)
+    const scale = Math.min(1, 1280 / video.videoWidth);
+    canvas.width = video.videoWidth * scale;
+    canvas.height = video.videoHeight * scale;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // Convert to base64 JPEG (quality 0.7 for balance)
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    // Remove the data:image/jpeg;base64, prefix
+    return dataUrl.split(',')[1];
+  }, []);
+
+  const startAnalysisFrameCapture = React.useCallback(() => {
+    if (analysisFrameIntervalRef.current) {
+      clearInterval(analysisFrameIntervalRef.current);
+    }
+    
+    addLog('Starting analysis frame capture (1 frame/sec)', LogLevel.INFO);
+    
+    analysisFrameIntervalRef.current = setInterval(async () => {
+      if (!analysisActiveRef.current) return;
+      
+      const frame = captureAnalysisFrame();
+      if (frame) {
+        try {
+          await screenAnalysisService.sendVideoFrame(frame);
+        } catch (err) {
+          // Silent fail for frame send errors
+        }
+      }
+    }, 1000); // 1 frame per second
+  }, [addLog, captureAnalysisFrame]);
+
+  const stopAnalysisFrameCapture = React.useCallback(() => {
+    if (analysisFrameIntervalRef.current) {
+      clearInterval(analysisFrameIntervalRef.current);
+      analysisFrameIntervalRef.current = null;
+      addLog('Stopped analysis frame capture', LogLevel.INFO);
+    }
+  }, [addLog]);
 
   // Update media stream from session manager
   React.useEffect(() => {

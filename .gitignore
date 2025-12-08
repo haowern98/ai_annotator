@@ -1,179 +1,119 @@
-# Logs
-logs
-*.log
+# ====================
+# Node.js & npm
+# ====================
+node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.npm
+.yarn-integrity
+package-lock.json.bak
 
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Coverage directory used by tools like istanbul
-coverage/
-*.lcov
-
-# nyc test coverage
-.nyc_output
-
-# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
-.grunt
-
-# Bower dependency directory (https://bower.io/)
-bower_components
-
-# node_modules
-node_modules
-dist
-dist-ssr
-*.local
-
-# Snowpack dependency directory (https://snowpack.dev/)
-web_modules/
-
-# TypeScript cache
+# ====================
+# Build Outputs
+# ====================
+dist/
+dist-ssr/
+dist-electron/
+build/
+out/
+release/
 *.tsbuildinfo
 
-# Optional npm cache directory
-.npm
-
-# Optional eslint cache
-.eslintcache
-
-# Optional stylelint cache
-.stylelintcache
-
-# Microbundle cache
-.rpt2_cache/
-.rts2_cache_cjs/
-.rts2_cache_es/
-.rts2_cache_umd/
-
-# Optional REPL history
-.node_repl_history
-
-# Output of 'npm pack'
-*.tgz
-
-# Yarn Integrity file
-.yarn-integrity
-
-# Environment variables and API keys - CRITICAL FOR SECURITY
+# ====================
+# Environment & Secrets (CRITICAL!)
+# ====================
 .env
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*.local
+.env.development
+.env.production
 *.env
 *.key
+*.pem
+secrets/
+.secrets/
 
-# Python specific (for live_client.py and other Python scripts)
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+# ====================
+# Electron Specific
+# ====================
+# Electron builder outputs
+*.dmg
+*.exe
+*.AppImage
+*.deb
+*.rpm
+*.snap
+# Electron packager outputs
+electron-packager/
+electron-builder-output/
 
-# Virtual environments
-venv/
-env/
-ENV/
-.venv/
-.env/
-env.bak/
-venv.bak/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pytest
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Audio/Video files (live capture and processing)
-*.wav
-*.mp3
-*.mp4
-*.avi
-*.mov
-*.wmv
-*.flv
-*.webm
-*.mkv
-captures/
+# ====================
+# Application Data
+# ====================
+# User recordings and captures
 recordings/
+recordings/*.json
+captures/
 temp_audio/
 temp_video/
-audio_files/
-video_files/
 media_temp/
 
-# Image files (screenshots, etc.)
-screenshots/
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.bmp
-*.svg
-temp_images/
-
-# Model files and AI artifacts (but keep public/*.onnx for VAD)
+# ====================
+# AI/ML Models & Cache
+# ====================
 models/
+whisper-models/
+.whisper/
 *.pkl
 *.joblib
 *.h5
 *.pb
 checkpoints/
+.transformers/
+.cache/
 
-# Whisper model downloads (will be downloaded at runtime)
-whisper-models/
-.whisper/
+# Keep public ONNX files for VAD
+!public/*.onnx
+!public/*.mjs
 
-# Data files
-data/
-datasets/
-*.csv
-*.json
-*.xlsx
-*.parquet
+# ====================
+# Python (for future Parakeet integration)
+# ====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+env/
+ENV/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints
+.python-version
 
-# Editor directories and files
+# ====================
+# Logs
+# ====================
+logs/
+*.log
+*.log.*
+lerna-debug.log*
+
+# ====================
+# IDEs & Editors
+# ====================
 .vscode/*
 !.vscode/extensions.json
-.idea
-.DS_Store
+.idea/
 *.suo
 *.ntvs*
 *.njsproj
@@ -182,77 +122,82 @@ datasets/
 *.swp
 *.swo
 *~
+.DS_Store
 
-# OS generated files
+# ====================
+# AI Assistant
+# ====================
+.claude/
+.cursor/
+.copilot/
+
+# ====================
+# OS Files
+# ====================
+# macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# Windows image file caches
+# Windows
 Thumbs.db
 ehthumbs.db
-
-# Folder config file
 Desktop.ini
-
-# Recycle Bin used on file shares
 $RECYCLE.BIN/
-
-# Windows Installer files
-*.cab
-*.msi
-*.msm
-*.msp
-
-# Windows shortcuts
 *.lnk
+# Linux
+*~
+.directory
 
-# Electron build outputs
-dist/
-dist-electron/
-out/
-release/
+# ====================
+# Testing & Coverage
+# ====================
+coverage/
+*.lcov
+.nyc_output
+.tox/
+.nox/
 
-# Temporary files
+# ====================
+# Temporary Files
+# ====================
 tmp/
 temp/
 *.tmp
 *.temp
+*.bak
+*.swp
+*.swo
 
-# Local configuration files
-config.local.js
-config.local.ts
-.env.local.example
+# ====================
+# Cache Directories
+# ====================
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
 
-# Database files
+# ====================
+# Database Files
+# ====================
 *.db
 *.sqlite
 *.sqlite3
-
-# Session files
 .session
 
-# Cache directories
-.cache/
-.parcel-cache/
-
-# Next.js build output (if you add Next.js later)
-.next/
-out/
-
-# Gatsby files (if you add Gatsby later)
-.cache/
-public
-
-# Storybook build outputs (if you add Storybook later)
-.out
-.storybook-out
-
-# Temporary folders
-tmp/
-temp/
+# ====================
+# Misc
+# ====================
+.grunt
+bower_components
+web_modules/
+.node_repl_history
+*.tgz
+*.pid
+*.seed
+*.pid.lock

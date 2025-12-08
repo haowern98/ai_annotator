@@ -3,6 +3,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
+  // Window control API
+  minimizeWindow: () => ipcRenderer.send('window:minimize'),
+  maximizeWindow: () => ipcRenderer.send('window:maximize'),
+  closeWindow: () => ipcRenderer.send('window:close'),
+  isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+
   // Screen capture API
   getScreenSources: async () => {
     return await ipcRenderer.invoke('get-screen-sources');
@@ -84,6 +90,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   whisperDispose: async () => {
     return await ipcRenderer.invoke('whisper:dispose');
+  },
+
+  // Screen Analysis chat
+  sendAnalysisQuestion: async (question) => {
+    return await ipcRenderer.invoke('analysis:question', question);
   },
 });
 

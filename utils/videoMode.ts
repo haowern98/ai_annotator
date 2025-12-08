@@ -178,6 +178,18 @@ export class VideoModeCapture {
       return;
     }
 
+    // Check if video is actually playing
+    if (video.paused) {
+      this.log("WARNING: Video is paused! Attempting to resume playback...", LogLevel.WARN);
+      video.play().catch(err => {
+        this.log(`Failed to resume video: ${err.message}`, LogLevel.ERROR);
+      });
+      return; // Skip this capture, next interval should work
+    }
+
+    // Log current video time to verify playback
+    this.log(`Capturing frame at video time: ${video.currentTime.toFixed(2)}s`, LogLevel.INFO);
+
     this.captureCount++;
     this.log(`Capturing data point ${this.captureCount}/${this.config.setsPerMinute}...`);
 

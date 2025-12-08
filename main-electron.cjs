@@ -60,10 +60,31 @@ function createWindow() {
       backgroundThrottling: false, // Prevent throttling of media capture
     },
     icon: path.join(__dirname, '../public/icon.png'),
-    backgroundColor: '#0f172a', // Match the app's dark background
+    backgroundColor: '#1a1a1a', // Zoom-inspired dark background
     autoHideMenuBar: true,
-    frame: true,
-    titleBarStyle: 'default',
+    frame: false, // Frameless window for custom title bar
+    titleBarStyle: 'hidden',
+  });
+
+  // Window control IPC handlers
+  ipcMain.on('window:minimize', () => {
+    mainWindow?.minimize();
+  });
+
+  ipcMain.on('window:maximize', () => {
+    if (mainWindow?.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow?.maximize();
+    }
+  });
+
+  ipcMain.on('window:close', () => {
+    mainWindow?.close();
+  });
+
+  ipcMain.handle('window:isMaximized', () => {
+    return mainWindow?.isMaximized() ?? false;
   });
 
   // Setup IPC handlers

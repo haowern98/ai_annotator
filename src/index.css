@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@theme {
+  /* Zoom-inspired dark theme */
+  --color-background: #1a1a1a;
+  --color-sidebar: #232323;
+  --color-titlebar: #2d2d2d;
+  --color-surface: #2d2d2d;
+  --color-surface-hover: #3a3a3a;
+  --color-divider: #3a3a3a;
+  
+  /* Action colors */
+  --color-action-primary: #F26D21;
+  --color-action-secondary: #0E72ED;
+  --color-close-hover: #e81123;
+  
+  /* Text colors */
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #8a8a8a;
+  
+  /* Legacy colors (for backward compatibility) */
+  --color-brand-primary: #1e40af;
+  --color-brand-secondary: #0E72ED;
+  --color-base-100: #1a1a1a;
+  --color-base-200: #232323;
+  --color-base-300: #3a3a3a;
+  --color-content-100: #ffffff;
+  --color-content-200: #8a8a8a;
+}
+
+/* Custom dark scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #444444;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555555;
+}
+
+/* Firefox scrollbar support */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #444444 #1a1a1a;
+}

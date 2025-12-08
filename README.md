@@ -237,3 +237,32 @@ const STREAMING_CONFIG = {
 - [Gemini Live API Documentation](https://ai.google.dev/gemini-api/docs/live)
 - [Google Gemini Cookbook](https://github.com/google-gemini/cookbook)
 - [Live API Python Example](https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_started_LiveAPI.py)
+
+## Changing the App Logo
+
+To update the application icon:
+
+1. **Replace the SVG file** with your new logo:
+   ```
+   logohi.svg
+   ```
+
+2. **Run the conversion script** to generate all icon sizes:
+   ```bash
+   node convert-logo.js
+   npx png-to-ico build/icon-256.png > build/icon.ico
+   ```
+
+3. **Restart the app**:
+   ```bash
+   npm run electron:dev
+   ```
+
+### Generated Icon Files
+
+| File | Purpose |
+|------|---------|
+| `public/icon.png` | Runtime taskbar icon |
+| `build/icon.png` | Linux builds |
+| `build/icon.ico` | Windows builds |
+| `build/icon.icns` | Mac builds (requires separate tool) |

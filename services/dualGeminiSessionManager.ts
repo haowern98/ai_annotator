@@ -1,5 +1,5 @@
 import React from 'react';
-import { AppStatus, LogLevel } from '../types';
+import { AppStatus, LogLevel, InterviewContext } from '../types';
 import LiveApiService from './liveApiService';
 import { ContinuousStreamingCapture } from '../utils/continuousStreaming';
 import { captureScreen, isElectron } from '../utils/screenCapture';
@@ -8,11 +8,40 @@ import { captureScreen, isElectron } from '../utils/screenCapture';
 // 1. Transcript Service: Uses inputAudioTranscription for real-time speech-to-text
 // 2. Reply Service: Generates AI responses to interviewer questions
 
-const REPLY_PROMPT = `You are a Malaysian who is studying at National University of Singapore who is interviewing for a software engineer position at a software engineering company.
-Respond ONLY with a valid JSON object in the following format:
+const buildReplyPrompt = (context?: InterviewContext): string => {
+  // Build context sections only for non-empty fields
+  const sections: string[] = [];
+  
+  // Candidate info
+  const name = context?.name || 'a candidate';
+  const role = context?.role || 'a software engineer position';
+  const company = context?.company || 'a software engineering company';
+  
+  sections.push(`You are helping ${name} who is interviewing for ${role} at ${company}.`);
+  
+  // Resume (only if provided)
+  if (context?.resume?.trim()) {
+    sections.push(`## Candidate Background\n${context.resume.trim()}`);
+  }
+  
+  // Job Description (only if provided)
+  if (context?.jobDescription?.trim()) {
+    sections.push(`## Job Description\n${context.jobDescription.trim()}`);
+  }
+  
+  // Additional Notes (only if provided)
+  if (context?.notes?.trim()) {
+    sections.push(`## Additional Notes\n${context.notes.trim()}`);
+  }
+  
+  // Response format instruction
+  sections.push(`Respond ONLY with a valid JSON object in the following format:
 {
   "reply": "[Your response to the interviewer's question or statement. If the question is short, reply with a single sentence. If the question is more detailed, use the STAR framework to provide a more detailed response with examples and elaboration, but still be concise]"
-}`;
+}`);
+  
+  return sections.join('\n\n');
+};
 
 const STREAMING_CONFIG = {
   audioChunkMs: 100,
@@ -64,7 +93,8 @@ export class DualGeminiSessionManager {
 
   public async start(
     apiKey: string,
-    onSourceRequired?: (sources: any[]) => Promise<string>
+    onSourceRequired?: (sources: any[]) => Promise<string>,
+    interviewContext?: InterviewContext
   ): Promise<void> {
     this.log('Dual Session Manager: Starting with native Whisper transcription...');
     
@@ -127,7 +157,7 @@ export class DualGeminiSessionManager {
           if (isFinal) {
             // Turn complete - add to transcript history
             this.log(`Final transcript received: "${text.substring(0, 50)}..."`, LogLevel.SUCCESS);
-            this.transcripts.unshift({
+            this.transcripts.push({
               timestamp: new Date().toLocaleTimeString(),
               text: text.trim()
             });
@@ -207,7 +237,7 @@ export class DualGeminiSessionManager {
           this.cleanup();
         },
         onClose: () => this.log('Reply service closed.'),
-      }, REPLY_PROMPT);
+      }, buildReplyPrompt(interviewContext));
 
       this.log('Reply service connected successfully.', LogLevel.SUCCESS);
       this.replyService = replyService;
@@ -309,6 +339,24 @@ export class DualGeminiSessionManager {
     this.isReplyGenerating = false;
     this.callbacks.onStatusChange(AppStatus.IDLE);
     this.log('Analysis stopped', LogLevel.SUCCESS);
+  }
+
+  public pause(): void {
+    if (this.streamingCapture) {
+      this.streamingCapture.pause();
+      this.log('Audio streaming paused', LogLevel.INFO);
+    }
+  }
+
+  public resume(): void {
+    if (this.streamingCapture) {
+      this.streamingCapture.resume();
+      this.log('Audio streaming resumed', LogLevel.INFO);
+    }
+  }
+
+  public getIsPaused(): boolean {
+    return this.streamingCapture?.getIsPaused() ?? false;
   }
 
   private cleanup(): void {

@@ -3,22 +3,7 @@
  * Provides a unified API for screen capture that works in both browser and Electron
  */
 
-declare global {
-  interface Window {
-    electronAPI?: {
-      getScreenSources: () => Promise<Array<{
-        id: string;
-        name: string;
-        thumbnail: string;
-        appIcon: string | null;
-        display_id: string;
-      }>>;
-      getScreenStream: (sourceId: string) => Promise<{ sourceId: string; success: boolean }>;
-      isElectron: boolean;
-      platform: string;
-    };
-  }
-}
+// electronAPI types are declared in types.ts - do not redeclare here
 
 export interface ScreenSource {
   id: string;
@@ -45,7 +30,26 @@ export async function getScreenSources(): Promise<ScreenSource[] | null> {
   }
 
   try {
+    // Ensure our overlay is hidden from the OS-level source list before asking for sources
+    try {
+      if (window.electronAPI && typeof window.electronAPI.hideOverlay === 'function') {
+        // Best-effort; ignore errors
+        await window.electronAPI.hideOverlay();
+      }
+    } catch (e) {
+      console.warn('Failed to hide overlay before fetching screen sources:', e);
+    }
+
     const sources = await window.electronAPI!.getScreenSources();
+
+    // After fetching sources, we can re-show the overlay (it will be hidden only briefly)
+    try {
+      if (window.electronAPI && typeof window.electronAPI.showOverlay === 'function') {
+        await window.electronAPI.showOverlay();
+      }
+    } catch (e) {
+      console.warn('Failed to show overlay after fetching screen sources:', e);
+    }
     return sources.map(source => ({
       id: source.id,
       name: source.name,

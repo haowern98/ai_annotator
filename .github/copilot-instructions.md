@@ -1,5 +1,7 @@
 # Live Lecture Summarizer - AI Development Guidelines
 
+1. DO NOT CODE UNLESS I EXPLICITLY ASK YOU TO SO.
+
 ## Project Overview
 A real-time lecture analysis and interview assistance tool using Gemini Live API with continuous A/V streaming. The application has two main modes:
 - **Lecture Mode**: Interval-based capture every 5 seconds

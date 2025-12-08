@@ -13,8 +13,22 @@ function setupScreenCaptureHandlers(ipcMain, desktopCapturer) {
         fetchWindowIcons: true,
       });
 
+      // Filter out our overlay window(s) so they don't appear in share pickers
+      const filtered = sources.filter((source) => {
+        try {
+          // DesktopCapturer source.name typically matches the window title for 'window' types
+          if (typeof source.name === 'string' && source.name.includes('LLS Overlay')) {
+            return false;
+          }
+        } catch (e) {
+          // If any check fails, keep the source to avoid hiding legitimate entries
+          console.warn('Error checking source for overlay marker:', e);
+        }
+        return true;
+      });
+
       // Return serializable data
-      return sources.map((source) => ({
+      return filtered.map((source) => ({
         id: source.id,
         name: source.name,
         thumbnail: source.thumbnail.toDataURL(),
