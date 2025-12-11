@@ -1,12 +1,18 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, Menu, dialog, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 const { setupScreenCaptureHandlers } = require('./ipc/screenCapture.cjs');
 const { setupOverlayHandlers } = require('./ipc/overlay.cjs');
 const { setupLectureOverlayHandlers } = require('./ipc/lectureOverlay.cjs');
 const { setupWhisperHandlers } = require('./ipc/whisper.cjs');
 const { setupRecordingHandlers } = require('./ipc/recording.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
+
+// Python server state
+let pythonServer = null;
+let pythonServerPort = null;
+let pythonServerReady = false;
 
 // Only set command-line switches if app is properly loaded
 if (app && app.commandLine) {
@@ -45,6 +51,151 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow;
+
+/**
+ * Start Python model server
+ */
+function startPythonServer() {
+  return new Promise((resolve, reject) => {
+    try {
+      console.log('[Python] Starting model server...');
+      
+      // Determine Python executable path (check venv first, then embedded)
+      const isDev = process.env.NODE_ENV === 'development';
+      
+      let pythonPath;
+      if (isDev) {
+        // Dev: Check venv first, then embedded Python
+        const venvPath = path.join(__dirname, 'python-env', 'venv', 'Scripts', 'python.exe');
+        const embedPath = path.join(__dirname, 'python-env', 'python', 'python.exe');
+        
+        if (fs.existsSync(venvPath)) {
+          pythonPath = venvPath;
+          console.log('[Python] Using venv Python');
+        } else if (fs.existsSync(embedPath)) {
+          pythonPath = embedPath;
+          console.log('[Python] Using embedded Python');
+        } else {
+          const error = 'Python not found. Create venv: cd electron/python-env && python -m venv venv';
+          console.error('[Python]', error);
+          reject(new Error(error));
+          return;
+        }
+      } else {
+        // Production: Use bundled embedded Python
+        pythonPath = path.join(process.resourcesPath, 'python-env', 'python', 'python.exe');
+      }
+      
+      const serverScript = isDev
+        ? path.join(__dirname, 'python-server', 'model_server.py')
+        : path.join(process.resourcesPath, 'python-server', 'model_server.py');
+      
+      console.log('[Python] Python path:', pythonPath);
+      console.log('[Python] Server script:', serverScript);
+      
+      // Check if Python exists
+      if (!fs.existsSync(pythonPath)) {
+        const error = `Python not found at: ${pythonPath}`;
+        console.error('[Python]', error);
+        reject(new Error(error));
+        return;
+      }
+      
+      // Spawn Python process
+      pythonServer = spawn(pythonPath, [serverScript], {
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',  // Disable Python output buffering
+        },
+        windowsHide: true,  // Hide console window on Windows
+      });
+      
+      // Handle stdout (port number, progress, logs)
+      pythonServer.stdout.on('data', (data) => {
+        const output = data.toString().trim();
+        console.log('[Python]', output);
+        
+        // Parse special messages
+        if (output.startsWith('SERVER_PORT:')) {
+          pythonServerPort = parseInt(output.split(':')[1]);
+          console.log(`[Python] ✅ Server running on port ${pythonServerPort}`);
+          pythonServerReady = true;
+          resolve(pythonServerPort);
+        } else if (output.startsWith('DOWNLOAD_PROGRESS:')) {
+          // Format: DOWNLOAD_PROGRESS:model_name:percent
+          const parts = output.split(':');
+          const modelName = parts[1];
+          const percent = parseInt(parts[2]);
+          
+          // Send to renderer
+          if (mainWindow) {
+            mainWindow.webContents.send('python:download-progress', {
+              model: modelName,
+              percent: percent
+            });
+          }
+        } else if (output.startsWith('ERROR:')) {
+          const errorMsg = output.substring(6);
+          console.error('[Python] ❌ Error:', errorMsg);
+          if (mainWindow) {
+            mainWindow.webContents.send('python:error', errorMsg);
+          }
+        }
+      });
+      
+      // Handle stderr
+      pythonServer.stderr.on('data', (data) => {
+        console.error('[Python] stderr:', data.toString());
+      });
+      
+      // Handle process exit
+      pythonServer.on('close', (code) => {
+        console.log(`[Python] Process exited with code ${code}`);
+        pythonServerReady = false;
+        pythonServerPort = null;
+      });
+      
+      pythonServer.on('error', (err) => {
+        console.error('[Python] Failed to start:', err);
+        reject(err);
+      });
+      
+      // Timeout if server doesn't start in 30 seconds
+      setTimeout(() => {
+        if (!pythonServerReady) {
+          reject(new Error('Python server failed to start within 30 seconds'));
+        }
+      }, 30000);
+      
+    } catch (error) {
+      console.error('[Python] Error starting server:', error);
+      reject(error);
+    }
+  });
+}
+
+/**
+ * Stop Python server
+ */
+function stopPythonServer() {
+  if (pythonServer) {
+    console.log('[Python] Stopping server...');
+    pythonServer.kill();
+    pythonServer = null;
+    pythonServerReady = false;
+    pythonServerPort = null;
+  }
+}
+
+/**
+ * Get Python server WebSocket URL
+ */
+function getPythonServerUrl() {
+  if (!pythonServerReady || !pythonServerPort) {
+    return null;
+  }
+  return `ws://127.0.0.1:${pythonServerPort}/ws`;
+}
 
 function createWindow() {
   // Remove the default menu
@@ -139,6 +290,15 @@ function createWindow() {
   setupLectureOverlayHandlers(ipcMain, getMainWindow);
   setupWhisperHandlers(ipcMain);
   setupRecordingHandlers(ipcMain);
+  
+  // Python server IPC handlers
+  ipcMain.handle('python:get-server-url', () => {
+    return getPythonServerUrl();
+  });
+  
+  ipcMain.handle('python:is-ready', () => {
+    return pythonServerReady;
+  });
 
   // Load the app
   if (process.env.NODE_ENV === 'development') {
@@ -161,7 +321,7 @@ function getMainWindow() {
 }
 
 // Register custom protocol for local file access
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Register video protocol handler for serving local video files
   protocol.registerFileProtocol('video', (request, callback) => {
     try {
@@ -185,6 +345,15 @@ app.whenReady().then(() => {
     }
   });
 
+  // Start Python server before creating window
+  try {
+    await startPythonServer();
+    console.log('[Main] ✅ Python server started successfully');
+  } catch (error) {
+    console.error('[Main] ❌ Failed to start Python server:', error);
+    // Continue anyway - app can still work in Interview mode with Gemini API
+  }
+
   createWindow();
 
   app.on('activate', () => {
@@ -195,9 +364,17 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  // Stop Python server
+  stopPythonServer();
+  
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', () => {
+  // Ensure Python server is stopped
+  stopPythonServer();
 });
 
 // Handle any unhandled errors

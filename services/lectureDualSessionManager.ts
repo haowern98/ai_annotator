@@ -1,4 +1,4 @@
-import LectureLiveApiService from './lectureLiveApiService';
+import LocalModelWebSocketService from './localModelWebSocketService';
 import { LogLevel } from '../types';
 
 type LogFunction = (message: string, level?: LogLevel) => void;
@@ -30,12 +30,15 @@ interface LectureDualSessionCallbacks {
 }
 
 // Configuration
-const VIDEO_FRAME_INTERVAL_MS = 2000;      // Send video frame every 2 seconds
+const VIDEO_FRAME_INTERVAL_MS = 2000;      // Capture video frame every 2 seconds
 const SUMMARY_WINDOW_MS = 60000;           // 1-minute summary windows (TODO: Change to 300000 for 5-min after testing)
+const AUDIO_BUFFER_DURATION_MS = 8000;     // Buffer 8 seconds of audio before transcription
+const AUDIO_CHUNK_SIZE_MS = 100;           // Audio worklet sends 100ms chunks
 
-// System instructions
-const TRANSCRIPT_SYSTEM_INSTRUCTION = `You are a transcription service. Your ONLY job is to accurately transcribe the audio you hear. Do NOT respond to questions or provide commentary. Stay completely silent - just transcribe.`;
+// Calculate how many audio chunks we need to buffer
+const CHUNKS_PER_BUFFER = AUDIO_BUFFER_DURATION_MS / AUDIO_CHUNK_SIZE_MS; // 80 chunks for 8 seconds
 
+// Summary system instruction (passed to Gemma model)
 const SUMMARY_SYSTEM_INSTRUCTION = `You are a lecture summarization assistant observing a live lecture through continuous video and transcript text.
 
 CRITICAL RULES:
@@ -46,8 +49,8 @@ CRITICAL RULES:
 - If you haven't received any transcript text in a time window, say "No transcript received in this window"
 
 You will receive:
-1. Continuous transcript text from the lecture (what the lecturer is saying)
-2. Continuous video frames showing slides, diagrams, code, or the lecturer
+1. Transcript text from the lecture (what the lecturer is saying)
+2. Video frames showing slides, diagrams, code, or the lecturer
 
 When asked to summarize a time window, organize the content by TOPICS and THEMES:
 - Identify main topics and themes discussed in the window
@@ -68,8 +71,7 @@ When asked to summarize a time window, organize the content by TOPICS and THEMES
 - Keep explanations concise but complete`;
 
 class LectureDualSessionManager {
-  private transcriptService: LectureLiveApiService | null = null;
-  private summaryService: LectureLiveApiService | null = null;
+  private websocketService: LocalModelWebSocketService | null = null;
   private log: LogFunction;
   private callbacks: LectureDualSessionCallbacks | null = null;
 
@@ -92,10 +94,14 @@ class LectureDualSessionManager {
   private videoFrameIntervalId: number | null = null;
   private autoSummaryIntervalId: number | null = null;
 
-  // Audio capture
+  // Audio capture and buffering
   private audioContext: AudioContext | null = null;
   private audioWorklet: AudioWorkletNode | null = null;
   private mediaStream: MediaStream | null = null;
+  private audioChunkBuffer: string[] = []; // Buffer for 8-second audio chunks
+
+  // Video frame accumulation for batch summarization
+  private videoFrameBuffer: string[] = []; // Accumulated base64 video frames
 
   // Media elements (set by session manager)
   private videoElement: HTMLVideoElement | null = null;
@@ -103,6 +109,7 @@ class LectureDualSessionManager {
 
   // Connection state
   private isRunning: boolean = false;
+  private isConnected: boolean = false;
 
   constructor(log: LogFunction) {
     this.log = log;
@@ -142,34 +149,38 @@ class LectureDualSessionManager {
     return entries.map(e => `[${this.formatTimestamp(e.timestampMs)}] ${e.text}`).join('\n');
   }
 
-  // Clear all old lecture session handles from localStorage to prevent stale context
-  private clearOldLectureSessions(): void {
-    try {
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && (key.startsWith('gemini_live_session_lecture_transcript') || 
-                    key.startsWith('gemini_live_session_lecture_summary'))) {
-          keysToRemove.push(key);
+  // Buffer audio chunk and send to transcription when buffer is full
+  private async bufferAndTranscribeAudio(audioBase64: string): Promise<void> {
+    this.audioChunkBuffer.push(audioBase64);
+
+    // Wait until we have 8 seconds of audio (80 chunks of 100ms each)
+    if (this.audioChunkBuffer.length >= CHUNKS_PER_BUFFER) {
+      const bufferedAudio = this.audioChunkBuffer.join(''); // Concatenate all chunks
+      this.audioChunkBuffer = []; // Reset buffer
+
+      this.log(`[LectureDual] Sending 8s audio buffer for transcription (${this.audioChunkBuffer.length} chunks)`, LogLevel.INFO);
+
+      try {
+        // Send to Parakeet for transcription (chunk ID is managed internally)
+        const transcriptText = await this.websocketService!.transcribeAudio(bufferedAudio);
+        
+        if (transcriptText && transcriptText.trim().length > 0) {
+          // Handle the final transcript
+          this.handleTranscript(transcriptText, true);
+        } else {
+          this.log(`[LectureDual] Empty transcript received`, LogLevel.WARN);
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        this.log(`[LectureDual] Transcription error: ${message}`, LogLevel.ERROR);
+        this.callbacks?.onError(`Transcription: ${message}`);
       }
-      
-      for (const key of keysToRemove) {
-        localStorage.removeItem(key);
-        this.log(`[LectureDual] Cleared old session: ${key}`, LogLevel.INFO);
-      }
-      
-      if (keysToRemove.length > 0) {
-        this.log(`[LectureDual] Cleared ${keysToRemove.length} old lecture session(s)`, LogLevel.SUCCESS);
-      }
-    } catch (error) {
-      this.log('[LectureDual] Could not clear old lecture sessions from localStorage', LogLevel.WARN);
     }
   }
 
-  // Initialize both services
+  // Initialize WebSocket service with local models
   public async start(
-    apiKey: string,
+    apiKey: string, // Unused, kept for backward compatibility
     callbacks: LectureDualSessionCallbacks,
     mediaStream: MediaStream,
     videoElement: HTMLVideoElement,
@@ -188,82 +199,61 @@ class LectureDualSessionManager {
     this.transcriptBuffer = [];
     this.summaries = [];
     this.currentWindowIndex = 0;
-
-    // Generate unique session keys with timestamp to guarantee fresh Gemini sessions
-    // This prevents any possibility of Gemini API resuming stale server-side context
-    const sessionTimestamp = Date.now();
-    const transcriptSessionKey = `lecture_transcript_${sessionTimestamp}`;
-    const summarySessionKey = `lecture_summary_${sessionTimestamp}`;
-
-    // Clear any old lecture session handles from localStorage
-    this.clearOldLectureSessions();
+    this.audioChunkBuffer = [];
+    this.videoFrameBuffer = [];
 
     try {
-      // Create transcript service (Session 1 - audio only)
-      this.log(`[LectureDual] Creating transcript service with key: ${transcriptSessionKey}`, LogLevel.INFO);
-      this.transcriptService = new LectureLiveApiService(apiKey, this.log, transcriptSessionKey);
+      // Create WebSocket service for local models (Parakeet + Gemma)
+      this.log('[LectureDual] Connecting to local model WebSocket server...', LogLevel.INFO);
+      this.websocketService = new LocalModelWebSocketService(this.log);
       
-      // Clear any stale session from previous lectures to start fresh
-      this.transcriptService.clearSession();
-      
-      await this.transcriptService.connect({
-        onTranscript: (text, isFinal) => this.handleTranscript(text, isFinal),
-        onModelResponse: () => {}, // Transcript service should stay silent
-        onPartialResponse: () => {},
+      await this.websocketService.connect({
+        onTranscript: (text, chunkId) => {
+          // Parakeet transcription result
+          this.log(`[LectureDual] Transcript received (chunkId: ${chunkId}): "${text.substring(0, 50)}..."`, LogLevel.SUCCESS);
+          // Handle as final transcript since Parakeet processes complete 8s chunks
+          this.handleTranscript(text, true);
+        },
+        onSummaryChunk: (text) => {
+          // Gemma streaming summary chunk
+          this.handlePartialSummary(text);
+        },
+        onSummaryComplete: () => {
+          // Gemma finished streaming
+          this.handleSummaryComplete(this.currentPartialSummary);
+        },
         onError: (error) => {
-          this.log(`[LectureDual] Transcript service error: ${error}`, LogLevel.ERROR);
-          callbacks.onError(`Transcript: ${error}`);
+          this.log(`[LectureDual] WebSocket error: ${error}`, LogLevel.ERROR);
+          callbacks.onError(error);
         },
         onClose: (reason) => {
-          this.log(`[LectureDual] Transcript service closed: ${reason}`, LogLevel.WARN);
-          callbacks.onConnectionChange(false, this.summaryService?.isConnected() ?? false);
+          this.log(`[LectureDual] WebSocket closed: ${reason}`, LogLevel.WARN);
+          this.isConnected = false;
+          callbacks.onConnectionChange(false, false);
         },
         onReconnecting: () => {
-          this.log('[LectureDual] Transcript service reconnecting...', LogLevel.INFO);
+          this.log('[LectureDual] WebSocket reconnecting...', LogLevel.INFO);
+          this.isConnected = false;
+          callbacks.onConnectionChange(false, false);
         },
-      }, TRANSCRIPT_SYSTEM_INSTRUCTION);
+      });
 
-      this.log('[LectureDual] Transcript service connected', LogLevel.SUCCESS);
+      this.isConnected = true;
+      this.log('[LectureDual] WebSocket service connected', LogLevel.SUCCESS);
 
-      // Create summary service (Session 2 - video + transcript text)
-      this.log(`[LectureDual] Creating summary service with key: ${summarySessionKey}`, LogLevel.INFO);
-      this.summaryService = new LectureLiveApiService(apiKey, this.log, summarySessionKey);
-      
-      // Clear any stale session from previous lectures to start fresh
-      this.summaryService.clearSession();
-      
-      await this.summaryService.connect({
-        onTranscript: () => {}, // Summary service doesn't receive audio
-        onModelResponse: (text) => this.handleSummaryComplete(text),
-        onPartialResponse: (text) => this.handlePartialSummary(text),
-        onError: (error) => {
-          this.log(`[LectureDual] Summary service error: ${error}`, LogLevel.ERROR);
-          callbacks.onError(`Summary: ${error}`);
-        },
-        onClose: (reason) => {
-          this.log(`[LectureDual] Summary service closed: ${reason}`, LogLevel.WARN);
-          callbacks.onConnectionChange(this.transcriptService?.isConnected() ?? false, false);
-        },
-        onReconnecting: () => {
-          this.log('[LectureDual] Summary service reconnecting...', LogLevel.INFO);
-        },
-      }, SUMMARY_SYSTEM_INSTRUCTION);
-
-      this.log('[LectureDual] Summary service connected', LogLevel.SUCCESS);
-      // Start video frame capture (to summary service only)
+      // Start video frame capture (accumulates frames for batch summarization)
       this.startVideoFrameCapture();
 
-      // Start audio capture
+      // Start audio capture (buffers to 8s chunks before transcription)
       await this.startAudioCapture();
 
       // Start auto-summary timer
-      this.startAutoSummaryTimer();
       this.startAutoSummaryTimer();
 
       this.isRunning = true;
       callbacks.onConnectionChange(true, true);
 
-      this.log('[LectureDual] Dual session started successfully', LogLevel.SUCCESS);
+      this.log('[LectureDual] Lecture session started successfully with local models', LogLevel.SUCCESS);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.log(`[LectureDual] Failed to start: ${message}`, LogLevel.ERROR);
@@ -273,11 +263,10 @@ class LectureDualSessionManager {
     }
   }
 
-  // Handle transcript from Session 1
+  // Handle transcript from Parakeet model
   private handleTranscript(text: string, isFinal: boolean): void {
     if (isFinal) {
-      // Use the timestamp from when first italic fragment appeared
-      const timestampMs = this.firstFragmentTimestamp ?? this.getElapsedTime();
+      const timestampMs = this.getElapsedTime();
       const entry: TranscriptEntry = {
         id: `transcript_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         text,
@@ -286,22 +275,9 @@ class LectureDualSessionManager {
       };
       this.transcriptBuffer.push(entry);
       this.currentTranscriptText = null;
-      // Reset for next turn
-      this.firstFragmentTimestamp = null;
 
       this.log(`[LectureDual] Final transcript at ${this.formatTimestamp(timestampMs)}: "${text.substring(0, 50)}..."`, LogLevel.SUCCESS);
-      
-      // Send transcript text to summary service (so it has text context without audio)
-      if (this.summaryService?.isConnected()) {
-        this.summaryService.sendRealtimeText(text);
-        this.log(`[LectureDual] Sent transcript to summary service: "${text.substring(0, 50)}..."`, LogLevel.INFO);
-      }
     } else {
-      // Capture timestamp when FIRST italic fragment appears
-      if (this.firstFragmentTimestamp === null) {
-        this.firstFragmentTimestamp = this.getElapsedTime();
-        this.log(`[LectureDual] 🎤 First fragment detected at ${this.formatTimestamp(this.firstFragmentTimestamp)}`, LogLevel.INFO);
-      }
       // Update current (in-progress) transcript
       this.currentTranscriptText = text;
     }
@@ -316,11 +292,10 @@ class LectureDualSessionManager {
     this.callbacks?.onPartialSummary?.(text);
   }
 
-  // Handle complete summary from Session 2
-  private handleSummaryComplete(text: string): void {
+  // Handle complete summary from Gemma model
+  private handleSummaryComplete(fullText: string): void {
     if (!this.isGeneratingSummary) {
-      // This might be an unexpected model response, log but ignore
-      this.log(`[LectureDual] Unexpected model response (not generating summary): "${text.substring(0, 50)}..."`, LogLevel.WARN);
+      this.log(`[LectureDual] Unexpected summary completion (not generating)`, LogLevel.WARN);
       return;
     }
 
@@ -330,7 +305,7 @@ class LectureDualSessionManager {
 
     const entry: SummaryEntry = {
       id: `summary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      text: text || this.currentPartialSummary,
+      text: fullText,
       timestampMs,
       windowStart,
       windowEnd,
@@ -351,16 +326,18 @@ class LectureDualSessionManager {
     }
   }
 
-  // Start video frame capture (sends to summary service only)
+  // Start video frame capture (accumulates frames for batch summarization)
   private startVideoFrameCapture(): void {
     if (!this.videoElement || !this.canvasElement) return;
 
     this.videoFrameIntervalId = window.setInterval(() => {
-      if (!this.summaryService?.isConnected()) return;
+      if (!this.isConnected) return;
 
       const frame = this.captureVideoFrame();
       if (frame) {
-        this.summaryService.sendVideoFrame(frame);
+        // Accumulate frames instead of sending immediately
+        this.videoFrameBuffer.push(frame);
+        this.log(`[LectureDual] Video frame captured (buffer: ${this.videoFrameBuffer.length} frames)`, LogLevel.INFO);
       }
     }, VIDEO_FRAME_INTERVAL_MS);
 
@@ -406,10 +383,10 @@ class LectureDualSessionManager {
     return base64Data;
   }
 
-  // Start auto-summary timer (every 2 minutes)
+  // Start auto-summary timer (every 1 minute)
   private startAutoSummaryTimer(): void {
     this.autoSummaryIntervalId = window.setInterval(async () => {
-      if (!this.summaryService?.isConnected()) return;
+      if (!this.isConnected) return;
 
       this.log(`[LectureDual] Auto-summary trigger (${SUMMARY_WINDOW_MS / 1000}s interval)`, LogLevel.INFO);
       await this.generateSummary();
@@ -438,14 +415,14 @@ class LectureDualSessionManager {
       this.audioWorklet = new AudioWorkletNode(this.audioContext, 'audio-capture-processor');
 
       this.audioWorklet.port.onmessage = (event) => {
-        if (!this.transcriptService?.isConnected()) return;
+        if (!this.isConnected) return;
 
         // The audio processor sends { pcmData: Int16Array }
         const pcmData = event.data.pcmData as Int16Array;
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer as ArrayBuffer);
 
-        // Send audio to transcript service (Session 1) only
-        this.sendRealtimeAudio(base64Audio, 'audio/pcm;rate=16000');
+        // Buffer audio chunks (8 seconds) before sending to Parakeet
+        this.bufferAndTranscribeAudio(base64Audio);
       };
 
       source.connect(this.audioWorklet);
@@ -468,9 +445,9 @@ class LectureDualSessionManager {
     return btoa(binary);
   }
 
-  // Generate summary for current time window
+  // Generate summary for current time window using Gemma model
   public async generateSummary(isPartialWindow: boolean = false): Promise<void> {
-    if (!this.summaryService?.isConnected()) {
+    if (!this.isConnected || !this.websocketService) {
       this.log('[LectureDual] Cannot generate summary - not connected', LogLevel.WARN);
       return;
     }
@@ -490,8 +467,25 @@ class LectureDualSessionManager {
     
     const currentLabel = this.formatWindowLabel(currentWindowStart, currentWindowEnd);
 
-    // Build topic-based prompt (unified for all windows)
-    const prompt = `Time window ${currentLabel} has just ended.
+    // Get transcripts for this window
+    const windowTranscripts = this.getTranscriptsInWindow(currentWindowStart, currentWindowEnd);
+    const transcriptTexts = windowTranscripts.map(t => 
+      `[${this.formatTimestamp(t.timestampMs)}] ${t.text}`
+    );
+
+    // Get accumulated video frames
+    const videoFrames = [...this.videoFrameBuffer]; // Copy array
+    this.videoFrameBuffer = []; // Reset buffer for next window
+
+    this.log(`[LectureDual] Generating summary for window ${currentLabel}: ${transcriptTexts.length} transcripts, ${videoFrames.length} video frames`, LogLevel.INFO);
+
+    if (transcriptTexts.length === 0 && videoFrames.length === 0) {
+      this.log('[LectureDual] No content to summarize - skipping', LogLevel.WARN);
+      return;
+    }
+
+    // Build user prompt for Gemma
+    const userPrompt = `Time window ${currentLabel} has just ended.
 
 Analyze all the audio and visual content from this window and organize your summary by TOPICS:
 - Identify main topics/themes discussed
@@ -499,7 +493,7 @@ Analyze all the audio and visual content from this window and organize your summ
 - List key visual elements (slides, diagrams, code) that appeared
 - Format as clear sections with topic headers
 
-IMPORTANT: First, describe what you can currently SEE on the screen (slides, diagrams, code, text, or the lecturer). Then organize the content you've been HEARING and SEEING by topic.`;
+IMPORTANT: First, describe what you can SEE in the video frames (slides, diagrams, code, text, or the lecturer). Then organize the content by topic.`;
 
     this.isGeneratingSummary = true;
     this.currentPartialSummary = '';
@@ -510,25 +504,36 @@ IMPORTANT: First, describe what you can currently SEE on the screen (slides, dia
       this.summaryCompletionResolve = resolve;
     });
 
-    // Send prompt with triggerResponse: true to trigger model response
-    this.summaryService.sendTextWithOptions(prompt, { triggerResponse: true });
+    try {
+      // Send to Gemma for summarization (with system instruction)
+      await this.websocketService.generateSummary(
+        transcriptTexts,
+        videoFrames,
+        SUMMARY_SYSTEM_INSTRUCTION,
+        userPrompt
+      );
 
-    this.log(`[LectureDual] Summary requested for window ${currentLabel}${isPartialWindow ? ' (partial)' : ''}`, LogLevel.INFO);
+      this.log(`[LectureDual] Summary request sent for window ${currentLabel}${isPartialWindow ? ' (partial)' : ''}`, LogLevel.SUCCESS);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.log(`[LectureDual] Summary generation error: ${message}`, LogLevel.ERROR);
+      this.callbacks?.onError(`Summary: ${message}`);
+      this.isGeneratingSummary = false;
+      
+      if (this.summaryCompletionResolve) {
+        this.summaryCompletionResolve();
+        this.summaryCompletionResolve = null;
+      }
+    }
 
     // Wait for summary to complete
     return summaryPromise;
   }
 
-  // Send audio to transcript session ONLY
-  // Session 1 (transcript): Uses audio for transcription → sends text to Session 2
-  // Session 2 (summary): Uses video + transcript text (no audio)
+  // Legacy method - now handled by audio buffering
   public async sendRealtimeAudio(audioData: string, mimeType: string = 'audio/pcm;rate=16000'): Promise<boolean> {
-    // Send to transcript service ONLY
-    if (this.transcriptService?.isConnected()) {
-      return await this.transcriptService.sendRealtimeAudio(audioData, mimeType);
-    }
-
-    return false;
+    // Audio is now buffered and sent in 8-second chunks via bufferAndTranscribeAudio()
+    return this.isConnected;
   }
 
   // Pause/resume (for external control)
@@ -559,7 +564,7 @@ IMPORTANT: First, describe what you can currently SEE on the screen (slides, dia
     const elapsedTime = this.getElapsedTime();
     const shouldGenerateFinalSummary = this.currentWindowIndex === 0 && elapsedTime > 0;
 
-    if (shouldGenerateFinalSummary && this.summaryService?.isConnected()) {
+    if (shouldGenerateFinalSummary && this.isConnected) {
       this.log(`[LectureDual] Generating final summary for partial window (elapsed: ${Math.round(elapsedTime / 1000)}s)`, LogLevel.INFO);
       
       try {
@@ -605,17 +610,18 @@ IMPORTANT: First, describe what you can currently SEE on the screen (slides, dia
       this.autoSummaryIntervalId = null;
     }
 
-    // Disconnect services
-    if (this.transcriptService) {
-      this.transcriptService.disconnect();
-      this.transcriptService = null;
-    }
-    if (this.summaryService) {
-      this.summaryService.disconnect();
-      this.summaryService = null;
+    // Disconnect WebSocket service
+    if (this.websocketService) {
+      this.websocketService.disconnect();
+      this.websocketService = null;
     }
 
+    // Clear buffers
+    this.audioChunkBuffer = [];
+    this.videoFrameBuffer = [];
+
     this.isRunning = false;
+    this.isConnected = false;
     this.callbacks?.onConnectionChange(false, false);
   }
 
@@ -629,11 +635,11 @@ IMPORTANT: First, describe what you can currently SEE on the screen (slides, dia
   }
 
   public isTranscriptConnected(): boolean {
-    return this.transcriptService?.isConnected() ?? false;
+    return this.isConnected;
   }
 
   public isSummaryConnected(): boolean {
-    return this.summaryService?.isConnected() ?? false;
+    return this.isConnected;
   }
 
   public getIsRunning(): boolean {

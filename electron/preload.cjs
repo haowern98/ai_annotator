@@ -129,6 +129,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('overlay:update-analysis', analysis);
   },
 
+  // Python Model Server API
+  pythonGetServerUrl: async () => {
+    return await ipcRenderer.invoke('python:get-server-url');
+  },
+
+  pythonIsReady: async () => {
+    return await ipcRenderer.invoke('python:is-ready');
+  },
+
+  onPythonDownloadProgress: (callback) => {
+    ipcRenderer.on('python:download-progress', callback);
+  },
+
+  onPythonError: (callback) => {
+    ipcRenderer.on('python:error', callback);
+  },
+
+  removePythonDownloadProgressListener: (callback) => {
+    ipcRenderer.removeListener('python:download-progress', callback);
+  },
+
+  removePythonErrorListener: (callback) => {
+    ipcRenderer.removeListener('python:error', callback);
+  },
+
   onAnalysisUpdate: (callback) => {
     ipcRenderer.on('analysis-update', callback);
   },

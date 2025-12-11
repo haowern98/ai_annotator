@@ -1,3 +1,5 @@
+// DEPRECATED PLEASE DO NOT USE
+
 import { LogLevel } from '../types';
 
 type LogFunction = (message: string, level?: LogLevel) => void;

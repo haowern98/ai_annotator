@@ -52,6 +52,14 @@ interface ElectronAPI {
 
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;
+
+  // Python Model Server API
+  pythonGetServerUrl: () => Promise<string | null>;
+  pythonIsReady: () => Promise<boolean>;
+  onPythonDownloadProgress: (callback: (event: any, data: {model: string; percent: number}) => void) => void;
+  onPythonError: (callback: (event: any, error: string) => void) => void;
+  removePythonDownloadProgressListener: (callback: any) => void;
+  removePythonErrorListener: (callback: any) => void;
 }
 
 declare global {
