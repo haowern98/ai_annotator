@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading - Live Lecture Summarizer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+      background: #1a1a1a;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      -webkit-app-region: drag;
+    }
+
+    .splash-container {
+      width: 500px;
+      background: linear-gradient(135deg, #2d2d2d 0%, #232323 100%);
+      border-radius: 16px;
+      padding: 48px 40px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      border: 1px solid #3a3a3a;
+      position: relative;
+      overflow: hidden;
+      -webkit-app-region: no-drag;
+    }
+
+    .splash-container::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #F26D21, #0E72ED, #F26D21);
+      background-size: 200% 100%;
+      animation: shimmer 3s linear infinite;
+    }
+
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    .icon-container {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 32px;
+    }
+
+    .app-icon {
+      width: 80px;
+      height: 80px;
+      background: linear-gradient(135deg, #F26D21, #0E72ED);
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 24px rgba(242, 109, 33, 0.3);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 8px 24px rgba(242, 109, 33, 0.3); }
+      50% { transform: scale(1.05); box-shadow: 0 12px 32px rgba(242, 109, 33, 0.5); }
+    }
+
+    .app-icon svg {
+      width: 48px;
+      height: 48px;
+      stroke: white;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .title {
+      text-align: center;
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: #ffffff;
+    }
+
+    .status-text {
+      text-align: center;
+      font-size: 14px;
+      color: #8a8a8a;
+      margin-bottom: 32px;
+      min-height: 20px;
+      transition: color 0.3s ease;
+    }
+
+    .status-text.loading {
+      color: #0E72ED;
+    }
+
+    .status-text.success {
+      color: #10b981;
+    }
+
+    .status-text.error {
+      color: #ef4444;
+    }
+
+    .progress-container {
+      width: 100%;
+      height: 8px;
+      background: #3a3a3a;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 16px;
+      position: relative;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #F26D21, #0E72ED);
+      border-radius: 4px;
+      transition: width 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .progress-bar::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+      animation: progressShimmer 1.5s linear infinite;
+    }
+
+    @keyframes progressShimmer {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
+    }
+
+    .progress-text {
+      text-align: center;
+      font-size: 13px;
+      color: #8a8a8a;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .error-container {
+      display: none;
+      margin-top: 24px;
+      padding: 16px;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 8px;
+    }
+
+    .error-container.visible {
+      display: block;
+    }
+
+    .error-message {
+      color: #ef4444;
+      font-size: 13px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
+
+    .button {
+      padding: 10px 24px;
+      border-radius: 8px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      -webkit-app-region: no-drag;
+    }
+
+    .button-retry {
+      background: #0E72ED;
+      color: white;
+    }
+
+    .button-retry:hover {
+      background: #0c63d4;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(14, 114, 237, 0.3);
+    }
+
+    .button-skip {
+      background: #3a3a3a;
+      color: #8a8a8a;
+    }
+
+    .button-skip:hover {
+      background: #444444;
+      color: #ffffff;
+    }
+
+    .loading-dots {
+      display: inline-block;
+      animation: loadingDots 1.5s steps(4, end) infinite;
+    }
+
+    @keyframes loadingDots {
+      0%, 20% { content: ''; }
+      40% { content: '.'; }
+      60% { content: '..'; }
+      80%, 100% { content: '...'; }
+    }
+
+    .loading-dots::after {
+      content: '';
+      animation: loadingDots 1.5s steps(4, end) infinite;
+    }
+  </style>
+</head>
+<body>
+  <div class="splash-container">
+    <div class="icon-container">
+      <div class="app-icon">
+        <!-- Lucide Microphone Icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" x2="12" y1="19" y2="22"/>
+        </svg>
+      </div>
+    </div>
+
+    <h1 class="title">Live Lecture Summarizer</h1>
+    <div class="status-text loading" id="statusText">
+      Initializing transcription engine<span class="loading-dots"></span>
+    </div>
+
+    <div class="progress-container">
+      <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+    </div>
+    <div class="progress-text" id="progressText">0%</div>
+
+    <div class="error-container" id="errorContainer">
+      <div class="error-message" id="errorMessage"></div>
+      <div class="button-group">
+        <button class="button button-retry" id="retryButton">Retry</button>
+        <button class="button button-skip" id="skipButton">Skip & Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    const statusText = document.getElementById('statusText');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const errorContainer = document.getElementById('errorContainer');
+    const errorMessage = document.getElementById('errorMessage');
+    const retryButton = document.getElementById('retryButton');
+    const skipButton = document.getElementById('skipButton');
+
+    // Update progress
+    ipcRenderer.on('splash:progress', (event, data) => {
+      const { progress, status } = data;
+      
+      progressBar.style.width = `${progress}%`;
+      progressText.textContent = `${Math.round(progress)}%`;
+      
+      if (status) {
+        statusText.textContent = status;
+        statusText.className = 'status-text loading';
+      }
+    });
+
+    // Show success
+    ipcRenderer.on('splash:success', () => {
+      statusText.textContent = '✓ Ready!';
+      statusText.className = 'status-text success';
+      progressBar.style.width = '100%';
+      progressText.textContent = '100%';
+    });
+
+    // Show error
+    ipcRenderer.on('splash:error', (event, error) => {
+      statusText.textContent = 'Initialization Failed';
+      statusText.className = 'status-text error';
+      errorMessage.textContent = error;
+      errorContainer.classList.add('visible');
+    });
+
+    // Retry button
+    retryButton.addEventListener('click', () => {
+      errorContainer.classList.remove('visible');
+      statusText.textContent = 'Retrying...';
+      statusText.className = 'status-text loading';
+      progressBar.style.width = '0%';
+      progressText.textContent = '0%';
+      ipcRenderer.send('splash:retry');
+    });
+
+    // Skip button
+    skipButton.addEventListener('click', () => {
+      ipcRenderer.send('splash:skip');
+    });
+  </script>
+</body>
+</html>

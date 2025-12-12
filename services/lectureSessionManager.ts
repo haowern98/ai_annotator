@@ -147,8 +147,9 @@ class LectureSessionManager {
         const pcmData = event.data.pcmData as Int16Array;
         const base64Audio = this.arrayBufferToBase64(pcmData.buffer as ArrayBuffer);
 
-        // Send audio to transcript service (Session 1) only
-        this.dualManager?.sendRealtimeAudio(base64Audio, 'audio/pcm;rate=16000');
+        // Audio is now sent directly by LectureDualSessionManager
+        // This wrapper file is deprecated - audio capture happens in dualManager
+        this.log('[LectureSession] Audio captured (handled by dualManager)', LogLevel.INFO);
       };
 
       source.connect(this.audioWorklet);
@@ -181,12 +182,12 @@ class LectureSessionManager {
     this.log('[LectureSession] Resumed', LogLevel.INFO);
   }
 
-  public stop(): void {
-    this.cleanup();
+  public async stop(): Promise<void> {
+    await this.cleanup();
     this.log('[LectureSession] Stopped', LogLevel.INFO);
   }
 
-  private cleanup(): void {
+  private async cleanup(): Promise<void> {
     // Stop audio
     if (this.audioWorklet) {
       this.audioWorklet.disconnect();
@@ -199,7 +200,7 @@ class LectureSessionManager {
 
     // Stop dual manager (handles video intervals and service disconnection)
     if (this.dualManager) {
-      this.dualManager.stop();
+      await this.dualManager.stop();
       this.dualManager = null;
     }
 

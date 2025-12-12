@@ -5,6 +5,7 @@ const { setupScreenCaptureHandlers } = require('./ipc/screenCapture.cjs');
 const { setupOverlayHandlers } = require('./ipc/overlay.cjs');
 const { setupLectureOverlayHandlers } = require('./ipc/lectureOverlay.cjs');
 const { setupWhisperHandlers } = require('./ipc/whisper.cjs');
+const { setupParakeetHandlers } = require('./ipc/parakeet.cjs');
 const { setupRecordingHandlers } = require('./ipc/recording.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
@@ -45,6 +46,28 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow;
+let splashWindow;
+
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 500,
+    height: 300,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    center: true,
+    resizable: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false
+    }
+  });
+
+  splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+  splashWindow.setAlwaysOnTop(true, 'screen-saver');
+  
+  return splashWindow;
+}
 
 function createWindow() {
   // Remove the default menu
@@ -56,6 +79,7 @@ function createWindow() {
     minWidth: 700,
     minHeight: 500,
     title: 'Live Lecture Summarizer',
+    show: false, // Don't show until splash is done
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -138,6 +162,7 @@ function createWindow() {
   setupOverlayHandlers(ipcMain, getMainWindow);
   setupLectureOverlayHandlers(ipcMain, getMainWindow);
   setupWhisperHandlers(ipcMain);
+  setupParakeetHandlers(ipcMain);
   setupRecordingHandlers(ipcMain);
 
   // Load the app
@@ -160,8 +185,54 @@ function getMainWindow() {
   return mainWindow;
 }
 
+// Initialize Parakeet server before showing main window
+async function initializeParakeetWithProgress() {
+  const { initializeParakeet } = require('./ipc/parakeet.cjs');
+  
+  return new Promise((resolve) => {
+    initializeParakeet((progress, status) => {
+      // Send progress updates to splash window
+      if (splashWindow && !splashWindow.isDestroyed()) {
+        splashWindow.webContents.send('splash:progress', { progress, status });
+      }
+    }).then((result) => {
+      if (result.success) {
+        // Send success event
+        if (splashWindow && !splashWindow.isDestroyed()) {
+          splashWindow.webContents.send('splash:success');
+        }
+        resolve({ success: true });
+      } else {
+        // Send error event
+        if (splashWindow && !splashWindow.isDestroyed()) {
+          splashWindow.webContents.send('splash:error', result.error || 'Unknown error');
+        }
+        resolve({ success: false, error: result.error });
+      }
+    });
+  });
+}
+
+// Handle splash window retry
+ipcMain.on('splash:retry', async () => {
+  console.log('[Main] Retrying Parakeet initialization...');
+  await initializeParakeetWithProgress();
+});
+
+// Handle splash window skip
+ipcMain.on('splash:skip', () => {
+  console.log('[Main] Skipping Parakeet initialization...');
+  // Close splash and show main window
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+  }
+  if (mainWindow) {
+    mainWindow.show();
+  }
+});
+
 // Register custom protocol for local file access
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Register video protocol handler for serving local video files
   protocol.registerFileProtocol('video', (request, callback) => {
     try {
@@ -185,7 +256,25 @@ app.whenReady().then(() => {
     }
   });
 
+  // Create splash window first
+  createSplashWindow();
+  
+  // Create main window (hidden)
   createWindow();
+  
+  // Initialize Parakeet server with progress updates
+  console.log('[Main] Starting Parakeet initialization...');
+  const result = await initializeParakeetWithProgress();
+  
+  // Wait a bit for success animation, then show main window
+  setTimeout(() => {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.close();
+    }
+    if (mainWindow) {
+      mainWindow.show();
+    }
+  }, result.success ? 1000 : 0); // 1 second delay on success, immediate on failure
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

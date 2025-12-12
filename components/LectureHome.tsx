@@ -546,8 +546,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
       }
 
       // Send initial recording status to overlay (AFTER overlay is created)
-      // Wait a bit for overlay to be fully ready
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for overlay to be fully ready (Vite dev server + React loading takes time)
+      await new Promise(resolve => setTimeout(resolve, 5000));
       
       // Store quality in ref for later use when saving
       recordingQualityRef.current = recordingQuality;

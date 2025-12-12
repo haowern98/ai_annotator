@@ -11,7 +11,7 @@ const Header: React.FC = () => {
       try {
         if (window.electronAPI && typeof window.electronAPI.overlayExists === 'function') {
           const res = await window.electronAPI.overlayExists();
-          if (mounted && res && res.exists === true) setOverlayHidden(false);
+          if (mounted && res?.exists === true) setOverlayHidden(false);
         }
       } catch (e) {
         // ignore

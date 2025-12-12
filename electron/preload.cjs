@@ -163,6 +163,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('whisper:dispose');
   },
 
+  // Parakeet API (Python WebSocket server)
+  parakeetInitialize: async () => {
+    return await ipcRenderer.invoke('parakeet:initialize');
+  },
+
+  parakeetDispose: async () => {
+    return await ipcRenderer.invoke('parakeet:dispose');
+  },
+
+  parakeetHealth: async () => {
+    return await ipcRenderer.invoke('parakeet:health');
+  },
+
   // =====================================================
   // LECTURE OVERLAY API (separate from Interview overlay)
   // =====================================================

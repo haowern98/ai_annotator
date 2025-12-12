@@ -13,7 +13,7 @@ interface ElectronAPI {
   isMaximized: () => Promise<boolean>;
 
   // Screen capture API
-  getScreenSources: () => Promise<Array<{id: string; name: string; thumbnail: string; appIcon?: string | null}>>;
+  getScreenSources: () => Promise<Array<{id: string; name: string; thumbnail: string; appIcon?: string | null; display_id?: string}>>;
   getScreenStream: (sourceId: string) => Promise<any>;
   
   // Focus captured window (Zoom-like behavior)
@@ -45,10 +45,27 @@ interface ElectronAPI {
   removeReplyListener: (callback: any) => void;
   removeOverlayControlListener: (callback: any) => void;
 
+  // Screen Analysis IPC methods
+  startScreenAnalysis: () => Promise<{ success: boolean; error?: string }>;
+  stopScreenAnalysis: () => Promise<{ success: boolean }>;
+  generateAnalysisReply: () => Promise<{ success: boolean; error?: string }>;
+  updateOverlayAnalysis: (analysis: any) => Promise<any>;
+  onAnalysisUpdate: (callback: (...args: any[]) => void) => void;
+  onAnalysisControl: (callback: (...args: any[]) => void) => void;
+  removeAnalysisListener: () => void;
+  
+  // Overlay resize
+  resizeOverlay: (dimensions: { width?: number; height?: number }) => Promise<{ success: boolean; error?: string }>;
+
   // Whisper API
-  whisperInitialize: (modelName: string) => Promise<any>;
-  whisperTranscribe: (audioBuffer: ArrayBuffer, options: any) => Promise<any>;
-  whisperDispose: () => Promise<void>;
+  whisperInitialize: (modelName: string) => Promise<{ success: boolean; error?: string }>;
+  whisperTranscribe: (audioBuffer: number[] | Uint8Array | ArrayBuffer, options?: any) => Promise<{ success: boolean; text?: string; error?: string; elapsed?: number }>;
+  whisperDispose: () => Promise<{ success: boolean }>;
+
+  // Parakeet API
+  parakeetInitialize: () => Promise<{success: boolean; error?: string}>;
+  parakeetDispose: () => Promise<{success: boolean}>;
+  parakeetHealth: () => Promise<{success: boolean; healthy: boolean; isRunning: boolean}>;
 
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;
