@@ -113,18 +113,24 @@ function setupFileUtilsHandlers(ipcMain) {
 
   ipcMain.handle('fs:deleteFile', async (_event, targetPath) => {
     const p = await safeResolve(targetPath);
-    await fs.unlink(p);
-    return true;
+    try {
+      await fs.unlink(p);
+      return true;
+    } catch (err) {
+      // Treat missing files as already-deleted to keep cleanup idempotent.
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return true;
+      throw err;
+    }
   });
 
   // Video helpers.
   ipcMain.handle('video:extractAudioFromVideo', async (_event, videoPath) => {
     const input = await safeResolve(videoPath);
-    const outPath = path.join(getUserDataPath(), `audio_${Date.now()}.pcm`);
+    const outPath = path.join(getUserDataPath(), `audio_${Date.now()}.wav`);
     const output = await safeResolve(outPath);
 
-    // Raw PCM16LE, mono, 16 kHz.
-    await runFfmpeg(['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', output]);
+    // WAV (PCM16LE), mono, 16 kHz.
+    await runFfmpeg(['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', output]);
     const st = await fs.stat(output);
     return { success: true, audioPath: output, size: st.size };
   });

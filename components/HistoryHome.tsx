@@ -58,10 +58,36 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
         const result = await electronAPI.listRecordings();
         if (result.success && result.recordings) {
-          const formattedLectures: Lecture[] = result.recordings.map((rec: RecordingMetadata) => {
+          const formattedLectures: Lecture[] = result.recordings.map((rec: RecordingMetadata, index: number) => {
+            const rawVideoFilename =
+              rec.videoFilename ||
+              (typeof rec.videoPath === 'string' && rec.videoPath
+                ? rec.videoPath.split(/[\\/]/).pop() || ''
+                : '') ||
+              '';
+
             // Extract filename without extension - support both .mp4 and .webm
-            const videoExtension = rec.videoFilename?.match(/\.(webm|mp4)$/)?.[0] || '.webm';
-            const filename = rec.videoFilename.replace(/\.(webm|mp4)$/, '');
+            const videoExtension = rawVideoFilename.match(/\.(webm|mp4)$/)?.[0] || '.webm';
+            let filename = rawVideoFilename ? rawVideoFilename.replace(/\.(webm|mp4)$/, '') : '';
+
+            // If the filename isn't in the expected lecture_YYYYMMDD_HHMMSS format, fall back to savedAt.
+            if ((!filename || filename.split('_')[1]?.length !== 8) && rec.savedAt) {
+              const d = new Date(rec.savedAt);
+              if (!Number.isNaN(d.getTime())) {
+                const yyyy = String(d.getFullYear());
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mi = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                filename = filename || `lecture_${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
+              }
+            }
+
+            if (!filename) {
+              filename = `lecture_unknown_${index}`;
+            }
+
             const titleParts = filename.split('_');
             const dateStr = titleParts[1] || '';
             const timeStr = titleParts[2] || '';
@@ -131,8 +157,8 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               recordingEnabled: rec.videoPath && rec.fileSize > 0, // Recording exists if we have video file
               quality: qualityDisplay,
               fileSize: `${fileSizeMB} MB`,
-              filePath: rec.videoPath.replace(/\\\\/g, '/'),
-              videoPath: rec.videoPath,
+              filePath: (rec.videoPath || '').replace(/\\\\/g, '/'),
+              videoPath: rec.videoPath || '',
               lastModified
             };
           });

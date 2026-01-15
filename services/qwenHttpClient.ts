@@ -455,8 +455,9 @@ export class QwenHttpClient {
       throw new Error(`Failed to read transcript file: ${error}`);
     }
 
-    // Process in 60-second windows (matching live mode)
-    const WINDOW_SIZE = 60; // 60 frames = 60 seconds
+    // Process in 5-frame batches to minimize VRAM pressure.
+    // Frames are 1 FPS in upload mode, so 5 frames ~= 5 seconds.
+    const WINDOW_SIZE = 5;
     const totalWindows = Math.ceil(frames.length / WINDOW_SIZE);
     const allResults: QwenBatchResult[] = [];
 
@@ -475,15 +476,15 @@ export class QwenHttpClient {
       });
 
       this.callbacks?.onProgress?.(
-        `VLM window ${windowIndex + 1}/${totalWindows}: select inputs (${windowFrames.length} frames, ${windowTranscripts.length} transcripts)`
+        `VLM batch ${windowIndex + 1}/${totalWindows}: select inputs (${windowFrames.length} frames, ${windowTranscripts.length} transcripts)`
       );
 
       // Send to qwen_worker for analysis
-      this.callbacks?.onProgress?.(`VLM window ${windowIndex + 1}/${totalWindows}: request sequential analysis`);
+      this.callbacks?.onProgress?.(`VLM batch ${windowIndex + 1}/${totalWindows}: request sequential analysis`);
       const result = await this.sendSequentialAnalysisRequest(
         windowFrames,
         windowTranscripts,
-        { batch_size: 5, duration_seconds: 60 }
+        { batch_size: 5, duration_seconds: windowFrames.length }
       );
 
       if (result.analysis && result.analysis.batches) {

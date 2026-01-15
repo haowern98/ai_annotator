@@ -133,7 +133,12 @@ function setupRecordingHandlers(ipcMain) {
       const files = await fs.readdir(dir);
       
       // Find all metadata JSON files
-      const metadataFiles = files.filter(f => f.endsWith('.json'));
+      const metadataFiles = files.filter((f) => {
+        if (!f.endsWith('.json')) return false;
+        // Exclude auxiliary files (e.g. word timestamp dumps) that live next to metadata.
+        if (f.endsWith('_words.json')) return false;
+        return true;
+      });
       
       const recordings = await Promise.all(
         metadataFiles.map(async (filename) => {
@@ -150,7 +155,7 @@ function setupRecordingHandlers(ipcMain) {
 
       // Filter out failed reads and sort by date (newest first)
       const validRecordings = recordings
-        .filter(r => r !== null)
+        .filter((r) => r !== null && typeof r === 'object')
         .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
 
       return { success: true, recordings: validRecordings };

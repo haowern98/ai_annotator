@@ -19,6 +19,7 @@ DEFAULT_PORT = 8765
 SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2  # int16
+DEFAULT_SEGMENT_SECONDS = 5.0
 
 
 def _now_ms() -> int:
@@ -127,6 +128,130 @@ class ParakeetModel:
       return extract_text(out[0])
     return extract_text(out)
 
+  def transcribe_wav_words(self, wav_path: str) -> dict:
+    if self._model is None:
+      raise RuntimeError("Model not loaded")
+
+    kwargs = {"batch_size": 1}
+    try:
+      sig = inspect.signature(self._model.transcribe)
+      params = sig.parameters
+      if "verbose" in params:
+        kwargs["verbose"] = False
+      if "return_hypotheses" in params:
+        kwargs["return_hypotheses"] = True
+      if "timestamps" in params:
+        kwargs["timestamps"] = True
+      if "return_timestamps" in params:
+        kwargs["return_timestamps"] = True
+      if "compute_timestamps" in params:
+        kwargs["compute_timestamps"] = True
+      if "logprobs" in params:
+        kwargs["logprobs"] = False
+    except Exception:
+      # Best effort: at least request hypotheses.
+      kwargs["return_hypotheses"] = True
+
+    out = self._model.transcribe([wav_path], **kwargs)
+    if not out:
+      return {"text": "", "words": []}
+
+    hyp = out[0] if isinstance(out, (list, tuple)) else out
+    while isinstance(hyp, (list, tuple)) and len(hyp) > 0:
+      hyp = hyp[0]
+
+    text = ""
+    try:
+      t = getattr(hyp, "text", None)
+      if isinstance(t, str):
+        text = t.strip()
+    except Exception:
+      pass
+    if not text:
+      # Fallback to existing robust text extraction.
+      text = self.transcribe_wav(wav_path)
+
+    def add_word(words, w, start, end):
+      try:
+        words.append({"w": str(w), "start": float(start), "end": float(end)})
+      except Exception:
+        pass
+
+    words = []
+    ts = None
+    for attr in ("word_timestamps", "timestamps", "timestamp", "word_ts"):
+      try:
+        v = getattr(hyp, attr, None)
+        if v:
+          ts = v
+          break
+      except Exception:
+        pass
+
+    # Common NeMo shapes:
+    # - dict with "word" -> list of (word, start, end)
+    # - list of tuples (word, start, end)
+    # - list of dicts {word,start,end}
+    if isinstance(ts, dict):
+      for key in ("word", "words", "word_timestamps"):
+        v = ts.get(key)
+        if v:
+          ts = v
+          break
+
+    if isinstance(ts, (list, tuple)):
+      for item in ts:
+        if isinstance(item, dict):
+          w = item.get("word") or item.get("w")
+          if w is None:
+            continue
+          start = item.get("start") or item.get("start_time") or item.get("s")
+          end = item.get("end") or item.get("end_time") or item.get("e")
+          if start is None or end is None:
+            continue
+          add_word(words, w, start, end)
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+          add_word(words, item[0], item[1], item[2])
+
+    if not words and text:
+      # As a last resort, provide word list without timing so callers can fail loudly.
+      # (We don't fake timing here because the user explicitly wants word timestamps.)
+      raise RuntimeError("Word timestamps not available from model output")
+
+    return {"text": text, "words": words}
+
+
+def _read_wav_duration_s(wav_path: str) -> float:
+  with wave.open(wav_path, "rb") as wf:
+    frames = wf.getnframes()
+    rate = wf.getframerate() or SAMPLE_RATE
+    return float(frames) / float(rate)
+
+
+def _segments_from_words_fixed(words: list, duration_s: float, segment_s: float) -> list:
+  segment_s = max(1.0, float(segment_s))
+  n = int((duration_s + segment_s - 1e-9) // segment_s) + 1
+  segments = []
+  for k in range(n):
+    start = k * segment_s
+    end = min((k + 1) * segment_s, duration_s)
+    if end <= start:
+      break
+    seg_words = []
+    for w in words:
+      try:
+        ws = float(w.get("start", 0.0))
+        we = float(w.get("end", 0.0))
+      except Exception:
+        continue
+      if we >= start and ws < end:
+        seg_words.append(str(w.get("w") or "").strip())
+    text = " ".join([x for x in seg_words if x]).strip()
+    segments.append({"start": float(start), "end": float(end), "text": text, "is_final": True})
+  # Ensure at least one segment exists.
+  if not segments:
+    segments.append({"start": 0.0, "end": float(duration_s), "text": "", "is_final": True})
+  return segments
 
 @dataclass
 class StreamState:
@@ -208,6 +333,30 @@ async def serve():
         msg_type = data.get("type")
         if msg_type == "hello":
           await _send_json(ws, {"type": "status", "state": "ready"})
+        elif msg_type == "batch_transcribe":
+          # Batch transcription with word timestamps (offline/batch mode).
+          wav_path = str(data.get("wav_path") or "").strip()
+          segment_seconds = float(data.get("segment_seconds") or DEFAULT_SEGMENT_SECONDS)
+          if not wav_path:
+            await _send_json(ws, {"type": "error", "message": "wav_path is required"})
+            continue
+          try:
+            duration_s = _read_wav_duration_s(wav_path)
+            result = model.transcribe_wav_words(wav_path)
+            segments = _segments_from_words_fixed(result.get("words") or [], duration_s, segment_seconds)
+            await _send_json(
+              ws,
+              {
+                "type": "batch_result",
+                "ok": True,
+                "duration_s": duration_s,
+                "text": result.get("text") or "",
+                "words": result.get("words") or [],
+                "segments": segments,
+              },
+            )
+          except Exception as e:
+            await _send_json(ws, {"type": "batch_result", "ok": False, "error": str(e)})
         elif msg_type == "ping":
           await _send_json(ws, {"type": "pong", "t": data.get("t")})
         elif msg_type == "start_stream":

@@ -183,7 +183,14 @@ export default class ParakeetBatchTranscriber {
 
     this.log('[Parakeet Batch] Starting video transcription...', LogLevel.INFO);
 
-    if (!window.electronAPI || !window.electronAPI.getUserDataPath || !window.electronAPI.writeBinary) {
+    if (
+      !window.electronAPI ||
+      !window.electronAPI.getUserDataPath ||
+      !window.electronAPI.writeBinary ||
+      !window.electronAPI.extractAudioFromVideo ||
+      !window.electronAPI.writeFile ||
+      !window.electronAPI.deleteFile
+    ) {
       throw new Error('Electron API not available');
     }
 
@@ -209,39 +216,20 @@ export default class ParakeetBatchTranscriber {
       LogLevel.SUCCESS
     );
 
-    const audioBase64 = await window.electronAPI.readBinary(audioResult.audioPath);
-    const audioBinary = atob(audioBase64);
-    const audioBytes = new Uint8Array(audioBinary.length);
-    for (let i = 0; i < audioBinary.length; i++) audioBytes[i] = audioBinary.charCodeAt(i);
-
-    const pcmInt16 = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, audioBytes.byteLength / 2);
-    const totalDurationSeconds = pcmInt16.length / 16000;
-
-    const ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-
-    const segments: ParakeetBatchTranscriptSegment[] = [];
-    let streamId: string | null = null;
-    let offsetSamples = 0;
-    let lastEmitSec = 0;
-    let lastSnapshotText = '';
-    let latestFullText = '';
-
-    const maybeEmitSegment = (currentSec: number) => {
-      const fullText = extractBatchTranscriptText(latestFullText);
-      if (!fullText) return;
-      if (currentSec - lastEmitSec < segmentSeconds) return;
-
-      const delta = extractDeltaText(lastSnapshotText, fullText).trim();
-      if (!delta) return;
-
-      segments.push({ start: lastEmitSec, end: currentSec, text: delta, is_final: true });
-      lastEmitSec = currentSec;
-      lastSnapshotText = fullText;
-      onProgress?.(segments.length);
-    };
-
     return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+
+      const cleanup = async () => {
+        try {
+          await window.electronAPI.deleteFile(tempVideoPath);
+          await window.electronAPI.deleteFile(audioResult.audioPath!);
+        } catch (err) {
+          const msg = String(err || '');
+          if (msg.includes('ENOENT')) return;
+          this.log(`[Parakeet Batch] Cleanup warning: ${err}`, LogLevel.WARN);
+        }
+      };
+
       ws.onopen = () => {
         this.log('[Parakeet Batch] Connected', LogLevel.SUCCESS);
         ws.send(JSON.stringify({ type: 'hello', client: 'batch', version: 1 }));
@@ -250,109 +238,71 @@ export default class ParakeetBatchTranscriber {
       ws.onmessage = (evt) => {
         if (typeof evt.data !== 'string') return;
 
-        let msg: ParakeetStatus | null = null;
+        let msg: any = null;
         try {
-          msg = JSON.parse(evt.data) as ParakeetStatus;
+          msg = JSON.parse(evt.data);
         } catch {
           return;
         }
         if (!msg) return;
 
-        switch (msg.type) {
-          case 'status':
-            if (msg.state === 'ready') {
-              ws.send(
-                JSON.stringify({
-                  type: 'start_stream',
-                  sample_rate: 16000,
-                  format: 'pcm_s16le',
-                  channels: 1,
-                })
-              );
-            }
-            break;
-
-          case 'stream_started':
-            streamId = msg.stream_id;
-            ws.send(JSON.stringify({ type: 'audio_begin', stream_id: streamId }));
-
-            // Send audio in chunks (100ms per chunk = 1600 samples @ 16kHz).
-            const chunkSize = 1600;
-
-            const sendNextChunk = () => {
-              if (offsetSamples >= pcmInt16.length) {
-                ws.send(JSON.stringify({ type: 'stop_stream', stream_id: streamId }));
-                return;
-              }
-
-              const chunk = pcmInt16.slice(offsetSamples, offsetSamples + chunkSize);
-              ws.send(chunk.buffer);
-              offsetSamples += chunkSize;
-
-              setTimeout(sendNextChunk, 10);
-            };
-
-            sendNextChunk();
-            break;
-
-          case 'partial':
-            {
-              const text = extractBatchTranscriptText(msg.text);
-              if (text) {
-                latestFullText = text;
-                maybeEmitSegment(offsetSamples / 16000);
-              }
-            }
-            break;
-
-          case 'stream_stopped':
-            ws.close();
-            break;
-
-          case 'error':
-            ws.close();
-            reject(new Error(msg.message));
-            break;
+        if (msg.type === 'status' && msg.state === 'ready') {
+          ws.send(
+            JSON.stringify({
+              type: 'batch_transcribe',
+              wav_path: audioResult.audioPath,
+              segment_seconds: segmentSeconds,
+            })
+          );
+          return;
         }
+
+        if (msg.type !== 'batch_result') return;
+
+        (async () => {
+          try {
+            if (!msg.ok) {
+              throw new Error(msg.error || 'Batch transcription failed');
+            }
+
+            const segments: ParakeetBatchTranscriptSegment[] = Array.isArray(msg.segments) ? msg.segments : [];
+            const words = Array.isArray(msg.words) ? msg.words : [];
+            const text = typeof msg.text === 'string' ? msg.text : '';
+
+            const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
+            if (!okSeg) throw new Error('Failed to write transcript segments');
+
+            const wordsPath = outputPath.replace(/\.json$/i, '_words.json');
+            const okWords = await window.electronAPI.writeFile(
+              wordsPath,
+              JSON.stringify({ duration_s: msg.duration_s ?? null, text, words }, null, 2)
+            );
+            if (!okWords) throw new Error('Failed to write transcript word timestamps');
+
+            this.log(`[Parakeet Batch] Transcripts saved: ${segments.length} segment(s)`, LogLevel.SUCCESS);
+            onProgress?.(segments.length);
+            resolve();
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          } finally {
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            await cleanup();
+          }
+        })();
+      };
+
+      ws.onerror = async () => {
+        await cleanup();
+        reject(new Error('Parakeet worker connection failed'));
       };
 
       ws.onclose = async () => {
-        // Cleanup temp files
-        try {
-          await window.electronAPI.deleteFile(tempVideoPath);
-          await window.electronAPI.deleteFile(audioResult.audioPath!);
-        } catch (err) {
-          this.log(`[Parakeet Batch] Cleanup warning: ${err}`, LogLevel.WARN);
-        }
-
-        // Final flush to duration.
-        const finalFull = extractBatchTranscriptText(latestFullText);
-        if (finalFull) {
-          const delta = extractDeltaText(lastSnapshotText, finalFull).trim();
-          if (delta) {
-            segments.push({
-              start: lastEmitSec,
-              end: totalDurationSeconds,
-              text: delta,
-              is_final: true,
-            });
-          }
-        }
-
-        try {
-          const success = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
-          if (success) {
-            this.log(`[Parakeet Batch] Transcripts saved: ${segments.length} segment(s)`, LogLevel.SUCCESS);
-            resolve();
-          } else {
-            reject(new Error('Failed to write transcript file'));
-          }
-        } catch (error) {
-          reject(new Error(`Failed to save transcripts: ${error}`));
-        }
+        await cleanup();
       };
-
-      ws.onerror = () => reject(new Error('Parakeet worker connection failed'));
     });
   }
 }
