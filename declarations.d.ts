@@ -52,6 +52,16 @@ interface ElectronAPI {
 
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;
+
+  // File + video utils (Upload Queue / batch processing)
+  getUserDataPath: () => Promise<string>;
+  writeBinary: (filePath: string, base64: string) => Promise<boolean>;
+  readBinary: (filePath: string) => Promise<string>;
+  writeFile: (filePath: string, content: string) => Promise<boolean>;
+  readFile: (filePath: string) => Promise<string>;
+  deleteFile: (filePath: string) => Promise<boolean>;
+  extractAudioFromVideo: (videoPath: string) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
+  convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
 }
 
 declare global {

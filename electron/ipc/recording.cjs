@@ -8,8 +8,8 @@ let recordingsDir = null;
 async function initRecordingsDir() {
   if (recordingsDir) return recordingsDir;
   
-  // Use hardcoded path for now (will be configurable in settings later)
-  recordingsDir = path.join('E:', 'live-lecture-summarizer correct', 'recordings');
+  // Store recordings inside the repo by default (dev-friendly).
+  recordingsDir = path.join(__dirname, '..', '..', '.recordings');
   
   try {
     await fs.mkdir(recordingsDir, { recursive: true });

@@ -1,11 +1,15 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, Menu, dialog, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
+const nodeNet = require('net');
 const { setupScreenCaptureHandlers } = require('./ipc/screenCapture.cjs');
 const { setupOverlayHandlers } = require('./ipc/overlay.cjs');
 const { setupLectureOverlayHandlers } = require('./ipc/lectureOverlay.cjs');
 const { setupWhisperHandlers } = require('./ipc/whisper.cjs');
 const { setupRecordingHandlers } = require('./ipc/recording.cjs');
+const { setupFileUtilsHandlers } = require('./ipc/fileUtils.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
 // Only set command-line switches if app is properly loaded
@@ -45,6 +49,341 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow;
+let splashWindow;
+
+let parakeetProcess = null;
+let qwenProcess = null;
+
+const splashState = {
+  parakeet: { progress: 0, status: 'Waiting…', isError: false },
+  qwen: { progress: 0, status: 'Waiting…', isError: false },
+};
+
+function sendSplashUpdate(partial) {
+  Object.assign(splashState, partial);
+  try {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.webContents.send('splash:update', splashState);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function findParakeetModelPath() {
+  const fromEnv = process.env.PARAKEET_MODEL_PATH;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+
+  const homeDir = process.env.USERPROFILE || os.homedir();
+  const snapshotsDir = path.join(
+    homeDir,
+    '.cache',
+    'huggingface',
+    'hub',
+    'models--nvidia--parakeet-tdt-0.6b-v3',
+    'snapshots'
+  );
+
+  if (!fs.existsSync(snapshotsDir)) return null;
+
+  try {
+    const candidates = [];
+    const entries = fs.readdirSync(snapshotsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const modelFile = path.join(snapshotsDir, entry.name, 'parakeet-tdt-0.6b-v3.nemo');
+      if (!fs.existsSync(modelFile)) continue;
+      const st = fs.statSync(modelFile);
+      candidates.push({ file: modelFile, mtimeMs: st.mtimeMs });
+    }
+
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0]?.file || null;
+  } catch {
+    return null;
+  }
+}
+
+function getVenvPythonPath() {
+  const repoRoot = path.join(__dirname, '..');
+  const candidate = path.join(repoRoot, '.venv', 'Scripts', 'python.exe');
+  if (fs.existsSync(candidate)) return candidate;
+  return process.env.QWEN_PYTHON || process.env.PARAKEET_PYTHON || 'python';
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function isPortOpen(host, port, timeoutMs = 400) {
+  return new Promise((resolve) => {
+    const socket = new nodeNet.Socket();
+    let done = false;
+
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(ok);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+    socket.connect(port, host);
+  });
+}
+
+function createSplashWindow() {
+  const win = new BrowserWindow({
+    width: 560,
+    height: 300,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    show: true,
+    frame: false,
+    backgroundColor: '#242424',
+    webPreferences: {
+      preload: path.join(__dirname, 'splashPreload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: true,
+    },
+  });
+
+  win.webContents.once('did-finish-load', () => {
+    try {
+      win.webContents.send('splash:update', splashState);
+    } catch {
+      // ignore
+    }
+  });
+
+  win.loadFile(path.join(__dirname, 'splash.html'));
+  return win;
+}
+
+async function ensureParakeetReady() {
+  const host = '127.0.0.1';
+  const port = Number(process.env.PARAKEET_WS_PORT || 8765);
+
+  sendSplashUpdate({ parakeet: { progress: 5, status: 'Starting…', isError: false } });
+
+  if (await isPortOpen(host, port)) {
+    sendSplashUpdate({ parakeet: { progress: 100, status: 'Ready', isError: false } });
+    return;
+  }
+
+  const modelPath = findParakeetModelPath();
+  if (!modelPath) {
+    const err = new Error('Parakeet model not found (set PARAKEET_MODEL_PATH)');
+    sendSplashUpdate({ parakeet: { progress: 100, status: err.message, isError: true } });
+    throw err;
+  }
+  process.env.PARAKEET_MODEL_PATH = modelPath;
+
+  const pythonCmd = process.env.PARAKEET_PYTHON || getVenvPythonPath();
+  const scriptPath = path.join(__dirname, '..', 'parakeet_worker', 'server.py');
+  sendSplashUpdate({ parakeet: { progress: 10, status: 'Launching…', isError: false } });
+
+  let exited = false;
+  let exitInfo = '';
+  let lastStderr = '';
+
+  try {
+    parakeetProcess = spawn(pythonCmd, [scriptPath], {
+      cwd: path.join(__dirname, '..'),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PARAKEET_WS_PORT: String(port), PARAKEET_MODEL_PATH: modelPath },
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to spawn';
+    sendSplashUpdate({ parakeet: { progress: 100, status: msg, isError: true } });
+    throw error;
+  }
+
+  parakeetProcess.stdout?.on('data', (buf) => {
+    const chunk = String(buf);
+    chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.log(`[ParakeetWorker] ${l}`));
+    if (/ready/i.test(chunk)) {
+      sendSplashUpdate({ parakeet: { progress: 95, status: 'Almost ready…', isError: false } });
+    }
+  });
+
+  parakeetProcess.stderr?.on('data', (buf) => {
+    const chunk = String(buf);
+    chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(`[ParakeetWorker] ${l}`));
+    lastStderr = chunk.trim().slice(-400);
+  });
+
+  parakeetProcess.on('exit', (code, signal) => {
+    exited = true;
+    exitInfo = `Parakeet exited (${code ?? 'null'}${signal ? `, ${signal}` : ''})`;
+  });
+
+  parakeetProcess.on('error', (err) => {
+    exited = true;
+    exitInfo = `Parakeet failed to start: ${err.message}`;
+  });
+
+  // Soft progress while we wait
+  let progress = 12;
+  const progressTimer = setInterval(() => {
+    progress = Math.min(90, progress + 2);
+    sendSplashUpdate({ parakeet: { progress, status: 'Loading…', isError: false } });
+  }, 350);
+
+  const timeoutMs = Number(process.env.PARAKEET_START_TIMEOUT_MS || 180000);
+  const startedAt = Date.now();
+  try {
+    while (Date.now() - startedAt < timeoutMs) {
+      if (exited) {
+        const msg = lastStderr ? `${exitInfo}: ${lastStderr}` : exitInfo;
+        const err = new Error(msg || 'Parakeet exited');
+        sendSplashUpdate({ parakeet: { progress: 100, status: err.message, isError: true } });
+        throw err;
+      }
+      if (await isPortOpen(host, port, 500)) {
+        clearInterval(progressTimer);
+        sendSplashUpdate({ parakeet: { progress: 100, status: 'Ready', isError: false } });
+        return;
+      }
+      await sleep(500);
+    }
+  } finally {
+    clearInterval(progressTimer);
+  }
+
+  const err = new Error('Timed out waiting for Parakeet');
+  sendSplashUpdate({ parakeet: { progress: 100, status: err.message, isError: true } });
+  throw err;
+}
+
+async function ensureQwenReady() {
+  const baseUrl = process.env.QWEN_BASE_URL || 'http://127.0.0.1:7556';
+  const healthUrl = `${baseUrl.replace(/\/+$/, '')}/health`;
+
+  sendSplashUpdate({ qwen: { progress: 5, status: 'Starting…', isError: false } });
+
+  try {
+    const json = await fetchJsonWithTimeout(healthUrl, 1200);
+    if (json?.status === 'healthy') {
+      sendSplashUpdate({ qwen: { progress: 100, status: 'Ready', isError: false } });
+      return;
+    }
+  } catch {
+    // not up yet
+  }
+
+  const qwenHost = process.env.QWEN_HOST || '127.0.0.1';
+  const qwenPort = String(process.env.QWEN_PORT || '7556');
+  const pythonCmd = getVenvPythonPath();
+
+  sendSplashUpdate({ qwen: { progress: 10, status: 'Launching…', isError: false } });
+
+  let exited = false;
+  let exitInfo = '';
+  let lastStderr = '';
+
+  try {
+    qwenProcess = spawn(
+      pythonCmd,
+      ['-m', 'uvicorn', 'server:app', '--host', qwenHost, '--port', qwenPort, '--log-level', 'info'],
+      {
+        cwd: path.join(__dirname, '..', 'qwen_worker'),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, QWEN_HOST: qwenHost, QWEN_PORT: qwenPort },
+      }
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to spawn';
+    sendSplashUpdate({ qwen: { progress: 100, status: msg, isError: true } });
+    throw error;
+  }
+
+  qwenProcess.stdout?.on('data', (buf) => {
+    const chunk = String(buf);
+    // Forward worker logs to the parent process so dev terminal shows stage-by-stage progress.
+    chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.log(`[QwenWorker] ${l}`));
+
+    if (/\[QwenWorker\]\s*Model ready/i.test(chunk) || /Uvicorn running on/i.test(chunk)) {
+      sendSplashUpdate({ qwen: { progress: 95, status: 'Almost ready…', isError: false } });
+    }
+  });
+
+  qwenProcess.stderr?.on('data', (buf) => {
+    const chunk = String(buf);
+    chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(`[QwenWorker] ${l}`));
+    lastStderr = chunk.trim().slice(-400);
+  });
+
+  qwenProcess.on('exit', (code, signal) => {
+    exited = true;
+    exitInfo = `Qwen exited (${code ?? 'null'}${signal ? `, ${signal}` : ''})`;
+  });
+
+  qwenProcess.on('error', (err) => {
+    exited = true;
+    exitInfo = `Qwen failed to start: ${err.message}`;
+  });
+
+  // Soft progress while we wait
+  let progress = 12;
+  const progressTimer = setInterval(() => {
+    progress = Math.min(92, progress + 1.5);
+    sendSplashUpdate({ qwen: { progress, status: 'Loading…', isError: false } });
+  }, 450);
+
+  const timeoutMs = Number(process.env.QWEN_START_TIMEOUT_MS || 300000);
+  const startedAt = Date.now();
+  try {
+    while (Date.now() - startedAt < timeoutMs) {
+      if (exited) {
+        const msg = lastStderr ? `${exitInfo}: ${lastStderr}` : exitInfo;
+        const err = new Error(msg || 'Qwen exited');
+        sendSplashUpdate({ qwen: { progress: 100, status: err.message, isError: true } });
+        throw err;
+      }
+      try {
+        const json = await fetchJsonWithTimeout(healthUrl, 1500);
+        if (json?.status === 'healthy') {
+          clearInterval(progressTimer);
+          sendSplashUpdate({ qwen: { progress: 100, status: 'Ready', isError: false } });
+          return;
+        }
+      } catch {
+        // keep waiting
+      }
+      await sleep(1000);
+    }
+  } finally {
+    clearInterval(progressTimer);
+  }
+
+  const err = new Error('Timed out waiting for Qwen');
+  sendSplashUpdate({ qwen: { progress: 100, status: err.message, isError: true } });
+  throw err;
+}
 
 function createWindow() {
   // Remove the default menu
@@ -71,6 +410,7 @@ function createWindow() {
     autoHideMenuBar: true,
     frame: false, // Frameless window for custom title bar
     titleBarStyle: 'hidden',
+    show: false, // show after splash + worker readiness
   });
 
   // Window control IPC handlers
@@ -139,6 +479,7 @@ function createWindow() {
   setupLectureOverlayHandlers(ipcMain, getMainWindow);
   setupWhisperHandlers(ipcMain);
   setupRecordingHandlers(ipcMain);
+  setupFileUtilsHandlers(ipcMain);
 
   // Load the app
   if (process.env.NODE_ENV === 'development') {
@@ -162,6 +503,12 @@ function getMainWindow() {
 
 // Register custom protocol for local file access
 app.whenReady().then(() => {
+  splashWindow = createSplashWindow();
+  sendSplashUpdate({
+    parakeet: { progress: 0, status: 'Waiting…', isError: false },
+    qwen: { progress: 0, status: 'Waiting…', isError: false },
+  });
+
   // Register video protocol handler for serving local video files
   protocol.registerFileProtocol('video', (request, callback) => {
     try {
@@ -187,6 +534,40 @@ app.whenReady().then(() => {
 
   createWindow();
 
+  const mainReady = new Promise((resolve) => {
+    if (!mainWindow) return resolve();
+    mainWindow.webContents.once('did-finish-load', resolve);
+  });
+
+  Promise.allSettled([ensureParakeetReady(), ensureQwenReady()])
+    .then(async (results) => {
+      const allOk = results.every((r) => r.status === 'fulfilled');
+      if (!allOk) {
+        await sleep(1500);
+      }
+
+      await mainReady;
+
+      if (splashWindow && !splashWindow.isDestroyed()) {
+        splashWindow.close();
+        splashWindow = null;
+      }
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+      }
+    })
+    .catch(async () => {
+      await mainReady;
+      if (splashWindow && !splashWindow.isDestroyed()) {
+        splashWindow.close();
+        splashWindow = null;
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+      }
+    });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -197,6 +578,19 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('before-quit', () => {
+  try {
+    if (parakeetProcess && !parakeetProcess.killed) parakeetProcess.kill();
+  } catch {
+    // ignore
+  }
+  try {
+    if (qwenProcess && !qwenProcess.killed) qwenProcess.kill();
+  } catch {
+    // ignore
   }
 });
 

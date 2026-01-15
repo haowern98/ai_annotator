@@ -4,6 +4,11 @@ import { LogLevel } from '../types';
 import LectureDualSessionManager, { TranscriptEntry, SummaryEntry } from '../services/lectureDualSessionManager';
 import { ScreenSourcePicker } from './ScreenSourcePicker';
 import { RecordingConfirmModal, RecordingQuality } from './RecordingConfirmModal';
+import { UploadLectureModal } from './UploadLectureModal';
+import { UploadProgressModal } from './UploadProgressModal';
+import { UploadQueueManager, QueuedVideo } from '../services/uploadQueueManager';
+import ParakeetBatchTranscriber from '../services/parakeetBatchTranscriber';
+import { QwenHttpClient } from '../services/qwenHttpClient';
 
 interface LectureHomeProps {
   onSessionStart?: () => void;
@@ -24,6 +29,15 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
   const [isPickerOpen, setIsPickerOpen] = React.useState(false);
   const [pickerSources, setPickerSources] = React.useState<Array<{id: string; name: string; thumbnail: string; appIcon?: string | null}> | null>(null);
   const pickerResolveRef = React.useRef<((sourceId: string) => void) | null>(null);
+
+  // Upload lecture modal state
+  const [isUploadModalOpen, setIsUploadModalOpen] = React.useState(false);
+
+  // Upload queue manager state
+  const uploadQueueRef = React.useRef<UploadQueueManager | null>(null);
+  const [uploadQueue, setUploadQueue] = React.useState<QueuedVideo[]>([]);
+  const [isUploadProgressOpen, setIsUploadProgressOpen] = React.useState(false);
+  const uploadParakeetRef = React.useRef<ParakeetBatchTranscriber | null>(null);
 
   // Session manager and media refs
   const sessionManagerRef = React.useRef<LectureDualSessionManager | null>(null);
@@ -52,9 +66,42 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
     }
   }, []);
 
-  // Initialize session manager
+  // Initialize session manager + upload queue (batch-only)
   React.useEffect(() => {
     sessionManagerRef.current = new LectureDualSessionManager(addLog);
+
+    // Batch clients: keep these independent from live capture/session manager
+    const uploadParakeet = new ParakeetBatchTranscriber(addLog);
+    const uploadQwen = new QwenHttpClient('http://127.0.0.1:7556');
+    uploadParakeetRef.current = uploadParakeet;
+
+    const initUploadClients = async () => {
+      try {
+        await uploadParakeet.connect({
+          onReady: () => addLog('[Upload Queue] Parakeet worker ready', LogLevel.SUCCESS),
+          onError: (err) => addLog(`[Upload Queue] Parakeet error: ${err}`, LogLevel.ERROR),
+        });
+
+        await uploadQwen.connect({
+          onReady: () => addLog('[Upload Queue] Qwen worker ready', LogLevel.SUCCESS),
+          onError: (err) => addLog(`[Upload Queue] Qwen error: ${err}`, LogLevel.ERROR),
+          onProgress: (msg) => addLog(`[Upload Queue] ${msg}`, LogLevel.INFO),
+        });
+
+        uploadQueueRef.current = new UploadQueueManager(uploadParakeet, uploadQwen, () => isRunning, {
+          onQueueUpdate: (queue) => setUploadQueue(queue),
+          onVideoComplete: (video) => addLog(`Upload complete: ${video.fileName}`, LogLevel.SUCCESS),
+          onVideoError: (video, err) => addLog(`Upload failed: ${video.fileName} - ${err}`, LogLevel.ERROR),
+          onLog: addLog,
+        });
+
+        addLog('[Upload Queue] Queue manager initialized', LogLevel.SUCCESS);
+      } catch (e) {
+        addLog(`[Upload Queue] Initialization failed: ${e}`, LogLevel.ERROR);
+      }
+    };
+
+    initUploadClients();
 
     // Create hidden video and canvas elements
     const video = document.createElement('video');
@@ -90,6 +137,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach(track => track.stop());
       }
+      uploadParakeetRef.current?.disconnect();
       if (electronAPI?.removeLectureControlListener) {
         electronAPI.removeLectureControlListener(handleLectureControl);
       }
@@ -642,8 +690,35 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
   };
 
   const handleUploadDetails = () => {
-    // Placeholder - not wired yet
-    addLog('Upload Lecture Details clicked (not implemented yet)', LogLevel.INFO);
+    if (isRunning) {
+      addLog('Cannot upload during active live session', LogLevel.WARN);
+      setError('Please stop the live session before uploading videos');
+      return;
+    }
+    setIsUploadModalOpen(true);
+  };
+
+  const handleUploadModalCancel = () => {
+    setIsUploadModalOpen(false);
+  };
+
+  const handleUploadModalUpload = (source: { type: 'youtube' | 'file'; value: string | File }) => {
+    if (source.type === 'youtube') {
+      addLog('YouTube uploads not implemented yet', LogLevel.WARN);
+      setError('YouTube uploads are not implemented yet. Please choose a video file.');
+      return;
+    }
+
+    const file = source.value as File;
+    if (!uploadQueueRef.current) {
+      addLog('Upload queue not ready', LogLevel.ERROR);
+      setError('Upload queue not ready yet. Try again in a moment.');
+      return;
+    }
+
+    uploadQueueRef.current.addVideo(file);
+    setIsUploadModalOpen(false);
+    setIsUploadProgressOpen(true);
   };
 
   const handleReviewLectures = () => {
@@ -750,7 +825,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
             }}>
               <Upload style={{ width: '40px', height: '40px', color: '#ffffff' }} />
             </div>
-            <span style={{ color: '#ffffff', fontWeight: 500 }}>Upload Lecture Details</span>
+            <span style={{ color: '#ffffff', fontWeight: 500 }}>Upload Lecture</span>
           </button>
         </div>
 
@@ -804,6 +879,20 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
           Lecture session active
         </div>
       )}
+
+      {/* Upload Modals */}
+      <UploadLectureModal
+        isOpen={isUploadModalOpen}
+        onUpload={handleUploadModalUpload}
+        onCancel={handleUploadModalCancel}
+      />
+      <UploadProgressModal
+        isOpen={isUploadProgressOpen}
+        queue={uploadQueue}
+        onClose={() => setIsUploadProgressOpen(false)}
+        onCancel={(videoId) => uploadQueueRef.current?.cancelVideo(videoId)}
+        onClearCompleted={() => uploadQueueRef.current?.clearCompleted()}
+      />
 
       {/* Recording Confirmation Modal */}
       <RecordingConfirmModal

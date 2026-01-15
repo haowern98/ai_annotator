@@ -293,6 +293,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecordingVideo: async (videoFilename) => {
     return await ipcRenderer.invoke('recording:getVideo', videoFilename);
   },
+
+  // =====================================================
+  // FILE + VIDEO UTILS (Upload Queue)
+  // =====================================================
+
+  getUserDataPath: async () => {
+    return await ipcRenderer.invoke('fs:getUserDataPath');
+  },
+
+  writeBinary: async (filePath, base64) => {
+    return await ipcRenderer.invoke('fs:writeBinary', filePath, base64);
+  },
+
+  readBinary: async (filePath) => {
+    return await ipcRenderer.invoke('fs:readBinary', filePath);
+  },
+
+  writeFile: async (filePath, content) => {
+    return await ipcRenderer.invoke('fs:writeFile', filePath, content);
+  },
+
+  readFile: async (filePath) => {
+    return await ipcRenderer.invoke('fs:readFile', filePath);
+  },
+
+  deleteFile: async (filePath) => {
+    return await ipcRenderer.invoke('fs:deleteFile', filePath);
+  },
+
+  extractAudioFromVideo: async (videoPath) => {
+    return await ipcRenderer.invoke('video:extractAudioFromVideo', videoPath);
+  },
+
+  convertVideoToWebM: async (videoPath) => {
+    return await ipcRenderer.invoke('video:convertVideoToWebM', videoPath);
+  },
 });
 
 // Log that preload script has loaded
