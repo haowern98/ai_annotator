@@ -369,9 +369,31 @@ export class UploadQueueManager {
 
       if (result.success) {
         this.log(`Saved to recordings: ${result.filename}`, LogLevel.SUCCESS);
+
+        // Persist word-level timestamps next to the recording metadata (if available).
+        try {
+          const wordsPath = transcriptPath.replace(/\.json$/i, '_words.json');
+          const wordsJson = await window.electronAPI.readFile(wordsPath);
+
+          const metadataPath: string | undefined = result.metadataPath;
+          if (metadataPath) {
+            const dir = metadataPath.replace(/[\\/][^\\/]*$/, '');
+            const outWordsPath = `${dir}/${result.filename}_words.json`;
+            await window.electronAPI.writeFile(outWordsPath, wordsJson);
+
+            // Update metadata file to reference words JSON.
+            const metaRaw = await window.electronAPI.readFile(metadataPath);
+            const metaObj = JSON.parse(metaRaw);
+            metaObj.wordTimestampsFile = outWordsPath;
+            await window.electronAPI.writeFile(metadataPath, JSON.stringify(metaObj, null, 2));
+          }
+        } catch (err) {
+          this.log(`Word timestamps save warning: ${err}`, LogLevel.WARN);
+        }
         
         // Cleanup temp files
         await window.electronAPI.deleteFile(transcriptPath);
+        await window.electronAPI.deleteFile(transcriptPath.replace(/\.json$/i, '_words.json'));
         await window.electronAPI.deleteFile(tempVideoPath);
         await window.electronAPI.deleteFile(convertResult.outputPath);
       } else {
