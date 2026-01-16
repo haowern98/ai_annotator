@@ -2142,6 +2142,10 @@ async def analyze_video(
 async def analyze_sequential(
     frames_json: str = Form(..., description="JSON array of {timestamp_ms: int, image_base64: str}"),
     transcripts_json: str = Form(..., description="Transcripts JSON: [{start: float, end: float, text: str, is_final: bool}]"),
+    previous_context_json: str = Form(
+        "",
+        description="Optional JSON object containing previous context to carry across requests",
+    ),
     
     config_json: str = Form(
         '{"batch_size": 5, "duration_seconds": 120}',
@@ -2203,6 +2207,13 @@ async def analyze_sequential(
         # Process batches with context passing
         batch_results = []
         previous_context = None
+        if previous_context_json and str(previous_context_json).strip():
+            try:
+                previous_context = json.loads(previous_context_json)
+                if not isinstance(previous_context, dict):
+                    previous_context = None
+            except Exception:
+                previous_context = None
         total_prompt_tokens = 0
         total_completion_tokens = 0
         
@@ -2228,7 +2239,7 @@ async def analyze_sequential(
             transcript_text = " ".join([t.get("text", "") for t in batch_transcripts]) if batch_transcripts else "(no transcript)"
             
             # Build prompt with or without context
-            if batch_idx == 0:
+            if batch_idx == 0 and not previous_context:
                 # First batch - no context
                 prompt = f"""Analyze this lecture segment ({time_start_sec:.1f}s - {time_end_sec:.1f}s).
 
@@ -2244,8 +2255,8 @@ Provide analysis in JSON format:
   "is_topic_complete": true/false
 }}
 
-Do NOT mention frames, images, or screenshots. Describe the lecture content naturally.
-Output valid JSON only."""
+                Do NOT mention frames, images, or screenshots. Describe the lecture content naturally.
+                Output valid JSON only."""
             else:
                 # Subsequent batches - include context
                 ctx = previous_context
@@ -2377,6 +2388,7 @@ Output valid JSON only."""
                 "total_batches": total_batches,
                 "total_frames": total_frames,
                 "processing_time": processing_time,
+                "next_context": previous_context,
                 "tokens_total": {
                     "prompt": total_prompt_tokens,
                     "completion": total_completion_tokens,
@@ -2391,6 +2403,91 @@ Output valid JSON only."""
         
     except Exception as e:
         logger.error(f"[Sequential] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== NEW ENDPOINT: Topic Summary (Map-Reduce Reduce Step) ====================
+
+@app.post("/api/v1/summarize_topics")
+async def summarize_topics(
+    batches_json: str = Form(..., description="JSON array of batch analysis objects from /analyze_sequential"),
+    vlm_model: str = Form(ACTIVE_DEFAULT_VLM),
+    max_tokens: int = Form(900, ge=200, le=4096, description="Max tokens for the final summary"),
+):
+    """
+    Reduce step: given per-batch (5-frame) analyses, produce a single coherent summary of topics.
+    This is text-only (no images), using the same VLM model as a regular LLM call.
+    """
+    try:
+        batches = json.loads(batches_json)
+        if not isinstance(batches, list):
+            raise ValueError("batches_json must be a JSON array")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid batches_json: {e}")
+
+    # Build a compact log for the model (avoid huge prompts).
+    lines = []
+    for b in batches:
+        if not isinstance(b, dict):
+            continue
+        ts0 = b.get("time_start")
+        ts1 = b.get("time_end")
+        topic = str(b.get("topic", "unknown"))
+        desc = str(b.get("description", "")).strip().replace("\n", " ")
+        if len(desc) > 220:
+            desc = desc[:220] + "…"
+        try:
+            if ts0 is not None and ts1 is not None:
+                lines.append(f"- [{float(ts0):.1f}s–{float(ts1):.1f}s] {topic}: {desc}")
+            else:
+                lines.append(f"- {topic}: {desc}")
+        except Exception:
+            lines.append(f"- {topic}: {desc}")
+
+    context_log = "\n".join(lines[:500])  # hard cap
+
+    prompt = f"""You are given sequential batch analyses of a lecture video.
+Each line contains an approximate time window, a detected topic, and a short description of NEW information.
+
+TASK:
+1) Merge adjacent/related batches into distinct TOPICS.
+2) For each topic, summarize the key points (bullets) and list the time ranges where it occurs.
+3) Produce an overall high-level summary at the end.
+
+OUTPUT FORMAT (Markdown):
+## Topics
+### <Topic Name>
+- Time ranges: ...
+- Key points:
+  - ...
+
+## Overall Summary
+<3-8 bullet points, concise>
+
+BATCH LOG:
+{context_log}
+"""
+
+    try:
+        vlm_engine = get_vlm_engine()
+        vlm_engine.load_model(vlm_model)
+
+        async with gpu_lock:
+            raw, prompt_tokens, completion_tokens = vlm_engine.describe_scene([], prompt, max_tokens=int(max_tokens))
+
+        summary_md = (raw or "").strip()
+        return JSONResponse(content={
+            "status": "success",
+            "summary_markdown": summary_md,
+            "tokens_actual": {
+                "prompt": prompt_tokens,
+                "completion": completion_tokens,
+                "total": prompt_tokens + completion_tokens,
+            },
+            "model_info": {"model_name": vlm_model, "engine": "llama_cpp"},
+        })
+    except Exception as e:
+        logger.error(f"[SummarizeTopics] Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

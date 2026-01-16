@@ -313,7 +313,11 @@ export class UploadQueueManager {
       // Convert QwenBatchResult to summaries format
       const summaries = batches.map((batch: any) => ({
         text: batch.description || '', // QwenBatchResult has 'description' field
-        windowLabel: `${this.formatTimestamp(batch.time_start * 1000)}-${this.formatTimestamp(batch.time_end * 1000)}` || `Window ${batch.batch_id}`
+        windowLabel:
+          batch.window_label ||
+          (Number.isFinite(batch.time_start) && Number.isFinite(batch.time_end)
+            ? `${this.formatTimestamp(batch.time_start * 1000)}-${this.formatTimestamp(batch.time_end * 1000)}`
+            : `Window ${batch.batch_id}`),
       }));
 
       // Calculate duration from video

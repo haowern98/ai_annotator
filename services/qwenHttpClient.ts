@@ -68,6 +68,7 @@ export interface QwenBatchResult {
     prompt: number;
     completion: number;
   };
+  window_label?: string;
 }
 
 export interface QwenSequentialResponse {
@@ -78,6 +79,7 @@ export interface QwenSequentialResponse {
     total_batches: number;
     total_frames: number;
     processing_time: number;
+    next_context?: Record<string, any> | null;
     tokens_total: {
       prompt: number;
       completion: number;
@@ -88,6 +90,12 @@ export interface QwenSequentialResponse {
       engine: string;
     };
   };
+}
+
+export interface QwenTopicsSummaryResponse {
+  status: 'success' | 'error';
+  summary_markdown?: string;
+  message?: string;
 }
 
 export interface QwenClientCallbacks {
@@ -299,7 +307,11 @@ export class QwenHttpClient {
   async sendSequentialAnalysisRequest(
     frames: Array<{ timestamp_ms: number; image_base64: string }>,
     transcripts: Array<{ start: number; end: number; text: string; is_final: boolean }>,
-    config: { batch_size?: number; duration_seconds?: number } = {}
+    config: {
+      batch_size?: number;
+      duration_seconds?: number;
+      previous_context?: Record<string, any> | null;
+    } = {}
   ): Promise<QwenSequentialResponse> {
     if (!this.isConnectedFlag) {
       throw new Error('Not connected to qwen_worker');
@@ -318,6 +330,9 @@ export class QwenHttpClient {
       const formData = new FormData();
       formData.append('frames_json', JSON.stringify(frames));
       formData.append('transcripts_json', JSON.stringify(transcripts));
+      if (config.previous_context) {
+        formData.append('previous_context_json', JSON.stringify(config.previous_context));
+      }
       formData.append('config_json', JSON.stringify({
         batch_size: batchSize,
         duration_seconds: durationSeconds
@@ -460,6 +475,7 @@ export class QwenHttpClient {
     const WINDOW_SIZE = 5;
     const totalWindows = Math.ceil(frames.length / WINDOW_SIZE);
     const allResults: QwenBatchResult[] = [];
+    let rollingContext: Record<string, any> | null = null;
 
     for (let windowIndex = 0; windowIndex < totalWindows; windowIndex++) {
       const windowStart = windowIndex * WINDOW_SIZE;
@@ -484,18 +500,71 @@ export class QwenHttpClient {
       const result = await this.sendSequentialAnalysisRequest(
         windowFrames,
         windowTranscripts,
-        { batch_size: 5, duration_seconds: windowFrames.length }
+        { batch_size: 5, duration_seconds: windowFrames.length, previous_context: rollingContext }
       );
 
       if (result.analysis && result.analysis.batches) {
         allResults.push(...result.analysis.batches);
       }
+      rollingContext = (result.analysis?.next_context as any) || rollingContext;
 
       if (onWindowProgress) {
         onWindowProgress(windowIndex + 1, totalWindows);
       }
     }
 
+    // Reduce step: summarize all topics across batches.
+    try {
+      this.callbacks?.onProgress?.('[Upload Queue] Reducing: summarizing topics across all batches…');
+      const summary = await this.summarizeTopics(allResults);
+      if (summary) {
+        allResults.push({
+          batch_id: allResults.length,
+          time_start: 0,
+          time_end: Math.max(0, frames.length - 1),
+          topic: 'All Topics',
+          content_type: 'other',
+          description: summary,
+          has_structured_content: false,
+          structured_hints: [],
+          is_topic_complete: true,
+          inference_time: 0,
+          tokens_estimate: { prompt: 0, completion: 0 },
+          window_label: 'All Topics',
+        });
+      }
+    } catch (e) {
+      this.callbacks?.onProgress?.(`[Upload Queue] Reduce step skipped: ${e}`);
+    }
+
     return allResults;
+  }
+
+  private async summarizeTopics(batches: QwenBatchResult[]): Promise<string | null> {
+    if (!this.isConnectedFlag) return null;
+    if (!batches.length) return null;
+
+    const url = `${this.baseUrl}/api/v1/summarize_topics`;
+    const formData = new FormData();
+    formData.append('batches_json', JSON.stringify(batches));
+
+    const controller = new AbortController();
+    const requestTimeoutMs = Number((import.meta as any).env?.VITE_QWEN_REQUEST_TIMEOUT_MS || 600000); // 10 min default
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+    try {
+      const res = await fetch(url, { method: 'POST', body: formData, signal: controller.signal });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`summarize_topics failed (${res.status}): ${txt}`);
+      }
+      const data: QwenTopicsSummaryResponse = await res.json();
+      if (data.status !== 'success') {
+        throw new Error(data.message || 'summarize_topics error');
+      }
+      return data.summary_markdown || null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 }
