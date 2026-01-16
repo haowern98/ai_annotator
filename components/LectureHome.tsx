@@ -1,7 +1,10 @@
 import React from 'react';
 import { Monitor, Upload, RotateCw } from 'lucide-react';
 import { LogLevel } from '../types';
-import LectureDualSessionManager, { TranscriptEntry, SummaryEntry } from '../services/lectureDualSessionManager';
+import LectureParakeetSessionManager, {
+  TranscriptEntry,
+  SummaryEntry,
+} from '../services/lectureParakeetSessionManager';
 import { ScreenSourcePicker } from './ScreenSourcePicker';
 import { RecordingConfirmModal, RecordingQuality } from './RecordingConfirmModal';
 import { UploadLectureModal } from './UploadLectureModal';
@@ -40,7 +43,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
   const uploadParakeetRef = React.useRef<ParakeetBatchTranscriber | null>(null);
 
   // Session manager and media refs
-  const sessionManagerRef = React.useRef<LectureDualSessionManager | null>(null);
+  const sessionManagerRef = React.useRef<LectureParakeetSessionManager | null>(null);
   const overlayCreatedRef = React.useRef<boolean>(false);
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -68,7 +71,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
   // Initialize session manager + upload queue (batch-only)
   React.useEffect(() => {
-    sessionManagerRef.current = new LectureDualSessionManager(addLog);
+    sessionManagerRef.current = new LectureParakeetSessionManager(addLog);
 
     // Batch clients: keep these independent from live capture/session manager
     const uploadParakeet = new ParakeetBatchTranscriber(addLog);
@@ -491,13 +494,6 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
   const handleOpenOverlay = async () => {
     addLog('Lecture Mode: Open Overlay clicked');
-    
-    if (!process.env.API_KEY) {
-      const msg = "API_KEY environment variable not set.";
-      addLog(msg, LogLevel.ERROR);
-      setError(msg);
-      return;
-    }
 
     setError(null);
     const electronAPI = window.electronAPI as any;
@@ -621,7 +617,6 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
       // Start the session
       await sessionManagerRef.current?.start(
-        process.env.API_KEY!,
         {
           onTranscriptUpdate: (transcripts: TranscriptEntry[], current: string | null) => {
             // Format transcripts with timestamps

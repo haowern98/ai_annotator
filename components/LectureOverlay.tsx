@@ -425,7 +425,7 @@ const LectureOverlay: React.FC = () => {
           <button
             className="generate-btn"
             onClick={handleGenerateSummary}
-            disabled={!isConnected || isSummaryGenerating}
+            disabled={true}
           >
             {isSummaryGenerating ? '⏳ Generating...' : '✨ Generate Now'}
           </button>
@@ -435,7 +435,7 @@ const LectureOverlay: React.FC = () => {
         <div className="section-content summary-content" ref={summaryRef}>
           {summaries.length === 0 && !isSummaryGenerating ? (
             <p className="empty-message">
-              Summaries will appear here automatically every 2 minutes, or click "Generate Now"
+              Summary disabled in local (Parakeet) mode.
             </p>
           ) : (
             <>

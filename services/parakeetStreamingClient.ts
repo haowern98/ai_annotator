@@ -21,6 +21,7 @@ export default class ParakeetStreamingClient {
   private callbacks: ParakeetClientCallbacks | null = null;
   private log: LogFunction;
   private isStarted = false;
+  private readyFired = false;
 
   constructor(log: LogFunction) {
     this.log = log;
@@ -28,6 +29,7 @@ export default class ParakeetStreamingClient {
 
   public async connect(callbacks: ParakeetClientCallbacks): Promise<void> {
     this.callbacks = callbacks;
+    this.readyFired = false;
     const host = (import.meta as any).env?.VITE_PARAKEET_WS_HOST || '127.0.0.1';
     const port = (import.meta as any).env?.VITE_PARAKEET_WS_PORT || '8765';
     const url = `ws://${host}:${port}`;
@@ -62,6 +64,7 @@ export default class ParakeetStreamingClient {
       ws.onclose = () => {
         this.isStarted = false;
         this.streamId = null;
+        this.readyFired = false;
         this.log('[Parakeet] Disconnected', LogLevel.WARN);
       };
 
@@ -153,7 +156,10 @@ export default class ParakeetStreamingClient {
 
     switch (msg.type) {
       case 'status':
-        if (msg.state === 'ready') this.callbacks?.onReady?.();
+        if (msg.state === 'ready' && !this.readyFired) {
+          this.readyFired = true;
+          this.callbacks?.onReady?.();
+        }
         break;
       case 'stream_started':
         this.streamId = msg.stream_id;
