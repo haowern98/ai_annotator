@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import re
 import tempfile
@@ -230,23 +231,38 @@ def _read_wav_duration_s(wav_path: str) -> float:
 
 def _segments_from_words_fixed(words: list, duration_s: float, segment_s: float) -> list:
   segment_s = max(1.0, float(segment_s))
-  n = int((duration_s + segment_s - 1e-9) // segment_s) + 1
+  duration_s = max(0.0, float(duration_s))
+
+  # Create fixed segments and assign each word to exactly one segment (midpoint bucketing)
+  # to avoid boundary duplication.
+  n = max(1, int(math.ceil(duration_s / segment_s))) if duration_s > 0 else 1
+
+  # Bucket words by segment index using midpoint time.
+  buckets = [[] for _ in range(n)]  # each: list[tuple[start, word]]
+  for w in words:
+    try:
+      ws = float(w.get("start", 0.0))
+      we = float(w.get("end", ws))
+    except Exception:
+      continue
+
+    mid = (ws + we) / 2.0
+    k = int(mid // segment_s) if segment_s > 0 else 0
+    if k < 0:
+      k = 0
+    if k >= n:
+      k = n - 1
+
+    token = str(w.get("w") or "").strip()
+    if token:
+      buckets[k].append((ws, token))
+
   segments = []
   for k in range(n):
     start = k * segment_s
-    end = min((k + 1) * segment_s, duration_s)
-    if end <= start:
-      break
-    seg_words = []
-    for w in words:
-      try:
-        ws = float(w.get("start", 0.0))
-        we = float(w.get("end", 0.0))
-      except Exception:
-        continue
-      if we >= start and ws < end:
-        seg_words.append(str(w.get("w") or "").strip())
-    text = " ".join([x for x in seg_words if x]).strip()
+    end = min((k + 1) * segment_s, duration_s) if duration_s > 0 else segment_s
+    seg_words = [t for _, t in sorted(buckets[k], key=lambda x: x[0])]
+    text = " ".join(seg_words).strip()
     segments.append({"start": float(start), "end": float(end), "text": text, "is_final": True})
   # Ensure at least one segment exists.
   if not segments:
