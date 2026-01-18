@@ -31,7 +31,11 @@ export function UploadProgressModal({
     total: queue.length,
     pending: queue.filter((v) => v.status === 'pending').length,
     processing: queue.filter((v) =>
-      v.status === 'extracting' || v.status === 'transcribing' || v.status === 'analyzing' || v.status === 'saving'
+      v.status === 'downloading' ||
+      v.status === 'extracting' ||
+      v.status === 'transcribing' ||
+      v.status === 'analyzing' ||
+      v.status === 'saving'
     ).length,
     complete: queue.filter((v) => v.status === 'complete').length,
     error: queue.filter((v) => v.status === 'error').length,
@@ -45,6 +49,7 @@ export function UploadProgressModal({
         return <AlertCircle size={18} color="#ef4444" />;
       case 'cancelled':
         return <X size={18} color="#8a8a8a" />;
+      case 'downloading':
       case 'extracting':
       case 'transcribing':
       case 'analyzing':
@@ -63,6 +68,7 @@ export function UploadProgressModal({
         return '#ef4444';
       case 'cancelled':
         return '#8a8a8a';
+      case 'downloading':
       case 'extracting':
       case 'transcribing':
       case 'analyzing':
@@ -182,6 +188,7 @@ export function UploadProgressModal({
                       </div>
                     </div>
                     {(video.status === 'pending' ||
+                      video.status === 'downloading' ||
                       video.status === 'extracting' ||
                       video.status === 'transcribing' ||
                       video.status === 'analyzing' ||
@@ -213,7 +220,8 @@ export function UploadProgressModal({
                   </div>
 
                   {/* Progress Bar */}
-                  {(video.status === 'extracting' ||
+                  {(video.status === 'downloading' ||
+                    video.status === 'extracting' ||
                     video.status === 'transcribing' ||
                     video.status === 'analyzing' ||
                     video.status === 'saving') && (

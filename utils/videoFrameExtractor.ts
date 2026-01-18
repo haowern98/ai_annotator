@@ -15,12 +15,14 @@ export interface ExtractionProgress {
   percentage: number;
 }
 
+export type VideoSource = File | { path: string; size?: number };
+
 /**
  * Extract frames from video file at 1fps
  * Uses HTML5 video element and canvas (not WebRTC MediaStream)
  */
 export async function extractFramesAt1FPS(
-  videoFile: File,
+  videoFile: VideoSource,
   onProgress?: (progress: ExtractionProgress) => void
 ): Promise<ExtractedFrame[]> {
   return new Promise((resolve, reject) => {
@@ -108,8 +110,20 @@ export async function extractFramesAt1FPS(
     };
 
     // Load video file
-    videoUrl = URL.createObjectURL(videoFile);
-    video.src = videoUrl;
+    if (videoFile instanceof File) {
+      videoUrl = URL.createObjectURL(videoFile);
+      video.src = videoUrl;
+    } else {
+      const p = String(videoFile.path || '').trim();
+      if (!p) {
+        reject(new Error('Missing video path'));
+        return;
+      }
+      // Prefer Electron custom protocol (registered in electron/main.cjs) to avoid file:// restrictions.
+      // Note: this is cross-origin vs http://localhost, so set CORS mode to allow canvas extraction.
+      video.crossOrigin = 'anonymous';
+      video.src = `video://${encodeURIComponent(p)}`;
+    }
   });
 }
 

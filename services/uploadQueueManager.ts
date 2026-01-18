@@ -9,8 +9,11 @@ import ParakeetBatchTranscriber from './parakeetBatchTranscriber';
 import { QwenHttpClient, QwenBatchResult } from './qwenHttpClient';
 import { LogLevel } from '../types';
 
+export type VideoInput = File | { path: string; size: number };
+
 export type VideoStatus =
   | 'pending'
+  | 'downloading'
   | 'extracting'
   | 'transcribing'
   | 'analyzing'
@@ -21,7 +24,7 @@ export type VideoStatus =
 
 export interface QueuedVideo {
   id: string;
-  file: File;
+  file: VideoInput;
   fileName: string;
   fileSize: number;
   status: VideoStatus;
@@ -97,6 +100,81 @@ export class UploadQueueManager {
     if (!this.isProcessing) {
       this.processQueue();
     }
+
+    return videoId;
+  }
+
+  /**
+   * Add YouTube URL to queue (downloads first, then processes locally).
+   * File upload path is unchanged.
+   */
+  public addYouTubeUrl(url: string): string {
+    const videoId = `yt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    const queuedVideo: QueuedVideo = {
+      id: videoId,
+      file: { path: '', size: 0 },
+      fileName: 'YouTube download',
+      fileSize: 0,
+      status: 'downloading',
+      progress: {
+        phase: 'Downloading YouTube',
+        percentage: 0,
+        currentStep: 0,
+        totalSteps: 4, // extraction, transcription, analysis, saving
+      },
+    };
+
+    this.queue.push(queuedVideo);
+    this.log(`Downloading YouTube URL: ${url}`, LogLevel.INFO);
+    this.notifyQueueUpdate();
+
+    const run = async () => {
+      if (!window.electronAPI?.downloadYouTube) {
+        throw new Error('YouTube downloader not available (Electron API)');
+      }
+
+      const res = await window.electronAPI.downloadYouTube(url, (p: any) => {
+        if (queuedVideo.status !== 'downloading') return;
+        if (p?.type === 'progress' && p.phase === 'downloading') {
+          const pct = typeof p.percent === 'number' ? p.percent : null;
+          if (pct !== null) queuedVideo.progress.percentage = Math.max(0, Math.min(99, pct));
+          queuedVideo.progress.phase = 'Downloading YouTube';
+          this.notifyQueueUpdate();
+          return;
+        }
+        if (p?.type === 'stderr' || p?.type === 'log') {
+          this.log(`[YouTube] ${p.message}`, LogLevel.INFO);
+          return;
+        }
+        if (p?.type === 'error') {
+          this.log(`[YouTube] ${p.message || p.detail}`, LogLevel.ERROR);
+        }
+      });
+
+      if (!res?.success || !res.file_path) {
+        throw new Error(res?.error || 'YouTube download failed');
+      }
+
+      queuedVideo.file = { path: res.file_path, size: Number(res.size || 0) };
+      queuedVideo.fileName = String(res.file_name || res.title || 'youtube_video');
+      queuedVideo.fileSize = Number(res.size || 0);
+      queuedVideo.status = 'pending';
+      queuedVideo.progress.phase = 'Pending';
+      queuedVideo.progress.percentage = 0;
+      this.log(`YouTube download complete: ${queuedVideo.fileName}`, LogLevel.SUCCESS);
+      this.notifyQueueUpdate();
+
+      if (!this.isProcessing) {
+        this.processQueue();
+      }
+    };
+
+    run().catch((e) => {
+      queuedVideo.status = 'error';
+      queuedVideo.error = e instanceof Error ? e.message : String(e);
+      this.notifyQueueUpdate();
+    });
 
     return videoId;
   }
@@ -326,17 +404,24 @@ export class UploadQueueManager {
       // Step 1: Save uploaded video to temp file
       this.log(`Converting ${video.fileName} to WebM...`, LogLevel.INFO);
       const userDataPath = await window.electronAPI.getUserDataPath();
-      const tempVideoPath = `${userDataPath}/upload_video_${video.id}.mp4`;
-      
-      // Write video blob to temp file
-      const arrayBuffer = await video.file.arrayBuffer();
-      const videoBase64 = btoa(
-        new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      );
-      
-      const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
-      if (!saveResult) {
-        throw new Error('Failed to save temp video file');
+      let tempVideoPath: string;
+      const shouldDeleteTempInput = video.file instanceof File;
+
+      if (video.file instanceof File) {
+        tempVideoPath = `${userDataPath}/upload_video_${video.id}.mp4`;
+
+        // Write video blob to temp file
+        const arrayBuffer = await video.file.arrayBuffer();
+        const videoBase64 = btoa(
+          new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+        );
+
+        const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
+        if (!saveResult) {
+          throw new Error('Failed to save temp video file');
+        }
+      } else {
+        tempVideoPath = video.file.path;
       }
 
       // Step 2: Convert to WebM
@@ -364,7 +449,7 @@ export class UploadQueueManager {
         transcripts,
         summaries,
         uploadedFileName: video.fileName,
-        uploadedFileSize: video.file.size,
+        uploadedFileSize: video.fileSize,
         recordedMimeType: 'video/webm'
       };
 
@@ -402,6 +487,17 @@ export class UploadQueueManager {
         await window.electronAPI.deleteFile(convertResult.outputPath);
       } else {
         throw new Error(`Failed to save to recordings: ${result.error || 'Unknown error'}`);
+      }
+
+      // Cleanup temp input for downloaded sources (we keep file uploads in user-selected storage only).
+      try {
+        if (!shouldDeleteTempInput) {
+          await window.electronAPI.deleteFile(tempVideoPath);
+        } else {
+          await window.electronAPI.deleteFile(tempVideoPath);
+        }
+      } catch {
+        // ignore cleanup errors
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';

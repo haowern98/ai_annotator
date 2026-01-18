@@ -62,6 +62,12 @@ interface ElectronAPI {
   deleteFile: (filePath: string) => Promise<boolean>;
   extractAudioFromVideo: (videoPath: string) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
   convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
+
+  // YouTube downloader (runs python yt_dlp in .venv)
+  downloadYouTube: (
+    url: string,
+    onProgress?: (data: any) => void
+  ) => Promise<{success: boolean; file_path?: string; file_name?: string; title?: string; duration_s?: number; size?: number; error?: string}>;
 }
 
 declare global {

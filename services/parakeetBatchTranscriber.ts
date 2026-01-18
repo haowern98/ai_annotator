@@ -170,7 +170,7 @@ export default class ParakeetBatchTranscriber {
   }
 
   public async transcribeVideoToFile(
-    videoFile: File,
+    videoFile: File | { path: string; size?: number },
     outputPath: string,
     onProgress?: (segmentCount: number) => void,
     options: { segmentSeconds?: number } = {}
@@ -195,14 +195,26 @@ export default class ParakeetBatchTranscriber {
     }
 
     const userDataPath = await window.electronAPI.getUserDataPath();
-    const tempVideoPath = `${userDataPath}/temp_video_${Date.now()}.mp4`;
+    let tempVideoPath = `${userDataPath}/temp_video_${Date.now()}.mp4`;
+    let shouldCleanupVideo = true;
 
     this.log('[Parakeet Batch] Saving video to temp file...', LogLevel.INFO);
-    const arrayBuffer = await videoFile.arrayBuffer();
-    const videoBase64 = btoa(new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
-    const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
-    if (!saveResult) {
-      throw new Error('Failed to save video to temp file');
+    if (videoFile instanceof File) {
+      const arrayBuffer = await videoFile.arrayBuffer();
+      const videoBase64 = btoa(
+        new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+      );
+      const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
+      if (!saveResult) {
+        throw new Error('Failed to save video to temp file');
+      }
+    } else {
+      // Already a local path (e.g. YouTube download). Use directly to avoid loading into renderer memory.
+      tempVideoPath = String(videoFile.path || '').trim();
+      shouldCleanupVideo = false;
+      if (!tempVideoPath) {
+        throw new Error('Missing video path');
+      }
     }
 
     this.log('[Parakeet Batch] Extracting audio with ffmpeg...', LogLevel.INFO);
@@ -221,7 +233,9 @@ export default class ParakeetBatchTranscriber {
 
       const cleanup = async () => {
         try {
-          await window.electronAPI.deleteFile(tempVideoPath);
+          if (shouldCleanupVideo) {
+            await window.electronAPI.deleteFile(tempVideoPath);
+          }
           await window.electronAPI.deleteFile(audioResult.audioPath!);
         } catch (err) {
           const msg = String(err || '');

@@ -699,8 +699,21 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
   const handleUploadModalUpload = (source: { type: 'youtube' | 'file'; value: string | File }) => {
     if (source.type === 'youtube') {
-      addLog('YouTube uploads not implemented yet', LogLevel.WARN);
-      setError('YouTube uploads are not implemented yet. Please choose a video file.');
+      if (!uploadQueueRef.current) {
+        addLog('Upload queue not ready', LogLevel.ERROR);
+        setError('Upload queue not ready yet. Try again in a moment.');
+        return;
+      }
+
+      const url = String(source.value || '').trim();
+      if (!url) {
+        setError('Please enter a YouTube URL');
+        return;
+      }
+
+      uploadQueueRef.current.addYouTubeUrl(url);
+      setIsUploadModalOpen(false);
+      setIsUploadProgressOpen(true);
       return;
     }
 

@@ -329,6 +329,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   convertVideoToWebM: async (videoPath) => {
     return await ipcRenderer.invoke('video:convertVideoToWebM', videoPath);
   },
+
+  // YouTube downloader (Python yt_dlp in .venv)
+  downloadYouTube: async (url, onProgress) => {
+    const id = `yt_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const channel = 'youtube:download-progress';
+    const handler = (_event, data) => {
+      if (!data || data.id !== id) return;
+      try {
+        onProgress?.(data);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on(channel, handler);
+    try {
+      return await ipcRenderer.invoke('youtube:download', { url, id });
+    } finally {
+      ipcRenderer.removeListener(channel, handler);
+    }
+  },
 });
 
 // Log that preload script has loaded

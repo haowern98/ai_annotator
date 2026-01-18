@@ -10,6 +10,7 @@ const { setupLectureOverlayHandlers } = require('./ipc/lectureOverlay.cjs');
 const { setupWhisperHandlers } = require('./ipc/whisper.cjs');
 const { setupRecordingHandlers } = require('./ipc/recording.cjs');
 const { setupFileUtilsHandlers } = require('./ipc/fileUtils.cjs');
+const { setupYouTubeHandlers } = require('./ipc/youtube.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
 // Only set command-line switches if app is properly loaded
@@ -480,6 +481,7 @@ function createWindow() {
   setupWhisperHandlers(ipcMain);
   setupRecordingHandlers(ipcMain);
   setupFileUtilsHandlers(ipcMain);
+  setupYouTubeHandlers(ipcMain);
 
   // Load the app
   if (process.env.NODE_ENV === 'development') {
@@ -509,26 +511,108 @@ app.whenReady().then(() => {
     qwen: { progress: 0, status: 'Waiting…', isError: false },
   });
 
-  // Register video protocol handler for serving local video files
-  protocol.registerFileProtocol('video', (request, callback) => {
+  // Register video protocol handler for serving local video files.
+  // IMPORTANT: frame extraction seeks many times (video.currentTime), which requires Range support.
+  protocol.registerStreamProtocol('video', (request, callback) => {
+    const { Readable } = require('stream');
+
+    const fail = (statusCode, message) => {
+      callback({
+        statusCode,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        data: Readable.from([Buffer.from(String(message || 'Error'))]),
+      });
+    };
+
     try {
-      const url = request.url.substr(8); // Remove 'video://' prefix
-      const filePath = decodeURIComponent(url);
-      console.log('[Protocol] Video request:', request.url);
-      console.log('[Protocol] Resolved path:', filePath);
-      
-      // Check if file exists
-      const fs = require('fs');
-      if (!fs.existsSync(filePath)) {
-        console.error('[Protocol] File not found:', filePath);
-        callback({ error: -6 }); // net::ERR_FILE_NOT_FOUND
-        return;
+      const url = request.url.slice('video://'.length);
+      const decodedPath = decodeURIComponent(url);
+      const filePath = path.resolve(decodedPath);
+
+      const repoRoot = path.resolve(__dirname, '..');
+      const allowedRoots = [
+        path.resolve(app.getPath('userData')),
+        path.resolve(path.join(repoRoot, '.recordings')),
+      ];
+
+      const normalized = filePath.toLowerCase();
+      const isAllowed = allowedRoots.some((root) => {
+        const rootNorm = root.toLowerCase();
+        return normalized === rootNorm || normalized.startsWith(rootNorm + path.sep);
+      });
+
+      if (!isAllowed) {
+        return fail(403, 'Forbidden');
       }
-      
-      callback({ path: filePath });
+
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) {
+        return fail(404, 'Not found');
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType =
+        ext === '.mp4'
+          ? 'video/mp4'
+          : ext === '.webm'
+            ? 'video/webm'
+            : ext === '.mov'
+              ? 'video/quicktime'
+              : 'application/octet-stream';
+
+      const size = stat.size;
+      const rangeHeader = request.headers?.Range || request.headers?.range;
+      if (rangeHeader) {
+        const m = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader).trim());
+        if (!m) return fail(416, 'Invalid Range');
+
+        let start = m[1] ? parseInt(m[1], 10) : 0;
+        let end = m[2] ? parseInt(m[2], 10) : size - 1;
+
+        if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || end < 0) {
+          return fail(416, 'Invalid Range');
+        }
+
+        if (start >= size) {
+          return callback({
+            statusCode: 416,
+            headers: { 'Content-Range': `bytes */${size}` },
+            data: Readable.from([]),
+          });
+        }
+
+        if (end >= size) end = size - 1;
+        if (end < start) end = start;
+
+        const chunkSize = end - start + 1;
+        const stream = fs.createReadStream(filePath, { start, end });
+        return callback({
+          statusCode: 206,
+          headers: {
+            'Content-Type': contentType,
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Content-Range': `bytes ${start}-${end}/${size}`,
+            'Content-Length': String(chunkSize),
+          },
+          data: stream,
+        });
+      }
+
+      const stream = fs.createReadStream(filePath);
+      return callback({
+        statusCode: 200,
+        headers: {
+          'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+          'Content-Length': String(size),
+        },
+        data: stream,
+      });
     } catch (err) {
       console.error('[Protocol] Error handling video request:', err);
-      callback({ error: -2 }); // net::FAILED
+      return fail(500, 'Internal error');
     }
   });
 
