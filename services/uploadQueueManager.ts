@@ -270,6 +270,11 @@ export class UploadQueueManager {
       throw new Error('Cancelled: Live session started');
     }
 
+    // Check if video was cancelled
+    if (video.status === 'cancelled') {
+      throw new Error('Video cancelled by user');
+    }
+
     // Phase 1: Extract frames
     this.log(`Extracting frames: ${video.fileName}`, LogLevel.INFO);
     video.status = 'extracting';
@@ -287,6 +292,11 @@ export class UploadQueueManager {
     // Check again
     if (this.liveSessionCheck()) {
       throw new Error('Cancelled: Live session started');
+    }
+
+    // Check if video was cancelled
+    if (video.status === 'cancelled') {
+      throw new Error('Video cancelled by user');
     }
 
     // Phase 2: Transcribe audio
@@ -326,6 +336,11 @@ export class UploadQueueManager {
       throw new Error('Cancelled: Live session started');
     }
 
+    // Check if video was cancelled
+    if (video.status === 'cancelled') {
+      throw new Error('Video cancelled by user');
+    }
+
     // Phase 3: Analyze with VLM
     this.log(`Analyzing with VLM: ${video.fileName}`, LogLevel.INFO);
     video.status = 'analyzing';
@@ -338,6 +353,10 @@ export class UploadQueueManager {
       frames,
       transcriptPath,
       (window, totalWindows) => {
+        // Check if cancelled during VLM processing
+        if (video.status === 'cancelled') {
+          throw new Error('Video cancelled by user');
+        }
         video.progress.phase = `Analyzing with VLM (${window}/${totalWindows})`;
         const percentage = 66 + ((window / totalWindows) * 34);
         video.progress.percentage = Math.floor(percentage * 100) / 100;

@@ -2,6 +2,7 @@ import React from 'react';
 import { Monitor, Upload, RotateCw } from 'lucide-react';
 import { NetworkIcon } from './icons';
 import { LogLevel } from '../types';
+import LectureHomeSidebar from './LectureHomeSidebar';
 import LectureParakeetSessionManager, {
   TranscriptEntry,
   SummaryEntry,
@@ -18,9 +19,18 @@ import { QwenHttpClient } from '../services/qwenHttpClient';
 interface LectureHomeProps {
   onSessionStart?: () => void;
   onSidebarModeChange?: (mode: 'lecture' | 'interview' | 'history') => void;
+  uploadQueueRef: React.MutableRefObject<UploadQueueManager | null>;
+  uploadQueue: QueuedVideo[];
+  uploadParakeetRef: React.MutableRefObject<ParakeetBatchTranscriber | null>;
 }
 
-const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarModeChange }) => {
+const LectureHome: React.FC<LectureHomeProps> = ({ 
+  onSessionStart, 
+  onSidebarModeChange,
+  uploadQueueRef,
+  uploadQueue,
+  uploadParakeetRef
+}) => {
   const [hoveredButton, setHoveredButton] = React.useState<string | null>(null);
   const [isRunning, setIsRunning] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -40,12 +50,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
   // Remote processing modal state
   const [isRemoteModalOpen, setIsRemoteModalOpen] = React.useState(false);
-
-  // Upload queue manager state
-  const uploadQueueRef = React.useRef<UploadQueueManager | null>(null);
-  const [uploadQueue, setUploadQueue] = React.useState<QueuedVideo[]>([]);
   const [isUploadProgressOpen, setIsUploadProgressOpen] = React.useState(false);
-  const uploadParakeetRef = React.useRef<ParakeetBatchTranscriber | null>(null);
 
   // Session manager and media refs
   const sessionManagerRef = React.useRef<LectureParakeetSessionManager | null>(null);
@@ -74,58 +79,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
     }
   }, []);
 
-  // Initialize session manager + upload queue (batch-only)
+  // Initialize session manager only
   React.useEffect(() => {
     sessionManagerRef.current = new LectureParakeetSessionManager(addLog);
-
-    // Batch clients: keep these independent from live capture/session manager
-    const uploadParakeet = new ParakeetBatchTranscriber(addLog);
-    
-    // Load remote processing config to determine Qwen URL
-    let qwenUrl = 'http://127.0.0.1:7556'; // default local
-    try {
-      const remoteConfig = localStorage.getItem('qwen_remote_config');
-      if (remoteConfig) {
-        const config = JSON.parse(remoteConfig);
-        if (config.mode === 'client' && config.remoteUrl) {
-          qwenUrl = config.remoteUrl;
-          addLog(`[Upload Queue] Using remote Qwen server: ${qwenUrl}`, LogLevel.INFO);
-        }
-      }
-    } catch (e) {
-      addLog('[Upload Queue] Failed to load remote config, using local server', LogLevel.WARN);
-    }
-    
-    const uploadQwen = new QwenHttpClient(qwenUrl);
-    uploadParakeetRef.current = uploadParakeet;
-
-    const initUploadClients = async () => {
-      try {
-        await uploadParakeet.connect({
-          onReady: () => addLog('[Upload Queue] Parakeet worker ready', LogLevel.SUCCESS),
-          onError: (err) => addLog(`[Upload Queue] Parakeet error: ${err}`, LogLevel.ERROR),
-        });
-
-        await uploadQwen.connect({
-          onReady: () => addLog('[Upload Queue] Qwen worker ready', LogLevel.SUCCESS),
-          onError: (err) => addLog(`[Upload Queue] Qwen error: ${err}`, LogLevel.ERROR),
-          onProgress: (msg) => addLog(`[Upload Queue] ${msg}`, LogLevel.INFO),
-        });
-
-        uploadQueueRef.current = new UploadQueueManager(uploadParakeet, uploadQwen, () => isRunning, {
-          onQueueUpdate: (queue) => setUploadQueue(queue),
-          onVideoComplete: (video) => addLog(`Upload complete: ${video.fileName}`, LogLevel.SUCCESS),
-          onVideoError: (video, err) => addLog(`Upload failed: ${video.fileName} - ${err}`, LogLevel.ERROR),
-          onLog: addLog,
-        });
-
-        addLog('[Upload Queue] Queue manager initialized', LogLevel.SUCCESS);
-      } catch (e) {
-        addLog(`[Upload Queue] Initialization failed: ${e}`, LogLevel.ERROR);
-      }
-    };
-
-    initUploadClients();
 
     // Create hidden video and canvas elements
     const video = document.createElement('video');
@@ -759,12 +715,17 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
     <div style={{
       flex: 1,
       display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '32px',
       backgroundColor: '#1a1a1a'
     }}>
+      {/* Main content area */}
+      <div style={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '32px'
+      }}>
       {/* Error Display */}
       {error && (
         <div style={{
@@ -999,6 +960,13 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
           50% { opacity: 0.5; }
         }
       `}</style>
+      </div>
+
+      {/* Right Sidebar */}
+      <LectureHomeSidebar 
+        uploadQueue={uploadQueue}
+        onCancelVideo={(videoId) => uploadQueueRef.current?.cancelVideo(videoId)}
+      />
     </div>
   );
 };

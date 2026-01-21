@@ -177,8 +177,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('qwen:start-remote');
   },
 
+  startQwenLocal: async () => {
+    return await ipcRenderer.invoke('qwen:start-local');
+  },
+
   stopQwen: async () => {
     return await ipcRenderer.invoke('qwen:stop');
+  },
+
+  getServerMode: async () => {
+    return await ipcRenderer.invoke('qwen:get-server-mode');
   },
 
   // =====================================================

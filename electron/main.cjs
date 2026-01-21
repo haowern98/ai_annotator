@@ -479,6 +479,11 @@ function createWindow() {
     }
   });
 
+  // Track server mode state
+  let isServerMode = false;
+  const getServerMode = () => isServerMode;
+  const setServerMode = (mode) => { isServerMode = mode; };
+
   // Network and Qwen control handlers
   setupNetworkHandlers(ipcMain);
   setupQwenControlHandlers(
@@ -486,7 +491,9 @@ function createWindow() {
     getVenvPythonPath, 
     fetchJsonWithTimeout,
     () => qwenProcess,
-    (proc) => { qwenProcess = proc; }
+    (proc) => { qwenProcess = proc; },
+    getServerMode,
+    setServerMode
   );
 
   // Setup IPC handlers

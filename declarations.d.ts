@@ -56,7 +56,9 @@ interface ElectronAPI {
 
   // Qwen control API
   startQwenRemote: () => Promise<{success: boolean; error?: string}>;
+  startQwenLocal: () => Promise<{success: boolean; error?: string}>;
   stopQwen: () => Promise<{success: boolean; message?: string; error?: string}>;
+  getServerMode: () => Promise<{success: boolean; isServerMode: boolean}>;
 
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;

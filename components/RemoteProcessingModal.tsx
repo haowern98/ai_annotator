@@ -15,6 +15,8 @@ const REMOTE_CONFIG_KEY = 'qwen_remote_config';
 const saveRemoteConfig = (config: RemoteConfig) => {
   try {
     localStorage.setItem(REMOTE_CONFIG_KEY, JSON.stringify(config));
+    // Dispatch custom event to notify other components
+    window.dispatchEvent(new Event('qwen-config-changed'));
   } catch (e) {
     console.error('Failed to save remote config:', e);
   }
@@ -47,10 +49,23 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [latency, setLatency] = useState<number | null>(null);
+  const [isServerRunning, setIsServerRunning] = useState(false);
 
   // Load saved config and detect IPs on mount
   useEffect(() => {
     if (!isOpen) return;
+
+    // Check if server mode is already running
+    const checkServerMode = async () => {
+      if (window.electronAPI?.getServerMode) {
+        const result = await window.electronAPI.getServerMode();
+        if (result.success) {
+          setIsServerRunning(result.isServerMode);
+        }
+      }
+    };
+
+    checkServerMode();
 
     // Load saved config
     const savedConfig = loadRemoteConfig();
@@ -159,6 +174,7 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
       if (result.success) {
         // Save server mode config
         saveRemoteConfig({ mode: 'server', lastConnected: Date.now() });
+        setIsServerRunning(true);
         onClose();
       } else {
         console.error('Failed to start server:', result.error);
@@ -167,6 +183,34 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     } catch (error) {
       console.error('Server start error:', error);
       alert('Failed to start server');
+    } finally {
+      setIsStarting(false);
+    }
+  };
+
+  const handleStopServer = async () => {
+    if (!window.electronAPI?.stopQwen) {
+      console.error('Electron API not available');
+      return;
+    }
+
+    setIsStarting(true);
+    
+    try {
+      const result = await window.electronAPI.stopQwen();
+      
+      if (result.success) {
+        // Clear server mode config
+        saveRemoteConfig({ mode: 'local' });
+        setIsServerRunning(false);
+        onClose();
+      } else {
+        console.error('Failed to stop server:', result.error);
+        alert(`Failed to stop server: ${result.error}`);
+      }
+    } catch (error) {
+      console.error('Server stop error:', error);
+      alert('Failed to stop server');
     } finally {
       setIsStarting(false);
     }
@@ -611,32 +655,11 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
           {mode === 'server' ? (
             <>
               <button
-                onClick={handleTestConnectionServer}
-                disabled={connectionStatus === 'testing'}
-                style={{
-                  padding: '10px 24px',
-                  backgroundColor: '#333333',
-                  border: 'none',
-                  borderRadius: '6px',
-                  color: '#ffffff',
-                  fontSize: '14px',
-                  fontWeight: 500,
-                  cursor: connectionStatus === 'testing' ? 'not-allowed' : 'pointer',
-                  opacity: connectionStatus === 'testing' ? 0.5 : 1,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px'
-                }}
-              >
-                <Plug2 size={16} />
-                {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
-              </button>
-              <button
-                onClick={handleStartServer}
+                onClick={handleStopServer}
                 disabled={isStarting}
                 style={{
                   padding: '10px 24px',
-                  backgroundColor: '#10b981',
+                  backgroundColor: '#333333',
                   border: 'none',
                   borderRadius: '6px',
                   color: '#ffffff',
@@ -649,8 +672,29 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                   gap: '6px'
                 }}
               >
+                <X size={16} />
+                {isStarting ? 'Stopping...' : 'Close Connection'}
+              </button>
+              <button
+                onClick={handleStartServer}
+                disabled={isStarting || isServerRunning}
+                style={{
+                  padding: '10px 24px',
+                  backgroundColor: isServerRunning ? '#666666' : '#10b981',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: '#ffffff',
+                  fontSize: '14px',
+                  fontWeight: 500,
+                  cursor: (isStarting || isServerRunning) ? 'not-allowed' : 'pointer',
+                  opacity: (isStarting || isServerRunning) ? 0.5 : 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
                 <Check size={16} />
-                {isStarting ? 'Starting...' : 'Start Server'}
+                {isStarting ? 'Starting...' : isServerRunning ? 'Server Running' : 'Start Server'}
               </button>
             </>
           ) : (
