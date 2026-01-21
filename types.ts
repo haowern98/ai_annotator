@@ -109,6 +109,7 @@ declare global {
       deleteRecording: (videoFilename: string) => Promise<any>;
       getRecordingMetadata: (videoFilename: string) => Promise<any>;
       getRecordingVideo: (videoFilename: string) => Promise<any>;
+      getRecordingVideoPath: (videoFilename: string) => Promise<any>;
 
       // File + video utils (Upload Queue / batch processing)
       getUserDataPath: () => Promise<string>;
@@ -118,6 +119,7 @@ declare global {
       readFile: (filePath: string) => Promise<string>;
       deleteFile: (filePath: string) => Promise<boolean>;
       extractAudioFromVideo: (videoPath: string) => Promise<{ success: boolean; audioPath?: string; size?: number; error?: string }>;
+      extractWavSegment: (wavPath: string, startSeconds: number, durationSeconds: number) => Promise<{ success: boolean; audioPath?: string; size?: number; error?: string }>;
       convertVideoToWebM: (videoPath: string) => Promise<{ success: boolean; outputPath?: string; size?: number; error?: string }>;
 
       // YouTube downloader (Python yt_dlp in .venv)

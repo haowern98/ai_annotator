@@ -249,6 +249,17 @@ function setupRecordingHandlers(ipcMain) {
         throw new Error(`Video file not found for ${baseFilename}`);
       }
 
+      // Avoid crashing the renderer by base64-encoding huge files.
+      // Use `recording:getVideoPath` for large videos to enable streaming playback.
+      const st = await fs.stat(videoPath);
+      if (st.size > 50 * 1024 * 1024) {
+        return {
+          success: false,
+          error: `Video too large for base64 transfer (${Math.round(st.size / 1024 / 1024)}MB). Use recording:getVideoPath.`,
+          mimeType,
+        };
+      }
+
       // Read video file
       const videoData = await fs.readFile(videoPath);
       const base64Data = videoData.toString('base64');
@@ -260,6 +271,40 @@ function setupRecordingHandlers(ipcMain) {
       };
     } catch (err) {
       console.error('[Recording] Failed to read video:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Get video file path for streaming playback via the custom `video://` protocol.
+  // This avoids loading large recordings into renderer memory.
+  ipcMain.handle('recording:getVideoPath', async (event, videoFilename) => {
+    try {
+      const dir = await initRecordingsDir();
+      const baseFilename = videoFilename.replace(/\.(webm|mp4|json)$/, '');
+
+      const extensionsToTry = ['.mp4', '.webm'];
+      let videoPath = '';
+      let mimeType = 'video/webm';
+
+      for (const ext of extensionsToTry) {
+        const testPath = path.join(dir, `${baseFilename}${ext}`);
+        try {
+          await fs.access(testPath);
+          videoPath = testPath;
+          mimeType = ext === '.mp4' ? 'video/mp4' : 'video/webm';
+          break;
+        } catch {
+          // try next
+        }
+      }
+
+      if (!videoPath) {
+        throw new Error(`Video file not found for ${baseFilename}`);
+      }
+
+      return { success: true, path: videoPath, mimeType };
+    } catch (err) {
+      console.error('[Recording] Failed to get video path:', err);
       return { success: false, error: err.message };
     }
   });

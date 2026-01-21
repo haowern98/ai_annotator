@@ -41,9 +41,12 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: 'video',
     privileges: {
+      standard: true,
       secure: true,
+      corsEnabled: true,
       supportFetchAPI: true,
       bypassCSP: true,
+      allowServiceWorkers: true,
       stream: true
     }
   }
@@ -517,6 +520,7 @@ app.whenReady().then(() => {
     const { Readable } = require('stream');
 
     const fail = (statusCode, message) => {
+      console.warn('[Protocol] video:// fail', { statusCode, message, url: request?.url });
       callback({
         statusCode,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
@@ -525,9 +529,17 @@ app.whenReady().then(() => {
     };
 
     try {
-      const url = request.url.slice('video://'.length);
-      const decodedPath = decodeURIComponent(url);
+      // Helps debug renderer playback failures (media pipeline gives opaque errors).
+      // Keep log minimal to avoid spamming during seek.
+      // Note: request.headers may contain Range during playback.
+      // Handle video://localhost/C:/Users/... format
+      const url = request.url.replace(/^video:\/\/localhost\//i, '');
+      let decodedPath = decodeURIComponent(url);
       const filePath = path.resolve(decodedPath);
+      const rangeHeader = request.headers?.Range || request.headers?.range;
+      if (rangeHeader) {
+        console.log('[Protocol] video://', { filePath, range: String(rangeHeader) });
+      }
 
       const repoRoot = path.resolve(__dirname, '..');
       const allowedRoots = [
@@ -535,13 +547,26 @@ app.whenReady().then(() => {
         path.resolve(path.join(repoRoot, '.recordings')),
       ];
 
+      // DEBUG: Log all paths for troubleshooting
+      console.log('[Protocol] Security check:', {
+        __dirname,
+        repoRoot,
+        requestedFile: filePath,
+        allowedRoots,
+        normalized: filePath.toLowerCase(),
+        allowedRootsNormalized: allowedRoots.map(r => r.toLowerCase()),
+      });
+
       const normalized = filePath.toLowerCase();
       const isAllowed = allowedRoots.some((root) => {
         const rootNorm = root.toLowerCase();
-        return normalized === rootNorm || normalized.startsWith(rootNorm + path.sep);
+        const matches = normalized === rootNorm || normalized.startsWith(rootNorm + path.sep);
+        console.log('[Protocol] Checking root:', { root: rootNorm, matches });
+        return matches;
       });
 
       if (!isAllowed) {
+        console.error('[Protocol] 403 FORBIDDEN - File not in allowed roots');
         return fail(403, 'Forbidden');
       }
 
@@ -561,7 +586,6 @@ app.whenReady().then(() => {
               : 'application/octet-stream';
 
       const size = stat.size;
-      const rangeHeader = request.headers?.Range || request.headers?.range;
       if (rangeHeader) {
         const m = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader).trim());
         if (!m) return fail(416, 'Invalid Range');

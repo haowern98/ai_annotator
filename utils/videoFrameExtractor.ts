@@ -122,7 +122,9 @@ export async function extractFramesAt1FPS(
       // Prefer Electron custom protocol (registered in electron/main.cjs) to avoid file:// restrictions.
       // Note: this is cross-origin vs http://localhost, so set CORS mode to allow canvas extraction.
       video.crossOrigin = 'anonymous';
-      video.src = `video://${encodeURIComponent(p)}`;
+      // Use localhost as host for proper URL format
+      const normalizedPath = p.replace(/\\/g, '/');
+      video.src = `video://localhost/${normalizedPath}`;
     }
   });
 }

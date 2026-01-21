@@ -18,6 +18,12 @@ export interface ParakeetBatchTranscriptSegment {
   is_final: boolean;
 }
 
+type ParakeetWordTimestamp = {
+  start?: number;
+  end?: number;
+  [k: string]: any;
+};
+
 interface ParakeetBatchTranscriberCallbacks {
   onReady?: () => void;
   onError?: (message: string) => void;
@@ -228,96 +234,214 @@ export default class ParakeetBatchTranscriber {
       LogLevel.SUCCESS
     );
 
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
-
-      const cleanup = async () => {
-        try {
-          if (shouldCleanupVideo) {
-            await window.electronAPI.deleteFile(tempVideoPath);
-          }
-          await window.electronAPI.deleteFile(audioResult.audioPath!);
-        } catch (err) {
-          const msg = String(err || '');
-          if (msg.includes('ENOENT')) return;
-          this.log(`[Parakeet Batch] Cleanup warning: ${err}`, LogLevel.WARN);
+    const cleanupBase = async () => {
+      try {
+        if (shouldCleanupVideo) {
+          await window.electronAPI.deleteFile(tempVideoPath);
         }
-      };
+        await window.electronAPI.deleteFile(audioResult.audioPath!);
+      } catch (err) {
+        const msg = String(err || '');
+        if (msg.includes('ENOENT')) return;
+        this.log(`[Parakeet Batch] Cleanup warning: ${err}`, LogLevel.WARN);
+      }
+    };
 
-      ws.onopen = () => {
-        this.log('[Parakeet Batch] Connected', LogLevel.SUCCESS);
-        ws.send(JSON.stringify({ type: 'hello', client: 'batch', version: 1 }));
-      };
+    const runBatch = async (
+      wavPath: string
+    ): Promise<{ segments: ParakeetBatchTranscriptSegment[]; words: ParakeetWordTimestamp[]; text: string; duration_s: number | null }> => {
+      return await new Promise((resolve, reject) => {
+        const ws = new WebSocket(url);
+        let finished = false;
 
-      ws.onmessage = (evt) => {
-        if (typeof evt.data !== 'string') return;
-
-        let msg: any = null;
-        try {
-          msg = JSON.parse(evt.data);
-        } catch {
-          return;
-        }
-        if (!msg) return;
-
-        if (msg.type === 'status' && msg.state === 'ready') {
-          ws.send(
-            JSON.stringify({
-              type: 'batch_transcribe',
-              wav_path: audioResult.audioPath,
-              segment_seconds: segmentSeconds,
-            })
-          );
-          return;
-        }
-
-        if (msg.type !== 'batch_result') return;
-
-        (async () => {
+        const done = (err?: Error, res?: any) => {
+          if (finished) return;
+          finished = true;
           try {
-            if (!msg.ok) {
-              throw new Error(msg.error || 'Batch transcription failed');
-            }
-
-            const segments: ParakeetBatchTranscriptSegment[] = Array.isArray(msg.segments) ? msg.segments : [];
-            const words = Array.isArray(msg.words) ? msg.words : [];
-            const text = typeof msg.text === 'string' ? msg.text : '';
-
-            const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
-            if (!okSeg) throw new Error('Failed to write transcript segments');
-
-            const wordsPath = outputPath.replace(/\.json$/i, '_words.json');
-            const okWords = await window.electronAPI.writeFile(
-              wordsPath,
-              JSON.stringify({ duration_s: msg.duration_s ?? null, text, words }, null, 2)
-            );
-            if (!okWords) throw new Error('Failed to write transcript word timestamps');
-
-            this.log(`[Parakeet Batch] Transcripts saved: ${segments.length} segment(s)`, LogLevel.SUCCESS);
-            onProgress?.(segments.length);
-            resolve();
-          } catch (error) {
-            reject(error instanceof Error ? error : new Error(String(error)));
-          } finally {
-            try {
-              ws.close();
-            } catch {
-              // ignore
-            }
-            await cleanup();
+            ws.close();
+          } catch {
+            // ignore
           }
-        })();
-      };
+          if (err) return reject(err);
+          resolve(res);
+        };
 
-      ws.onerror = async () => {
-        await cleanup();
-        reject(new Error('Parakeet worker connection failed'));
-      };
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: 'hello', client: 'batch', version: 1 }));
+        };
 
-      ws.onclose = async () => {
-        await cleanup();
-      };
-    });
+        ws.onerror = () => {
+          done(new Error('Parakeet worker connection failed'));
+        };
+
+        ws.onmessage = (evt) => {
+          if (typeof evt.data !== 'string') return;
+          let msg: any = null;
+          try {
+            msg = JSON.parse(evt.data);
+          } catch {
+            return;
+          }
+          if (!msg) return;
+
+          if (msg.type === 'status' && msg.state === 'ready') {
+            ws.send(
+              JSON.stringify({
+                type: 'batch_transcribe',
+                wav_path: wavPath,
+                segment_seconds: segmentSeconds,
+              })
+            );
+            return;
+          }
+
+          if (msg.type !== 'batch_result') return;
+
+          if (!msg.ok) {
+            done(new Error(msg.error || 'Batch transcription failed'));
+            return;
+          }
+
+          const segments: ParakeetBatchTranscriptSegment[] = Array.isArray(msg.segments) ? msg.segments : [];
+          const words: ParakeetWordTimestamp[] = Array.isArray(msg.words) ? msg.words : [];
+          const text = typeof msg.text === 'string' ? msg.text : '';
+          const duration_s = typeof msg.duration_s === 'number' ? msg.duration_s : null;
+          done(undefined, { segments, words, text, duration_s });
+        };
+
+        ws.onclose = () => {
+          // If the worker closes before we received a result, surface it as an error.
+          if (!finished) done(new Error('Parakeet worker connection closed'));
+        };
+      });
+    };
+
+    const wavSize = typeof audioResult.size === 'number' ? audioResult.size : null;
+    const wavDurationSeconds =
+      wavSize && wavSize > 44 ? Math.max(0, (wavSize - 44) / (16000 * 2)) : null; // PCM16LE mono @ 16kHz
+
+    const shouldChunk = wavDurationSeconds !== null && wavDurationSeconds > 300;
+    if (!shouldChunk) {
+      try {
+        const { segments, words, text, duration_s } = await runBatch(audioResult.audioPath);
+
+        const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
+        if (!okSeg) throw new Error('Failed to write transcript segments');
+
+        const wordsPath = outputPath.replace(/\.json$/i, '_words.json');
+        const okWords = await window.electronAPI.writeFile(
+          wordsPath,
+          JSON.stringify({ duration_s, text, words }, null, 2)
+        );
+        if (!okWords) throw new Error('Failed to write transcript word timestamps');
+
+        this.log(`[Parakeet Batch] Transcripts saved: ${segments.length} segment(s)`, LogLevel.SUCCESS);
+        onProgress?.(segments.length);
+        return;
+      } finally {
+        await cleanupBase();
+      }
+    }
+
+    if (!window.electronAPI.extractWavSegment) {
+      // Fall back to single-pass if the IPC handler isn't available.
+      try {
+        const { segments, words, text, duration_s } = await runBatch(audioResult.audioPath);
+
+        const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
+        if (!okSeg) throw new Error('Failed to write transcript segments');
+
+        const wordsPath = outputPath.replace(/\.json$/i, '_words.json');
+        const okWords = await window.electronAPI.writeFile(
+          wordsPath,
+          JSON.stringify({ duration_s, text, words }, null, 2)
+        );
+        if (!okWords) throw new Error('Failed to write transcript word timestamps');
+
+        this.log(`[Parakeet Batch] Transcripts saved: ${segments.length} segment(s)`, LogLevel.SUCCESS);
+        onProgress?.(segments.length);
+        return;
+      } finally {
+        await cleanupBase();
+      }
+    }
+
+    // Chunked transcription: split WAV into 5-minute-ish chunks with 1-segment overlap.
+    // Important: keep `segment_seconds` unchanged; only drop whole segments in the overlap.
+    const totalSeconds = wavDurationSeconds!;
+    const overlapSeconds = segmentSeconds; // preserve segment grid
+
+    const baseChunkSeconds = 300;
+    let chunkSeconds = Math.floor(baseChunkSeconds / segmentSeconds) * segmentSeconds;
+    chunkSeconds = Math.max(chunkSeconds, 2 * segmentSeconds);
+    const stepSeconds = chunkSeconds - overlapSeconds;
+
+    const mergedSegments: ParakeetBatchTranscriptSegment[] = [];
+    const mergedWords: ParakeetWordTimestamp[] = [];
+    let mergedSegmentCount = 0;
+
+    try {
+      let chunkIndex = 0;
+      for (let chunkStart = 0; chunkStart < totalSeconds; chunkStart += stepSeconds, chunkIndex++) {
+        const chunkDuration = Math.min(chunkSeconds, totalSeconds - chunkStart);
+
+        const chunkRes = await window.electronAPI.extractWavSegment(audioResult.audioPath, chunkStart, chunkDuration);
+        if (!chunkRes?.success || !chunkRes.audioPath) {
+          throw new Error(chunkRes?.error || 'Failed to extract WAV chunk');
+        }
+
+        try {
+          const { segments, words } = await runBatch(chunkRes.audioPath);
+
+          const localCutoff = chunkIndex === 0 ? -Infinity : overlapSeconds;
+
+          for (const s of segments) {
+            const end = typeof s.end === 'number' ? s.end : s.start;
+            if (!(end > localCutoff)) continue;
+            mergedSegments.push({
+              ...s,
+              start: s.start + chunkStart,
+              end: s.end + chunkStart,
+            });
+          }
+
+          for (const w of words) {
+            const wEnd = typeof w.end === 'number' ? w.end : typeof w.start === 'number' ? w.start : null;
+            if (chunkIndex !== 0 && wEnd !== null && !(wEnd > localCutoff)) continue;
+            const next: ParakeetWordTimestamp = { ...w };
+            if (typeof next.start === 'number') next.start = next.start + chunkStart;
+            if (typeof next.end === 'number') next.end = next.end + chunkStart;
+            mergedWords.push(next);
+          }
+
+          mergedSegmentCount = mergedSegments.length;
+          onProgress?.(mergedSegmentCount);
+        } finally {
+          try {
+            await window.electronAPI.deleteFile(chunkRes.audioPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      const mergedText = mergedSegments.map((s) => String(s.text || '').trim()).filter(Boolean).join(' ');
+
+      const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(mergedSegments, null, 2));
+      if (!okSeg) throw new Error('Failed to write transcript segments');
+
+      const wordsPath = outputPath.replace(/\.json$/i, '_words.json');
+      const okWords = await window.electronAPI.writeFile(
+        wordsPath,
+        JSON.stringify({ duration_s: totalSeconds, text: mergedText, words: mergedWords }, null, 2)
+      );
+      if (!okWords) throw new Error('Failed to write transcript word timestamps');
+
+      this.log(`[Parakeet Batch] Transcripts saved: ${mergedSegments.length} segment(s)`, LogLevel.SUCCESS);
+      onProgress?.(mergedSegments.length);
+    } finally {
+      await cleanupBase();
+    }
   }
 }
 

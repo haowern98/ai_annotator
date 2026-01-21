@@ -135,6 +135,39 @@ function setupFileUtilsHandlers(ipcMain) {
     return { success: true, audioPath: output, size: st.size };
   });
 
+  // Extract a time-sliced WAV segment from an existing WAV file.
+  // Used to chunk long transcriptions without changing ASR segmentation.
+  ipcMain.handle('audio:extractWavSegment', async (_event, wavPath, startSeconds, durationSeconds) => {
+    const input = await safeResolve(wavPath);
+    const start = Number(startSeconds ?? 0);
+    const dur = Number(durationSeconds ?? 0);
+    if (!Number.isFinite(start) || start < 0) throw new Error('Invalid startSeconds');
+    if (!Number.isFinite(dur) || dur <= 0) throw new Error('Invalid durationSeconds');
+
+    const outPath = path.join(getUserDataPath(), `audio_chunk_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+    const output = await safeResolve(outPath);
+
+    // Re-encode to a known format (PCM16LE), mono, 16 kHz.
+    await runFfmpeg([
+      '-y',
+      '-ss',
+      String(start),
+      '-t',
+      String(dur),
+      '-i',
+      input,
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-c:a',
+      'pcm_s16le',
+      output,
+    ]);
+    const st = await fs.stat(output);
+    return { success: true, audioPath: output, size: st.size };
+  });
+
   ipcMain.handle('video:convertVideoToWebM', async (_event, videoPath) => {
     const input = await safeResolve(videoPath);
     const outPath = path.join(getUserDataPath(), `video_${Date.now()}.webm`);

@@ -513,25 +513,53 @@ export class QwenHttpClient {
       }
     }
 
-    // Reduce step: summarize all topics across batches.
+    // Reduce step: summarize topics in 3-minute windows
     try {
-      this.callbacks?.onProgress?.('[Upload Queue] Reducing: summarizing topics across all batches…');
-      const summary = await this.summarizeTopics(allResults);
-      if (summary) {
-        allResults.push({
-          batch_id: allResults.length,
-          time_start: 0,
-          time_end: Math.max(0, frames.length - 1),
-          topic: 'All Topics',
-          content_type: 'other',
-          description: summary,
-          has_structured_content: false,
-          structured_hints: [],
-          is_topic_complete: true,
-          inference_time: 0,
-          tokens_estimate: { prompt: 0, completion: 0 },
-          window_label: 'All Topics',
-        });
+      const WINDOW_SIZE_SECONDS = 180; // 3 minutes
+      const maxTime = allResults.length > 0 
+        ? Math.max(...allResults.map(b => b.time_end))
+        : 0;
+      
+      const numWindows = Math.ceil(maxTime / WINDOW_SIZE_SECONDS);
+      
+      for (let i = 0; i < numWindows; i++) {
+        const windowStart = i * WINDOW_SIZE_SECONDS;
+        const windowEnd = (i + 1) * WINDOW_SIZE_SECONDS;
+        
+        // Filter batches in this time window
+        const batchesInWindow = allResults.filter(b => 
+          b.time_start >= windowStart && b.time_start < windowEnd
+        );
+        
+        if (batchesInWindow.length === 0) continue;
+        
+        const formatTime = (sec: number) => {
+          const min = Math.floor(sec / 60);
+          const s = sec % 60;
+          return `${min}:${s.toString().padStart(2, '0')}`;
+        };
+        
+        this.callbacks?.onProgress?.(
+          `[Upload Queue] Summarizing topics for ${formatTime(windowStart)}-${formatTime(windowEnd)}…`
+        );
+        
+        const summary = await this.summarizeTopics(batchesInWindow);
+        if (summary) {
+          allResults.push({
+            batch_id: allResults.length,
+            time_start: windowStart,
+            time_end: Math.min(windowEnd, maxTime),
+            topic: `Topics (${formatTime(windowStart)}-${formatTime(windowEnd)})`,
+            content_type: 'other',
+            description: summary,
+            has_structured_content: false,
+            structured_hints: [],
+            is_topic_complete: true,
+            inference_time: 0,
+            tokens_estimate: { prompt: 0, completion: 0 },
+            window_label: `Topics: ${formatTime(windowStart)}-${formatTime(windowEnd)}`,
+          });
+        }
       }
     } catch (e) {
       this.callbacks?.onProgress?.(`[Upload Queue] Reduce step skipped: ${e}`);

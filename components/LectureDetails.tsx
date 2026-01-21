@@ -413,21 +413,36 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
           }
 
           // Load video if available
-          if (meta.videoPath && meta.fileSize > 0 && electronAPI?.getRecordingVideo) {
-            console.log('[LectureDetails] Loading video data...');
-            const videoResult = await electronAPI.getRecordingVideo(meta.videoFilename);
-            if (videoResult.success && videoResult.data) {
-              // Convert base64 to blob URL
-              const byteCharacters = atob(videoResult.data);
-              const byteNumbers = new Array(byteCharacters.length);
-              for (let i = 0; i < byteCharacters.length; i++) {
-                byteNumbers[i] = byteCharacters.charCodeAt(i);
+          if (meta.videoPath && meta.fileSize > 0) {
+            // Prefer streaming playback via custom protocol to avoid loading large files into renderer memory.
+            if (electronAPI?.getRecordingVideoPath) {
+              console.log('[LectureDetails] Loading video path...');
+              const videoPathResult = await electronAPI.getRecordingVideoPath(meta.videoFilename);
+              if (videoPathResult?.success && videoPathResult.path) {
+                // Use localhost as host for proper URL format
+                const normalizedPath = videoPathResult.path.replace(/\\/g, '/');
+                const url = `video://localhost/${normalizedPath}`;
+                setVideoUrl(url);
+                console.log('[LectureDetails] Video loaded via video:// protocol');
               }
-              const byteArray = new Uint8Array(byteNumbers);
-              const blob = new Blob([byteArray], { type: videoResult.mimeType || 'video/webm' });
-              const url = URL.createObjectURL(blob);
-              setVideoUrl(url);
-              console.log('[LectureDetails] Video loaded as blob URL');
+            } else if (electronAPI?.getRecordingVideo) {
+              console.log('[LectureDetails] Loading video data...');
+              const videoResult = await electronAPI.getRecordingVideo(meta.videoFilename);
+              if (videoResult?.success && videoResult.data) {
+                // Convert base64 to blob URL (small recordings only).
+                const byteCharacters = atob(videoResult.data);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                  byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                const blob = new Blob([byteArray], { type: videoResult.mimeType || 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                setVideoUrl(url);
+                console.log('[LectureDetails] Video loaded as blob URL');
+              } else if (videoResult?.error) {
+                console.warn('[LectureDetails] Failed to load video data:', videoResult.error);
+              }
             }
           }
         }
@@ -442,7 +457,7 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
 
     // Cleanup blob URL on unmount
     return () => {
-      if (videoUrl) {
+      if (videoUrl && videoUrl.startsWith('blob:')) {
         URL.revokeObjectURL(videoUrl);
       }
     };

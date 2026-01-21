@@ -53,6 +53,15 @@ interface ElectronAPI {
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;
 
+  // Recording API
+  initRecording: () => Promise<{success: boolean; path?: string; error?: string}>;
+  saveRecording: (videoData: ArrayBuffer | string | null, metadata: any) => Promise<any>;
+  listRecordings: () => Promise<any>;
+  deleteRecording: (videoFilename: string) => Promise<any>;
+  getRecordingMetadata: (videoFilename: string) => Promise<any>;
+  getRecordingVideo: (videoFilename: string) => Promise<{success: boolean; data?: string; mimeType?: string; error?: string}>;
+  getRecordingVideoPath: (videoFilename: string) => Promise<{success: boolean; path?: string; mimeType?: string; error?: string}>;
+
   // File + video utils (Upload Queue / batch processing)
   getUserDataPath: () => Promise<string>;
   writeBinary: (filePath: string, base64: string) => Promise<boolean>;
@@ -61,6 +70,7 @@ interface ElectronAPI {
   readFile: (filePath: string) => Promise<string>;
   deleteFile: (filePath: string) => Promise<boolean>;
   extractAudioFromVideo: (videoPath: string) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
+  extractWavSegment: (wavPath: string, startSeconds: number, durationSeconds: number) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
   convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
 
   // YouTube downloader (runs python yt_dlp in .venv)

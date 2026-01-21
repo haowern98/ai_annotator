@@ -294,6 +294,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('recording:getVideo', videoFilename);
   },
 
+  // Get video file path for streaming playback (avoid base64 for large files)
+  getRecordingVideoPath: async (videoFilename) => {
+    return await ipcRenderer.invoke('recording:getVideoPath', videoFilename);
+  },
+
   // =====================================================
   // FILE + VIDEO UTILS (Upload Queue)
   // =====================================================
@@ -324,6 +329,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   extractAudioFromVideo: async (videoPath) => {
     return await ipcRenderer.invoke('video:extractAudioFromVideo', videoPath);
+  },
+
+  extractWavSegment: async (wavPath, startSeconds, durationSeconds) => {
+    return await ipcRenderer.invoke('audio:extractWavSegment', wavPath, startSeconds, durationSeconds);
   },
 
   convertVideoToWebM: async (videoPath) => {

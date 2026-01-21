@@ -401,43 +401,76 @@ export class UploadQueueManager {
       // Calculate duration from video
       const duration = video.endTime! - video.startTime!;
 
-      // Step 1: Save uploaded video to temp file
-      this.log(`Converting ${video.fileName} to WebM...`, LogLevel.INFO);
-      const userDataPath = await window.electronAPI.getUserDataPath();
-      let tempVideoPath: string;
-      const shouldDeleteTempInput = video.file instanceof File;
+      // Save video to recordings.
+      // Prefer keeping original container when it's MP4 or WebM (skip conversion).
+      this.log(`Saving ${video.fileName} to recordings...`, LogLevel.INFO);
+
+      const inferMimeFromName = (name: string | undefined): string | null => {
+        const n = String(name || '').toLowerCase().trim();
+        if (n.endsWith('.mp4')) return 'video/mp4';
+        if (n.endsWith('.webm')) return 'video/webm';
+        return null;
+      };
+
+      const toBytesFromBase64 = (base64: string): Uint8Array => {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      };
+
+      let recordedMimeType: string | null = null;
+      let videoBytes: ArrayBuffer | null = null;
+      let tempVideoPathForConversion: string | null = null;
+      let conversionOutputPath: string | null = null;
 
       if (video.file instanceof File) {
-        tempVideoPath = `${userDataPath}/upload_video_${video.id}.mp4`;
-
-        // Write video blob to temp file
-        const arrayBuffer = await video.file.arrayBuffer();
-        const videoBase64 = btoa(
-          new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-        );
-
-        const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
-        if (!saveResult) {
-          throw new Error('Failed to save temp video file');
+        recordedMimeType = (video.file.type || '').trim() || inferMimeFromName(video.file.name);
+        if (recordedMimeType === 'video/mp4' || recordedMimeType === 'video/webm') {
+          videoBytes = await video.file.arrayBuffer();
         }
       } else {
-        tempVideoPath = video.file.path;
+        const pathMime = inferMimeFromName(video.file.path) || inferMimeFromName(video.fileName);
+        recordedMimeType = pathMime;
+        if (recordedMimeType === 'video/mp4' || recordedMimeType === 'video/webm') {
+          const base64 = await window.electronAPI.readBinary(video.file.path);
+          videoBytes = toBytesFromBase64(base64).buffer;
+        }
       }
 
-      // Step 2: Convert to WebM
-      const convertResult = await window.electronAPI.convertVideoToWebM(tempVideoPath);
-      if (!convertResult.success || !convertResult.outputPath) {
-        throw new Error(`Video conversion failed: ${convertResult.error}`);
-      }
+      // Fallback: for unsupported input containers, convert to WebM for consistent playback.
+      if (!videoBytes) {
+        this.log(`Converting ${video.fileName} to WebM for storage...`, LogLevel.WARN);
 
-      this.log(`Conversion complete: ${(convertResult.size! / 1024 / 1024).toFixed(2)}MB`, LogLevel.SUCCESS);
+        const userDataPath = await window.electronAPI.getUserDataPath();
+        let tempVideoPath: string;
 
-      // Step 3: Read converted WebM file
-      const webmBase64 = await window.electronAPI.readBinary(convertResult.outputPath);
-      const webmBinary = atob(webmBase64);
-      const webmBytes = new Uint8Array(webmBinary.length);
-      for (let i = 0; i < webmBinary.length; i++) {
-        webmBytes[i] = webmBinary.charCodeAt(i);
+        if (video.file instanceof File) {
+          tempVideoPath = `${userDataPath}/upload_video_${video.id}.mp4`;
+          tempVideoPathForConversion = tempVideoPath;
+
+          const arrayBuffer = await video.file.arrayBuffer();
+          const videoBase64 = btoa(
+            new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+          );
+
+          const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
+          if (!saveResult) {
+            throw new Error('Failed to save temp video file');
+          }
+        } else {
+          tempVideoPath = video.file.path;
+        }
+
+        const convertResult = await window.electronAPI.convertVideoToWebM(tempVideoPath);
+        if (!convertResult.success || !convertResult.outputPath) {
+          throw new Error(`Video conversion failed: ${convertResult.error}`);
+        }
+        conversionOutputPath = convertResult.outputPath;
+
+        const webmBase64 = await window.electronAPI.readBinary(convertResult.outputPath);
+        videoBytes = toBytesFromBase64(webmBase64).buffer;
+        recordedMimeType = 'video/webm';
       }
 
       // Prepare metadata with video
@@ -450,11 +483,11 @@ export class UploadQueueManager {
         summaries,
         uploadedFileName: video.fileName,
         uploadedFileSize: video.fileSize,
-        recordedMimeType: 'video/webm'
+        recordedMimeType: recordedMimeType || 'video/webm'
       };
 
       // Save via Electron IPC with video data
-      const result = await window.electronAPI.saveRecording(webmBytes.buffer, metadata);
+      const result = await window.electronAPI.saveRecording(videoBytes, metadata);
 
       if (result.success) {
         this.log(`Saved to recordings: ${result.filename}`, LogLevel.SUCCESS);
@@ -483,21 +516,14 @@ export class UploadQueueManager {
         // Cleanup temp files
         await window.electronAPI.deleteFile(transcriptPath);
         await window.electronAPI.deleteFile(transcriptPath.replace(/\.json$/i, '_words.json'));
-        await window.electronAPI.deleteFile(tempVideoPath);
-        await window.electronAPI.deleteFile(convertResult.outputPath);
+        if (tempVideoPathForConversion) {
+          await window.electronAPI.deleteFile(tempVideoPathForConversion);
+        }
+        if (conversionOutputPath) {
+          await window.electronAPI.deleteFile(conversionOutputPath);
+        }
       } else {
         throw new Error(`Failed to save to recordings: ${result.error || 'Unknown error'}`);
-      }
-
-      // Cleanup temp input for downloaded sources (we keep file uploads in user-selected storage only).
-      try {
-        if (!shouldDeleteTempInput) {
-          await window.electronAPI.deleteFile(tempVideoPath);
-        } else {
-          await window.electronAPI.deleteFile(tempVideoPath);
-        }
-      } catch {
-        // ignore cleanup errors
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';

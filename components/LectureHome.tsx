@@ -1,5 +1,6 @@
 import React from 'react';
 import { Monitor, Upload, RotateCw } from 'lucide-react';
+import { NetworkIcon } from './icons';
 import { LogLevel } from '../types';
 import LectureParakeetSessionManager, {
   TranscriptEntry,
@@ -9,6 +10,7 @@ import { ScreenSourcePicker } from './ScreenSourcePicker';
 import { RecordingConfirmModal, RecordingQuality } from './RecordingConfirmModal';
 import { UploadLectureModal } from './UploadLectureModal';
 import { UploadProgressModal } from './UploadProgressModal';
+import RemoteProcessingModal from './RemoteProcessingModal';
 import { UploadQueueManager, QueuedVideo } from '../services/uploadQueueManager';
 import ParakeetBatchTranscriber from '../services/parakeetBatchTranscriber';
 import { QwenHttpClient } from '../services/qwenHttpClient';
@@ -35,6 +37,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
   // Upload lecture modal state
   const [isUploadModalOpen, setIsUploadModalOpen] = React.useState(false);
+
+  // Remote processing modal state
+  const [isRemoteModalOpen, setIsRemoteModalOpen] = React.useState(false);
 
   // Upload queue manager state
   const uploadQueueRef = React.useRef<UploadQueueManager | null>(null);
@@ -781,7 +786,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
               backgroundColor: hoveredButton === 'overlay' && !isRunning ? '#3a3a3a' : 'transparent',
               cursor: isRunning ? 'not-allowed' : 'pointer',
               opacity: isRunning ? 0.5 : 1,
-              transition: 'all 0.2s'
+              transition: 'all 0.2s',
+              width: '160px'
             }}
           >
             <div style={{
@@ -797,7 +803,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
             }}>
               <Monitor style={{ width: '40px', height: '40px', color: '#ffffff' }} />
             </div>
-            <span style={{ color: '#ffffff', fontWeight: 500 }}>
+            <span style={{ color: '#ffffff', fontWeight: 500, textAlign: 'center' }}>
               {isRunning ? 'Session Active' : 'Open Overlay'}
             </span>
           </button>
@@ -817,7 +823,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
               border: 'none',
               backgroundColor: hoveredButton === 'upload' ? '#3a3a3a' : 'transparent',
               cursor: 'pointer',
-              transition: 'all 0.2s'
+              transition: 'all 0.2s',
+              width: '160px'
             }}
           >
             <div style={{
@@ -833,12 +840,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
             }}>
               <Upload style={{ width: '40px', height: '40px', color: '#ffffff' }} />
             </div>
-            <span style={{ color: '#ffffff', fontWeight: 500 }}>Upload Lecture</span>
+            <span style={{ color: '#ffffff', fontWeight: 500, textAlign: 'center' }}>Upload Lecture</span>
           </button>
         </div>
 
-        {/* Row 2: Review Lectures */}
-        <div style={{ display: 'flex', justifyContent: 'center' }}>
+        {/* Row 2: Review Lectures, Process on Another Device */}
+        <div style={{ display: 'flex', gap: '16px' }}>
           <button
             onClick={handleReviewLectures}
             onMouseEnter={() => setHoveredButton('review')}
@@ -853,7 +860,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
               border: 'none',
               backgroundColor: hoveredButton === 'review' ? '#3a3a3a' : 'transparent',
               cursor: 'pointer',
-              transition: 'all 0.2s'
+              transition: 'all 0.2s',
+              width: '160px'
             }}
           >
             <div style={{
@@ -869,7 +877,46 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
             }}>
               <RotateCw style={{ width: '40px', height: '40px', color: '#ffffff' }} />
             </div>
-            <span style={{ color: '#ffffff', fontWeight: 500 }}>Review Lectures</span>
+            <span style={{ color: '#ffffff', fontWeight: 500, textAlign: 'center' }}>Review Lectures</span>
+          </button>
+
+          <button
+            onClick={() => {
+              addLog('Opening remote processing modal', LogLevel.INFO);
+              setIsRemoteModalOpen(true);
+            }}
+            onMouseEnter={() => setHoveredButton('remote')}
+            onMouseLeave={() => setHoveredButton(null)}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '16px',
+              padding: '24px',
+              borderRadius: '16px',
+              border: 'none',
+              backgroundColor: hoveredButton === 'remote' ? '#3a3a3a' : 'transparent',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              width: '160px'
+            }}
+          >
+            <div style={{
+              width: '80px',
+              height: '80px',
+              borderRadius: '16px',
+              backgroundColor: '#10b981',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transform: hoveredButton === 'remote' ? 'scale(1.05)' : 'scale(1)',
+              transition: 'transform 0.2s'
+            }}>
+              <NetworkIcon style={{ width: '40px', height: '40px', color: '#ffffff' }} />
+            </div>
+            <span style={{ color: '#ffffff', fontWeight: 500, textAlign: 'center', wordWrap: 'break-word' }}>
+              Other Devices
+            </span>
           </button>
         </div>
       </div>
@@ -919,6 +966,16 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
           onCancel={handlePickerCancel}
         />
       )}
+
+      {/* Remote Processing Modal */}
+      <RemoteProcessingModal
+        isOpen={isRemoteModalOpen}
+        onClose={() => setIsRemoteModalOpen(false)}
+        onSuccess={() => {
+          // Client mode successful connection - open upload modal
+          setIsUploadModalOpen(true);
+        }}
+      />
 
       <style>{`
         @keyframes pulse {

@@ -2,22 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-Qwen Video Analysis Worker v4.0
+VideoContext Engine v3.19
 -------------------------
 Author: dolphin-creator (https://github.com/dolphin-creator)
 Project: VideoContext Engine
 License: MIT
 
 Description:
-Windows-only video analysis service using Qwen3-VL (accepts pre-computed transcripts for lecture mode).
+Local-first microservice for video understanding (Scene Detection + Whisper + Qwen3-VL).
 
 -------------------------
-INSTALLATION (Windows only):
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
+INSTALLATION DES DÉPENDANCES (copier/coller) :
 
-Note: Uses llama.cpp binaries (llama-server.exe / llama-cli.exe)
-No PyTorch/Whisper needed - transcripts provided by Parakeet service.
+# macOS (Apple Silicon / Intel) – CPU (ou Metal) :
+#   python -m pip install --upgrade pip
+#   pip install fastapi uvicorn[standard] opencv-python yt-dlp pillow numpy openai-whisper huggingface_hub
+#   pip install mlx-vlm torchvision
+
+# Windows / Linux – CPU (ou GPU si vous avez déjà PyTorch CUDA) :
+#   python -m pip install --upgrade pip
+#   pip install fastapi uvicorn[standard] opencv-python yt-dlp pillow numpy openai-whisper huggingface_hub
+#   pip install llama-cpp-python
+
+(⚠️ PyTorch est requis par Whisper. Si besoin : pip install torch)
+
 -------------------------
 - Prompts techniques (structure JSON, etc.) figés dans le code.
 - L'utilisateur ne modifie que des "user prompts" qui s'ajoutent par-dessus.
@@ -72,6 +80,8 @@ from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from PIL import Image
 
+import whisper
+import torch
 
 # Optional (fallbacks if missing)
 try:
@@ -130,10 +140,11 @@ except Exception:
 # --- MODE RAM ---
 
 RAM_MODE = os.getenv("VIDEOCONTEXT_RAM_MODE", "ram-").lower()  # "ram+" ou "ram-"
+WHISPER_CACHE: Dict[str, Any] = {}
 
 # --- CONFIGURATION GLOBALE ---
 
-PORT_SERVEUR = 7556
+PORT_SERVEUR = 7555
 
 # Path where the most recent analysis result is persisted for "history" retrieval.
 LAST_RESULT_PATH = Path(__file__).resolve().parent / "local_test_output.json"
@@ -148,7 +159,7 @@ LOCAL_VLM_MODEL_DIR = r"C:\Users\Wu Family Computer\Downloads\Qwen3VL-8B-Instruc
 
 DEFAULT_VLM_MODEL_GGUF = os.path.join(LOCAL_VLM_MODEL_DIR, "Qwen3VL-8B-Instruct-Q4_K_M.gguf")
 DEFAULT_MMPROJ_GGUF = os.path.join(LOCAL_VLM_MODEL_DIR, "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf")
-# Whisper removed - transcripts provided externally
+DEFAULT_WHISPER_MODEL = "large"
 
 LLAMA_API_BASE_URL = os.getenv("LLAMA_API_BASE_URL", "").strip()
 LLAMA_API_MODEL = os.getenv("LLAMA_API_MODEL", "").strip()
@@ -176,8 +187,10 @@ DEFAULT_KEYFRAMES_PER_SCENE = 3
 DEFAULT_VLM_MAX_TOKENS_SCENE = 1220
 DEFAULT_VLM_MAX_TOKENS_SUMMARY = 580
 
-# Windows only - always use GGUF
-ACTIVE_DEFAULT_VLM = DEFAULT_VLM_MODEL_GGUF
+if platform.system() == "Darwin":
+    ACTIVE_DEFAULT_VLM = DEFAULT_VLM_MODEL_MLX
+else:
+    ACTIVE_DEFAULT_VLM = DEFAULT_VLM_MODEL_GGUF
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 
@@ -185,7 +198,15 @@ gpu_lock = asyncio.Lock()
 
 # --- PROMPTS SYSTÈME ---
 
-# Whisper removed - transcripts provided by Parakeet
+# --- Whisper CUDA enforcement ---
+
+def load_whisper_cuda(model_name: str):
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Whisper is configured to run on CUDA, but torch.cuda.is_available() is False. "
+            "Install a CUDA-enabled PyTorch build and ensure an NVIDIA GPU is available."
+        )
+    return whisper.load_model(model_name, device="cuda")
 
 
 BASE_VISUAL_PROMPT = """
@@ -292,14 +313,91 @@ class VLMProvider:
         pass
 
 
+class MLXEngine(VLMProvider):
+    def __init__(self):
+        super().__init__()
+        self.model = None
+        self.processor = None
+        self.config = None
+        self._generate_fn = None
+
+    def load_model(self, model_path: str):
+        if self.model is not None and self.current_model_path == model_path:
+            print(f"[MLX] VLM already loaded: {model_path}")
+            self.last_load_time = 0.0
+            return
+
+        print(f"[MLX] Loading VLM: {model_path}")
+        t0 = time.time()
+        try:
+            from mlx_vlm import load, generate
+            from mlx_vlm.utils import load_config
+
+            self.model = None
+            self.processor = None
+            self.config = None
+            gc.collect()
+
+            self.model, self.processor = load(model_path, trust_remote_code=True)
+            self.config = load_config(model_path)
+            self._generate_fn = generate
+            self.current_model_path = model_path
+            self.last_load_time = time.time() - t0
+            print(f"[MLX] VLM loaded in {self.last_load_time:.2f}s")
+        except ImportError:
+            raise RuntimeError(
+                "Erreur: installez 'mlx-vlm' (pip install mlx-vlm torchvision)"
+            )
+
+    def describe_scene(
+        self,
+        images: List[Image.Image],
+        prompt: str,
+        max_tokens: int,
+    ) -> str:
+        if not self.model:
+            raise RuntimeError("Modèle VLM MLX non chargé")
+
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        num_images = max(1, len(images))
+        formatted_prompt = apply_chat_template(
+            self.processor,
+            self.config,
+            prompt,
+            num_images=num_images,
+        )
+
+        imgs = images if len(images) > 1 else images[0]
+
+        output = self._generate_fn(
+            self.model,
+            self.processor,
+            formatted_prompt,
+            imgs,
+            max_tokens=max_tokens,
+            verbose=False,
+            temp=0.0,
+        )
+        text = output.text if hasattr(output, "text") else str(output)
+        return text.strip()
+
+    def unload_model(self):
+        self.model = None
+        self.processor = None
+        self.config = None
+        self.current_model_path = None
+        gc.collect()
+
+
 class LlamaCliEngine(VLMProvider):
     def __init__(self):
         super().__init__()
         self.llama_cli_exe = LOCAL_LLAMA_CLI_EXE
         self.mmproj_path = DEFAULT_MMPROJ_GGUF
 
-        # Increased context window for more frames per batch
-        self.n_ctx = 24000
+        # Keep this conservative by default; Qwen3-VL 8B can run larger, but this is safer for most machines.
+        self.n_ctx = 14192
         self.n_gpu_layers = -1  # all layers to GPU when possible
 
     def load_model(self, model_path: str):
@@ -341,8 +439,7 @@ class LlamaCliEngine(VLMProvider):
                 "--no-display-prompt",
                 "--color",
                 "off",
-                "--flash-attn",
-                "on",
+                "--no-show-timings",
                 "-m",
                 self.current_model_path,
                 "--mmproj",
@@ -379,24 +476,7 @@ class LlamaCliEngine(VLMProvider):
 
             raw = (proc.stdout or "").strip()
             cleaned = _clean_llama_stdout(raw)
-            
-            # Parse stderr for actual token counts
-            stderr = (proc.stderr or "").strip()
-            prompt_tokens = 0
-            completion_tokens = 0
-            
-            # Extract prompt eval tokens: "prompt eval time = ... / XXX tokens"
-            import re
-            prompt_match = re.search(r'prompt eval time.*?/(\s*\d+)\s+tokens', stderr)
-            if prompt_match:
-                prompt_tokens = int(prompt_match.group(1).strip())
-            
-            # Extract completion tokens: "eval time = ... / XXX tokens"
-            completion_match = re.search(r'eval time.*?/(\s*\d+)\s+tokens', stderr)
-            if completion_match:
-                completion_tokens = int(completion_match.group(1).strip())
-            
-            return (cleaned, prompt_tokens, completion_tokens)
+            return cleaned
 
     def unload_model(self):
         self.current_model_path = None
@@ -558,7 +638,7 @@ class LlamaApiEngine(VLMProvider):
         images: List[Image.Image],
         prompt: str,
         max_tokens: int,
-    ) -> tuple[str, int, int]:
+    ) -> str:
         self._ensure_server_running(model_path=self.current_model_path or DEFAULT_VLM_MODEL_GGUF)
 
         contents: List[Dict[str, Any]] = []
@@ -592,24 +672,18 @@ class LlamaApiEngine(VLMProvider):
 
         try:
             content = response["choices"][0]["message"]["content"]
-            usage = response.get("usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
         except Exception:
             raise RuntimeError(f"Unexpected Llama API response: {response}")
 
         if isinstance(content, str):
-            result = content.strip()
-        elif isinstance(content, list):
+            return content.strip()
+        if isinstance(content, list):
             parts: List[str] = []
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
                     parts.append(item["text"])
-            result = "\n".join(parts).strip()
-        else:
-            result = str(content).strip()
-        
-        return (result, prompt_tokens, completion_tokens)
+            return "\n".join(parts).strip()
+        return str(content).strip()
 
     def unload_model(self):
         self.current_model_path = None
@@ -618,18 +692,125 @@ class LlamaApiEngine(VLMProvider):
         gc.collect()
 
 
+class LlamaCppEngine(VLMProvider):
+    def __init__(self):
+        super().__init__()
+        self.llm = None
+        self.chat_handler = None
+
+    def _download_if_missing(self, filename: str, repo_id: str):
+        if not os.path.exists(filename):
+            print(f"[Auto-Download] Downloading {filename}...")
+            try:
+                from huggingface_hub import hf_hub_download
+
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir=".",
+                )
+                print(f"[Auto-Download] Ready: {filename}")
+            except ImportError:
+                raise RuntimeError("Erreur: 'huggingface_hub' manquant.")
+            except Exception as e:
+                print(f"[Auto-Download] Warning: download failed: {e}")
+
+    def load_model(self, model_path: str):
+        if model_path == DEFAULT_VLM_MODEL_GGUF:
+            self._download_if_missing(model_path, DEFAULT_VLM_REPO_GGUF)
+            self._download_if_missing(DEFAULT_MMPROJ_GGUF, DEFAULT_VLM_REPO_GGUF)
+
+        if self.llm is not None and self.current_model_path == model_path:
+            print(f"[Llama.cpp] VLM already loaded: {model_path}")
+            self.last_load_time = 0.0
+            return
+
+        print(f"[Llama.cpp] Loading VLM: {model_path}")
+        t0 = time.time()
+        try:
+            from llama_cpp import Llama
+            from llama_cpp.llama_chat_format import Llava15ChatHandler
+
+            self.llm = None
+            gc.collect()
+
+            mmproj = DEFAULT_MMPROJ_GGUF if os.path.exists(DEFAULT_MMPROJ_GGUF) else None
+            self.chat_handler = (
+                Llava15ChatHandler(clip_model_path=mmproj) if mmproj else None
+            )
+
+            self.llm = Llama(
+                model_path=model_path,
+                chat_handler=self.chat_handler,
+                n_gpu_layers=-1,
+                n_ctx=4096,
+                verbose=False,
+            )
+            self.current_model_path = model_path
+            self.last_load_time = time.time() - t0
+            print(f"[Llama.cpp] VLM loaded in {self.last_load_time:.2f}s")
+        except ImportError:
+            raise RuntimeError("Erreur: installez 'llama-cpp-python'")
+        except Exception as e:
+            raise RuntimeError(f"Erreur chargement VLM llama.cpp : {e}")
+
+    def describe_scene(
+        self,
+        images: List[Image.Image],
+        prompt: str,
+        max_tokens: int,
+    ) -> str:
+        if not self.llm:
+            raise RuntimeError("Modèle VLM llama.cpp non chargé")
+
+        contents = []
+        for img in images:
+            buffered = BytesIO()
+            img.save(buffered, format="JPEG")
+            img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            contents.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_str}"},
+                }
+            )
+
+        contents.append({"type": "text", "text": prompt})
+
+        response = self.llm.create_chat_completion(
+            messages=[
+                {
+                    "role": "user",
+                    "content": contents,
+                }
+            ],
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        return response["choices"][0]["message"]["content"].strip()
+
+    def unload_model(self):
+        self.llm = None
+        self.chat_handler = None
+        self.current_model_path = None
+        gc.collect()
+
+
 def get_vlm_engine() -> VLMProvider:
     """
-    Windows-only VLM engine selection.
-    Uses LlamaApiEngine (llama-server) or LlamaCliEngine (llama-cli) for Qwen3-VL.
+    Select the VLM engine.
+
+    Default behavior: always use the OpenAI-compatible HTTP API engine
+    (llama.cpp `llama-server`). This supports autostart when
+    `LLAMA_SERVER_AUTOSTART=1` and will connect to `LLAMA_API_BASE_URL` when set.
     """
-    # Prefer API engine with autostart
     engine = LlamaApiEngine()
     if (LLAMA_API_BASE_URL or "").strip():
-        logger.info("VLM Engine: LlamaApiEngine (remote API)")
+        logger.info("VLM Engine selected: %s (remote API)", engine.__class__.__name__)
     else:
         logger.info(
-            "VLM Engine: LlamaApiEngine (llama-server %s:%s, autostart=%s)",
+            "VLM Engine selected: %s (llama-server %s:%s, autostart=%s)",
+            engine.__class__.__name__,
             LLAMA_SERVER_HOST,
             LLAMA_SERVER_PORT,
             "on" if LLAMA_SERVER_AUTOSTART else "off",
@@ -1094,7 +1275,7 @@ def semantic_change_points_step_d(video_path: str) -> List[float]:
 
 def compute_audio_features_for_scene(
     scene: Dict[str, float],
-    transcript_segments: List[Dict[str, Any]],
+    whisper_segments: List[Dict[str, Any]],
 ) -> Dict[str, float]:
     start = scene["start"]
     end = scene["end"]
@@ -1102,7 +1283,7 @@ def compute_audio_features_for_scene(
 
     segs = [
         s
-        for s in transcript_segments
+        for s in whisper_segments
         if s["start"] < end and s["end"] > start
     ]
 
@@ -1274,127 +1455,6 @@ def _clean_llama_stdout(text: str) -> str:
     return "\n".join(cleaned).strip()
 
 
-def _router_fallback_from_text(raw: str) -> Dict[str, Any]:
-    """
-    If the model doesn't return JSON, guess content_type from raw text.
-    Keeps the pipeline functional even when the router is flaky.
-    """
-    t = (raw or "").lower()
-    if re.search(r"\b(table|spreadsheet|grid|rows|columns)\b", t):
-        return {"content_type": "table", "confidence": 0.35, "signals": ["fallback:table_keywords"]}
-    if re.search(r"\b(code|terminal|ide|function|class|import|def|console|stack trace)\b", t):
-        return {"content_type": "code", "confidence": 0.35, "signals": ["fallback:code_keywords"]}
-    if re.search(r"\b(slide|presentation|bullet|title)\b", t):
-        return {"content_type": "slides_text", "confidence": 0.35, "signals": ["fallback:slide_keywords"]}
-    if re.search(r"\b(talking head|webcam|person speaking|face)\b", t):
-        return {"content_type": "talking_head", "confidence": 0.35, "signals": ["fallback:talking_head_keywords"]}
-    if re.search(r"\b(ui|window|menu|toolbar|app)\b", t):
-        return {"content_type": "ui_app", "confidence": 0.25, "signals": ["fallback:ui_keywords"]}
-    return {"content_type": "other", "confidence": 0.1, "signals": ["fallback:unknown"]}
-
-
-def classify_scene_content_step_c(vlm_engine: Any, images: List[Image.Image]) -> Dict[str, Any]:
-    """
-    STEP C: Route scene by content type (code/table/slides/UI/talking-head).
-    """
-    if not images:
-        return {"content_type": "other", "confidence": 0.0, "signals": []}
-    
-    logger.info("[STEP C] Routing scene by content type (code/table/slides/UI/talking-head)...")
-    
-    strict_prompt = (
-        "You MUST output JSON only.\n"
-        "Do NOT output markdown.\n"
-        "Do NOT output explanations.\n\n"
-        + ROUTER_PROMPT
-    )
-    
-    try:
-        raw = vlm_engine.describe_scene(images, strict_prompt, max_tokens=220)
-        data = safe_json_parse(raw)
-        
-        if not data or "content_type" not in data:
-            snippet = (raw or "").strip().replace("\n", " ")
-            if len(snippet) > 180:
-                snippet = snippet[:180] + "..."
-            logger.warning(f"[STEP C] Router failed JSON. Raw snippet: {snippet}")
-            return _router_fallback_from_text(raw)
-        
-        ct = str(data.get("content_type") or "other").strip()
-        if ct not in ("code", "table", "slides_text", "ui_app", "talking_head", "other"):
-            ct = "other"
-        
-        conf = data.get("confidence", 0.0)
-        try:
-            conf = float(conf)
-        except Exception:
-            conf = 0.0
-        conf = max(0.0, min(1.0, conf))
-        
-        sig = data.get("signals", [])
-        if not isinstance(sig, list):
-            sig = []
-        
-        logger.info(f"[STEP C] Content type: {ct} (confidence={conf:.2f})")
-        return {"content_type": ct, "confidence": conf, "signals": sig}
-    
-    except Exception as e:
-        logger.error(f"[STEP C] Classification error: {e}")
-        return {"content_type": "other", "confidence": 0.0, "signals": [f"error:{str(e)[:50]}"]}
-
-
-def sample_candidate_frames(
-    image_list: List[Image.Image],
-    n_candidates: int = 10,
-) -> List[Dict[str, Any]]:
-    """
-    Return candidate frames from the provided image list.
-    Used for dense sampling in code/table scenes.
-    """
-    if not image_list:
-        return []
-    
-    n = max(1, min(len(image_list), n_candidates))
-    
-    if n >= len(image_list):
-        return [{"index": i, "image": img} for i, img in enumerate(image_list)]
-    
-    # Evenly sample n frames from the list
-    indices = [int(i * len(image_list) / n) for i in range(n)]
-    return [{"index": idx, "image": image_list[idx]} for idx in indices]
-
-
-def extract_code_or_table_step_c(
-    vlm_engine: Any,
-    content_type: str,
-    images: List[Image.Image],
-) -> Dict[str, Any]:
-    """
-    STEP C: Extract code or table artifacts from dense frames.
-    """
-    if not images or content_type not in ("code", "table"):
-        return {}
-    
-    prompt = EXTRACT_CODE_PROMPT if content_type == "code" else EXTRACT_TABLE_PROMPT
-    
-    try:
-        # Use the first 3 frames for extraction (they're already selected by density)
-        frames_to_analyze = images[:min(3, len(images))]
-        raw = vlm_engine.describe_scene(frames_to_analyze, prompt, max_tokens=900)
-        data = safe_json_parse(raw)
-        
-        if not data:
-            logger.warning(f"[STEP C] Extraction returned non-JSON; skipping artifact.")
-            return {}
-        
-        logger.info(f"[STEP C] Successfully extracted {content_type} artifact")
-        return data
-    
-    except Exception as e:
-        logger.warning(f"[STEP C] Artifact extraction failed: {e}")
-        return {}
-
-
 def _join_url(base_url: str, path: str) -> str:
     base = (base_url or "").rstrip("/")
     p = (path or "").lstrip("/")
@@ -1514,23 +1574,32 @@ async def lifespan(app: FastAPI):
             print(f"Warning: could not start llama-server: {e}")
 
     if RAM_MODE == "ram+":
-        print("RAM+ mode: preloading VLM...")
+        print("RAM+ mode: preloading models...")
         try:
             vlm_engine.load_model(ACTIVE_DEFAULT_VLM)
         except Exception as e:
             print(f"Warning: could not preload default VLM: {e}")
+        try:
+            t0 = time.time()
+            WHISPER_CACHE[DEFAULT_WHISPER_MODEL] = load_whisper_cuda(DEFAULT_WHISPER_MODEL)
+            print(f"Whisper '{DEFAULT_WHISPER_MODEL}' preloaded ({time.time()-t0:.2f}s)")
+        except Exception as e:
+            print(f"Warning: could not preload Whisper '{DEFAULT_WHISPER_MODEL}': {e}")
 
     yield
 
     if vlm_engine:
         vlm_engine.unload_model()
+    for k, m in list(WHISPER_CACHE.items()):
+        del WHISPER_CACHE[k]
+    WHISPER_CACHE.clear()
     gc.collect()
 
 
 app = FastAPI(
-    title="Qwen Video Analysis Worker",
-    description="Windows-only video analysis for lecture mode v4.0 (Qwen3-VL + external transcripts)",
-    version="4.0",
+    title="VideoContext Engine",
+    description="Microservice v3.19 (RAM modes + JSON robuste + nettoyage brut)",
+    version="3.19",
     lifespan=lifespan,
 )
 
@@ -1589,12 +1658,6 @@ async def get_last_analysis():
     return JSONResponse(content=data)
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for service monitoring."""
-    return {"status": "healthy", "service": "qwen_worker", "port": PORT_SERVEUR}
-
-
 @app.post("/api/v1/analyze")
 async def analyze_video(
     video_file: Union[UploadFile, str, None] = File(
@@ -1629,9 +1692,9 @@ async def analyze_video(
         ACTIVE_DEFAULT_VLM,
         description="Modèle VLM",
     ),
-    transcripts_json: Optional[str] = Form(
-        None,
-        description="Pre-computed transcripts JSON: [{\"start\": 0.0, \"end\": 5.2, \"text\": \"...\"}]. If provided, audio transcription is skipped.",
+    whisper_model: str = Form(
+        DEFAULT_WHISPER_MODEL,
+        description="Modèle Whisper",
     ),
 
     response_format: Literal["json", "text"] = Form(
@@ -1674,7 +1737,7 @@ async def analyze_video(
         description="Nombre max de tokens générés par le VLM pour le résumé global (par défaut 260).",
     ),
 
-    skip_audio: bool = Form(True, description="Skip audio processing (transcripts provided externally)"),
+    skip_audio: bool = Form(False),
     skip_visual: bool = Form(False),
     generate_txt: bool = Form(False),
 
@@ -1695,11 +1758,11 @@ async def analyze_video(
 
     request_start_time = time.time()
 
-    # Whisper timing removed
+    whisper_infer_time = 0.0
     vlm_infer_time = 0.0
-    # Whisper timing removed
+    whisper_load_time = 0.0
 
-    # Whisper removed
+    target_whisper = whisper_model
     target_vlm = vlm_model
     temp_path = None
     source_name = "Inconnu"
@@ -1758,15 +1821,46 @@ async def analyze_video(
             async with gpu_lock:
                 print("GPU lock acquired.")
 
-                # Parse external transcripts (from Parakeet or other source)
-                transcript_segments: List[Dict[str, Any]] = []
-                if transcripts_json and transcripts_json.strip():
-                    try:
-                        transcript_segments = json.loads(transcripts_json)
-                        logger.info(f"Loaded {len(transcript_segments)} transcript segments from input.")
-                    except Exception as e:
-                        logger.warning(f"Failed to parse transcripts_json: {e}")
-                        transcript_segments = []
+                whisper_segments: List[Dict[str, Any]] = []
+
+                if not skip_audio:
+                    if RAM_MODE == "ram+":
+                        if target_whisper in WHISPER_CACHE:
+                            w_model = WHISPER_CACHE[target_whisper]
+                            whisper_load_time = 0.0
+                            print(f"Whisper '{target_whisper}' already in RAM (cache).")
+                        else:
+                            print(f"Loading Whisper '{target_whisper}' into RAM (ram+)...")
+                            t0 = time.time()
+                            w_model = load_whisper_cuda(target_whisper)
+                            WHISPER_CACHE[target_whisper] = w_model
+                            whisper_load_time = time.time() - t0
+                            print(f"Whisper '{target_whisper}' loaded in {whisper_load_time:.2f}s (ram+)")
+                    else:
+                        print(f"Loading Whisper '{target_whisper}' (ram-)...")
+                        t0 = time.time()
+                        w_model = load_whisper_cuda(target_whisper)
+                        whisper_load_time = time.time() - t0
+                        print(f"Whisper '{target_whisper}' loaded in {whisper_load_time:.2f}s (ram-)")
+
+                    t_infer_start = time.time()
+                    audio_res = w_model.transcribe(
+                        temp_path,
+                        condition_on_previous_text=False,
+                        temperature=0.0,
+                        compression_ratio_threshold=1.8,
+                    )
+                    t_infer_end = time.time()
+                    whisper_infer_time = t_infer_end - t_infer_start
+                    print(f"Whisper inference (transcribe): {whisper_infer_time:.2f}s")
+
+                    whisper_segments = audio_res.get("segments", []) or []
+
+                    if RAM_MODE == "ram-":
+                        del w_model
+                        gc.collect()
+                else:
+                    whisper_segments = []
 
                 if not skip_visual or generate_summary:
                     t0 = time.time()
@@ -1794,8 +1888,8 @@ async def analyze_video(
                     end_s = scene["end"]
 
                     audio_parts = []
-                    if not skip_audio and transcript_segments:
-                        for s in transcript_segments:
+                    if not skip_audio and whisper_segments:
+                        for s in whisper_segments:
                             if s["start"] < end_s and s["end"] > start_s:
                                 txt = (s.get("text") or "").strip()
                                 if txt:
@@ -1806,11 +1900,11 @@ async def analyze_video(
                     audio_features = {}
                     if (
                         not skip_audio
-                        and transcript_segments
+                        and whisper_segments
                         and enable_audio_features
                     ):
                         audio_features = compute_audio_features_for_scene(
-                            scene, transcript_segments
+                            scene, whisper_segments
                         )
 
                     visual_description = ""
@@ -2017,7 +2111,7 @@ async def analyze_video(
         print("===== TIMING PROFILE (v3.19) =====")
         print(f"Total processing time: {process_duration:.2f}s")
         print(f"Total request time:    {total_request_time:.2f}s")
-        # Whisper removed - using external transcripts
+        print(f"Whisper: load={whisper_load_time:.2f}s, infer={whisper_infer_time:.2f}s")
         print(f"VLM:    load={vlm_load_time:.2f}s, infer={vlm_infer_time:.2f}s")
         print(f"RAM_MODE = {RAM_MODE}")
         print("================================")
@@ -2027,7 +2121,7 @@ async def analyze_video(
             "min_duration": min_scene_duration,
             "max_duration": max_scene_duration,
             "vlm": target_vlm,
-            # "whisper": removed (external transcripts)
+            "whisper": target_whisper,
             "resolution": vlm_resolution,
             "keyframes_per_scene": keyframes_per_scene,
             "vlm_max_tokens_scene": vlm_max_tokens_scene,
@@ -2055,6 +2149,11 @@ async def analyze_video(
         timings = {
             "total_process_time": round(process_duration, 3),
             "total_request_time": round(total_request_time, 3),
+            "whisper": {
+                "model": target_whisper,
+                "load_time": round(whisper_load_time, 3),
+                "inference_time": round(whisper_infer_time, 3),
+            },
             "vlm": {
                 "model": target_vlm,
                 "load_time": round(vlm_load_time, 3),
@@ -2081,7 +2180,7 @@ async def analyze_video(
                     "scene_count": len(final_segments),
                     "models": {
                         "vlm": target_vlm,
-                        # "whisper": removed (external transcripts)
+                        "whisper": target_whisper,
                     },
                     "skipped": {
                         "audio": skip_audio,
@@ -2117,574 +2216,72 @@ async def analyze_video(
         traceback.print_exc()
         raise HTTPException(500, f"Erreur interne: {str(e)}")
     finally:
-        # Ensure all file handles are released
-        try:
-            if 'cap' in locals():
-                cap.release()
-        except Exception:
-            pass
-        
         if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except PermissionError:
-                # File still in use, wait and retry
-                time.sleep(0.1)
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass  # Temp file cleanup failed, ignore
+            os.remove(temp_path)
 
-
-# ==================== NEW ENDPOINT: Sequential Frame Analysis (Phase 1) ====================
-
-@app.post("/api/v1/analyze_sequential")
-async def analyze_sequential(
-    frames_json: str = Form(..., description="JSON array of {timestamp_ms: int, image_base64: str}"),
-    transcripts_json: str = Form(..., description="Transcripts JSON: [{start: float, end: float, text: str, is_final: bool}]"),
-    previous_context_json: str = Form(
-        "",
-        description="Optional JSON object containing previous context to carry across requests",
-    ),
-    
-    config_json: str = Form(
-        '{"batch_size": 5, "duration_seconds": 120}',
-        description="Configuration JSON"
-    ),
-    
-    vlm_model: str = Form(ACTIVE_DEFAULT_VLM),
-    vlm_max_tokens: int = Form(500, ge=100, le=2048, description="Max tokens per batch"),
-):
-    """
-    Sequential frame analysis endpoint.
-    
-    Receives pre-captured frames (1 per second) and processes in batches of 5.
-    Passes context between batches for topic continuity.
-    Prints token usage and context to console.
-    """
-    start_time_total = time.time()
-    
-    try:
-        # Parse inputs
-        frames_data = json.loads(frames_json)
-        transcripts_data = json.loads(transcripts_json)
-        config = json.loads(config_json)
-        
-        batch_size = config.get("batch_size", 5)
-        duration_seconds = config.get("duration_seconds", 120)
-        
-        total_frames = len(frames_data)
-        total_batches = math.ceil(total_frames / batch_size)
-        
-        logger.info(f"[Sequential] Received {total_frames} frames, {len(transcripts_data)} transcripts")
-        logger.info(f"[Sequential] Processing in {total_batches} batches of {batch_size}")
-        
-        # Decode all frames to PIL Images
-        pil_frames = []
-        for frame_info in frames_data:
-            try:
-                img_data = base64.b64decode(frame_info["image_base64"])
-                img = Image.open(BytesIO(img_data)).convert("RGB")
-                # Resize for efficiency
-                max_dim = 768
-                if max(img.size) > max_dim:
-                    ratio = max_dim / max(img.size)
-                    new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-                    img = img.resize(new_size, Image.LANCZOS)
-                pil_frames.append({
-                    "timestamp_ms": frame_info["timestamp_ms"],
-                    "image": img
-                })
-            except Exception as e:
-                logger.warning(f"[Sequential] Failed to decode frame: {e}")
-        
-        logger.info(f"[Sequential] Decoded {len(pil_frames)} frames successfully")
-        
-        # Get VLM engine
-        vlm_engine = get_vlm_engine()
-        vlm_engine.load_model(vlm_model)
-        
-        # Process batches with context passing
-        batch_results = []
-        previous_context = None
-        if previous_context_json and str(previous_context_json).strip():
-            try:
-                previous_context = json.loads(previous_context_json)
-                if not isinstance(previous_context, dict):
-                    previous_context = None
-            except Exception:
-                previous_context = None
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        
-        for batch_idx in range(total_batches):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, len(pil_frames))
-            batch_frames = pil_frames[batch_start:batch_end]
-            
-            if not batch_frames:
-                continue
-            
-            # Get time range for this batch
-            time_start_ms = batch_frames[0]["timestamp_ms"]
-            time_end_ms = batch_frames[-1]["timestamp_ms"]
-            time_start_sec = time_start_ms / 1000.0
-            time_end_sec = time_end_ms / 1000.0
-            
-            # Get transcripts for this time range (both final and in-progress)
-            batch_transcripts = [
-                t for t in transcripts_data
-                if t.get("start", 0) * 1000 <= time_end_ms and t.get("end", 0) * 1000 >= time_start_ms
-            ]
-            transcript_text = " ".join([t.get("text", "") for t in batch_transcripts]) if batch_transcripts else "(no transcript)"
-            
-            # Build prompt with or without context
-            if batch_idx == 0 and not previous_context:
-                # First batch - no context
-                prompt = f"""Analyze this lecture segment ({time_start_sec:.1f}s - {time_end_sec:.1f}s).
-
-TRANSCRIPT: "{transcript_text[:500]}"
-
-Provide analysis in JSON format:
-{{
-  "topic": "main topic being discussed (3-8 words)",
-  "content_type": "code|table|slides_text|talking_head|ui_app|diagram|whiteboard|other",
-  "description": "2-3 sentence description of what's being explained (focus on content, not visual details)",
-  "has_structured_content": true/false,
-  "structured_hints": ["python code", "data table", etc.] or [],
-  "is_topic_complete": true/false
-}}
-
-                Do NOT mention frames, images, or screenshots. Describe the lecture content naturally.
-                Output valid JSON only."""
-            else:
-                # Subsequent batches - include context
-                ctx = previous_context
-                prompt = f"""Analyze this lecture segment ({time_start_sec:.1f}s - {time_end_sec:.1f}s).
-
-PREVIOUS CONTEXT:
-- Topic: "{ctx.get('topic', 'unknown')}"
-- Content: {ctx.get('content_type', 'unknown')}
-- Status: {"Topic ongoing" if not ctx.get('is_topic_complete', True) else "Topic completed"}
-- Previous summary: "{ctx.get('description', '')[:150]}"
-
-CURRENT TRANSCRIPT: "{transcript_text[:500]}"
-
-Provide analysis in JSON format:
-{{
-  "is_same_topic": true/false,
-  "topic": "topic name (use previous if same topic, or new name if different)",
-  "content_type": "code|table|slides_text|talking_head|ui_app|diagram|whiteboard|other",
-  "description": "2-3 sentences describing NEW information only (don't repeat previous)",
-  "has_structured_content": true/false,
-  "structured_hints": ["python code", "data table", etc.] or [],
-  "is_topic_complete": true/false
-}}
-
-Do NOT mention frames, images, or screenshots. Describe the lecture content naturally.
-Output valid JSON only."""
-            
-            # ===== PRINT CONTEXT TO CONSOLE =====
-            print("\n" + "="*80)
-            print(f"[BATCH {batch_idx + 1}/{total_batches}] Time: {time_start_sec:.1f}s - {time_end_sec:.1f}s")
-            print(f"[BATCH {batch_idx + 1}] Frames: {len(batch_frames)}, Transcripts: {len(batch_transcripts)}")
-            if previous_context:
-                print(f"[BATCH {batch_idx + 1}] CONTEXT PASSED FROM PREVIOUS:")
-                print(f"  - Topic: {previous_context.get('topic', 'N/A')}")
-                print(f"  - Content Type: {previous_context.get('content_type', 'N/A')}")
-                print(f"  - Is Complete: {previous_context.get('is_topic_complete', 'N/A')}")
-                print(f"  - Description: {previous_context.get('description', 'N/A')[:100]}...")
-            else:
-                print(f"[BATCH {batch_idx + 1}] NO PREVIOUS CONTEXT (first batch)")
-            print("-"*80)
-            
-            # Extract PIL images for VLM
-            batch_images = [f["image"] for f in batch_frames]
-            
-            # Call VLM
-            batch_start_time = time.time()
-            async with gpu_lock:
-                raw_response, prompt_tokens_actual, completion_tokens_actual = vlm_engine.describe_scene(
-                    batch_images,
-                    prompt,
-                    max_tokens=vlm_max_tokens
-                )
-            batch_inference_time = time.time() - batch_start_time
-            
-            # Use actual tokens from llama-cli
-            total_prompt_tokens += prompt_tokens_actual
-            total_completion_tokens += completion_tokens_actual
-            
-            # ===== PRINT TOKEN USAGE TO CONSOLE =====
-            print(f"[BATCH {batch_idx + 1}] INFERENCE TIME: {batch_inference_time:.2f}s")
-            print(f"[BATCH {batch_idx + 1}] TOKENS (actual from llama-cli):")
-            print(f"  - Prompt tokens: {prompt_tokens_actual}")
-            print(f"  - Completion tokens: {completion_tokens_actual}")
-            print(f"  - Running total: {total_prompt_tokens + total_completion_tokens} tokens")
-            print("="*80 + "\n")
-            
-            # Parse response
-            try:
-                # Clean response and parse JSON
-                cleaned = raw_response.strip()
-                # Try to extract JSON from response
-                json_match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
-                if json_match:
-                    result = json.loads(json_match.group())
-                else:
-                    result = json.loads(cleaned)
-            except json.JSONDecodeError as e:
-                logger.warning(f"[Sequential] Batch {batch_idx + 1} JSON parse failed: {e}")
-                result = {
-                    "topic": "unknown",
-                    "content_type": "other",
-                    "description": raw_response[:200],
-                    "has_structured_content": False,
-                    "structured_hints": [],
-                    "is_topic_complete": True
-                }
-            
-            # Add batch metadata
-            result["batch_id"] = batch_idx
-            result["time_start"] = time_start_sec
-            result["time_end"] = time_end_sec
-            result["inference_time"] = batch_inference_time
-            result["tokens_actual"] = {
-                "prompt": prompt_tokens_actual,
-                "completion": completion_tokens_actual
-            }
-            
-            batch_results.append(result)
-            
-            # Prepare context for next batch
-            previous_context = {
-                "topic": result.get("topic", "unknown"),
-                "content_type": result.get("content_type", "other"),
-                "description": result.get("description", "")[:200],
-                "is_topic_complete": result.get("is_topic_complete", True),
-                "has_structured_content": result.get("has_structured_content", False),
-                "batch_id": batch_idx
-            }
-            
-            logger.info(f"[Sequential] Batch {batch_idx + 1}/{total_batches} complete: {result.get('topic', 'unknown')}")
-        
-        processing_time = time.time() - start_time_total
-        
-        # ===== PRINT FINAL SUMMARY TO CONSOLE =====
-        print("\n" + "="*80)
-        print("[SEQUENTIAL ANALYSIS COMPLETE]")
-        print(f"  Total batches: {total_batches}")
-        print(f"  Total frames: {total_frames}")
-        print(f"  Total processing time: {processing_time:.2f}s")
-        print(f"  Total tokens (actual): {total_prompt_tokens + total_completion_tokens}")
-        print(f"    - Prompt tokens: {total_prompt_tokens}")
-        print(f"    - Completion tokens: {total_completion_tokens}")
-        print("="*80 + "\n")
-        
-        return JSONResponse(content={
-            "status": "success",
-            "analysis": {
-                "batches": batch_results,
-                "total_batches": total_batches,
-                "total_frames": total_frames,
-                "processing_time": processing_time,
-                "next_context": previous_context,
-                "tokens_total": {
-                    "prompt": total_prompt_tokens,
-                    "completion": total_completion_tokens,
-                    "total": total_prompt_tokens + total_completion_tokens
-                },
-                "model_info": {
-                    "model_name": vlm_model,
-                    "engine": "llama_cpp"
-                }
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"[Sequential] Error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ==================== NEW ENDPOINT: Topic Summary (Map-Reduce Reduce Step) ====================
-
-@app.post("/api/v1/summarize_topics")
-async def summarize_topics(
-    batches_json: str = Form(..., description="JSON array of batch analysis objects from /analyze_sequential"),
-    vlm_model: str = Form(ACTIVE_DEFAULT_VLM),
-    max_tokens: int = Form(-1, description="Max tokens for the final summary"),
-):
-    """
-    Reduce step: given per-batch (5-frame) analyses, produce a single coherent summary of topics.
-    This is text-only (no images), using the same VLM model as a regular LLM call.
-    """
-    try:
-        batches = json.loads(batches_json)
-        if not isinstance(batches, list):
-            raise ValueError("batches_json must be a JSON array")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid batches_json: {e}")
-
-    # Build a compact log for the model (avoid huge prompts).
-    lines = []
-    for b in batches:
-        if not isinstance(b, dict):
-            continue
-        ts0 = b.get("time_start")
-        ts1 = b.get("time_end")
-        topic = str(b.get("topic", "unknown"))
-        desc = str(b.get("description", "")).strip().replace("\n", " ")
-        if len(desc) > 220:
-            desc = desc[:220] + "…"
-        try:
-            if ts0 is not None and ts1 is not None:
-                lines.append(f"- [{float(ts0):.1f}s–{float(ts1):.1f}s] {topic}: {desc}")
-            else:
-                lines.append(f"- {topic}: {desc}")
-        except Exception:
-            lines.append(f"- {topic}: {desc}")
-
-    context_log = "\n".join(lines[:500])  # hard cap
-
-    prompt = f"""You are given sequential batch analyses of a lecture video.
-Each line contains an approximate time window, a detected topic, and a short description of NEW information.
-
-TASK:
-1) Merge adjacent/related batches into distinct TOPICS.
-2) For each topic, summarize the key points (bullets) and list the time ranges where it occurs.
-3) Produce an overall high-level summary at the end.
-
-OUTPUT FORMAT (Markdown):
-## Topics
-### <Topic Name>
-- Time ranges: ...
-- Key points:
-  - ...
-
-## Overall Summary
-<3-8 bullet points, concise>
-
-BATCH LOG:
-{context_log}
-"""
-
-    try:
-        vlm_engine = get_vlm_engine()
-        vlm_engine.load_model(vlm_model)
-
-        async with gpu_lock:
-            raw, prompt_tokens, completion_tokens = vlm_engine.describe_scene([], prompt, max_tokens=int(max_tokens))
-
-        summary_md = (raw or "").strip()
-        return JSONResponse(content={
-            "status": "success",
-            "summary_markdown": summary_md,
-            "tokens_actual": {
-                "prompt": prompt_tokens,
-                "completion": completion_tokens,
-                "total": prompt_tokens + completion_tokens,
-            },
-            "model_info": {"model_name": vlm_model, "engine": "llama_cpp"},
-        })
-    except Exception as e:
-        logger.error(f"[SummarizeTopics] Error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ==================== NEW ENDPOINT: Analyze Pre-Extracted Keyframes ====================
-
-@app.post("/api/v1/analyze_keyframes")
-async def analyze_keyframes(
-    keyframes: List[UploadFile] = File(..., description="Keyframe images (JPEG)"),
-    scenes_metadata: str = Form(..., description="Scene metadata JSON"),
-    transcripts_json: Optional[str] = Form(None, description="Transcripts JSON"),
-    
-    visual_user_prompt: str = Form(
-        "Describe factually what happens in the scene from the images, focusing on gestures, posture, mood, and context. "
-        "Max 80 words. Respond in English.",
-        max_length=1500,
-    ),
-    
-    vlm_model: str = Form(ACTIVE_DEFAULT_VLM),
-    vlm_resolution: int = Form(DEFAULT_RESOLUTION, ge=128, le=2048),
-    vlm_max_tokens_scene: int = Form(DEFAULT_VLM_MAX_TOKENS_SCENE, ge=16, le=2048),
-    
-    skip_visual: bool = Form(False),
-):
-    """
-    Analyze pre-extracted keyframes (skips scene detection step).
-    Used by keyframe_worker pipeline for faster processing.
-    
-    Request body:
-    - keyframes: Array of JPEG images
-    - scenes_metadata: JSON array with scene timing info
-    - transcripts_json: Optional transcripts
-    
-    Response: Same format as /api/v1/analyze
-    """
-    start_time_total = time.time()
-    
-    try:
-        # Parse scene metadata
-        scenes_meta = json.loads(scenes_metadata)
-        logger.info(f"[AnalyzeKeyframes] Processing {len(keyframes)} keyframes for {len(scenes_meta)} scenes")
-        
-        # Parse transcripts if provided
-        transcript_segments = []
-        if transcripts_json:
-            try:
-                trans_data = json.loads(transcripts_json)
-                transcript_segments = [
-                    {"start": float(t.get("start_time", 0)), "end": float(t.get("end_time", 0)), "text": str(t.get("text", ""))}
-                    for t in trans_data
-                ]
-            except Exception as e:
-                logger.warning(f"[AnalyzeKeyframes] Failed to parse transcripts: {e}")
-        
-        # Use global VLM engine
-        global vlm_engine
-        if vlm_engine is None:
-            vlm_engine = get_vlm_engine()
-        
-        async with gpu_lock:
-            vlm_engine.load_model(vlm_model)
-        
-        # Process each scene with its keyframes
-        scene_analyses = []
-        keyframe_index = 0
-        
-        for scene_meta in scenes_meta:
-            scene_id = scene_meta["scene_id"]
-            start_time_sec = scene_meta["start_time"]
-            end_time_sec = scene_meta["end_time"]
-            duration = scene_meta["duration"]
-            keyframe_times = scene_meta["keyframe_times"]
-            
-            # Extract keyframes for this scene
-            scene_keyframes = []
-            for kf_time in keyframe_times:
-                if keyframe_index >= len(keyframes):
-                    logger.warning(f"[AnalyzeKeyframes] Not enough keyframes provided (expected {len(keyframe_times)}, got {keyframe_index})")
-                    break
-                    
-                # Read keyframe image
-                kf_file = keyframes[keyframe_index]
-                kf_data = await kf_file.read()
-                img = Image.open(BytesIO(kf_data))
-                
-                # Resize if needed
-                if img.width > vlm_resolution or img.height > vlm_resolution:
-                    img.thumbnail((vlm_resolution, vlm_resolution), Image.Resampling.LANCZOS)
-                
-                scene_keyframes.append(img)
-                keyframe_index += 1
-            
-            if not scene_keyframes:
-                logger.warning(f"[AnalyzeKeyframes] No keyframes for scene {scene_id}, skipping")
-                continue
-            
-            # Get transcripts for this scene
-            scene_transcripts = [
-                t for t in transcript_segments
-                if t["start"] <= end_time_sec and t["end"] >= start_time_sec
-            ]
-            
-            # Classify scene content
-            content_classification = classify_scene_content_step_c(vlm_engine, scene_keyframes)
-            content_type = content_classification.get("content_type", "other")
-            confidence = content_classification.get("confidence", 0.0)
-            
-            # Generate description with VLM
-            if skip_visual:
-                description = "[Visual analysis skipped by user]"
-                artifacts = {"code_blocks": [], "tables": [], "diagrams": []}
-            else:
-                # Build prompt with transcripts
-                if scene_transcripts:
-                    transcript_text = " ".join([t["text"] for t in scene_transcripts])
-                    full_prompt = f"{visual_user_prompt}\n\nTranscript: {transcript_text}"
-                else:
-                    full_prompt = visual_user_prompt
-                
-                # Call VLM
-                async with gpu_lock:
-                    raw_description = vlm_engine.describe_scene(
-                        scene_keyframes,
-                        full_prompt,
-                        max_tokens=vlm_max_tokens_scene
-                    )
-                
-                description = raw_description.strip()
-                
-                # Extract artifacts based on content type
-                artifacts = {
-                    "code_blocks": [],
-                    "tables": [],
-                    "diagrams": []
-                }
-                
-                # If code or table detected with high confidence, perform dense sampling + extraction
-                if content_type in ("code", "table") and confidence > 0.5:
-                    logger.info(f"[STEP C] Dense sampling for {content_type} extraction...")
-                    # Get more candidate frames for dense analysis (8-10 frames)
-                    dense_candidates = sample_candidate_frames(scene_keyframes, n_candidates=10)
-                    if dense_candidates:
-                        dense_images = [c["image"] for c in dense_candidates]
-                        extracted = extract_code_or_table_step_c(vlm_engine, content_type, dense_images)
-                        
-                        if content_type == "code" and extracted:
-                            artifacts["code_blocks"].append({
-                                "language": extracted.get("language", ""),
-                                "code": extracted.get("code", ""),
-                                "confidence": confidence,
-                            })
-                        elif content_type == "table" and extracted:
-                            artifacts["tables"].append({
-                                "format": extracted.get("format", "markdown"),
-                                "content": extracted.get("table", ""),
-                                "confidence": confidence,
-                            })
-            
-            # Build scene analysis
-            scene_analyses.append({
-                "scene_id": scene_id,
-                "start_frame": int(start_time_sec * 25),  # Assume 25fps
-                "end_frame": int(end_time_sec * 25),
-                "start_time": start_time_sec,
-                "end_time": end_time_sec,
-                "keyframes": [int(t * 25) for t in keyframe_times],
-                "content_type": content_type,
-                "confidence": confidence,
-                "description": description,
-                "artifacts": artifacts,
-            })
-        
-        processing_time = time.time() - start_time_total
-        
-        logger.info(f"[AnalyzeKeyframes] Completed {len(scene_analyses)} scenes in {processing_time:.2f}s")
-        
-        return {
-            "status": "success",
-            "analysis": {
-                "scenes": scene_analyses,
-                "processing_time": processing_time,
-                "model_info": {
-                    "model_name": vlm_model,
-                    "engine": "llama_cpp",
-                    "inference_time": processing_time,
-                },
-            },
-        }
-        
-    except Exception as e:
-        logger.error(f"[AnalyzeKeyframes] Error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ==================== Server Startup ====================
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
-    
-    # Start FastAPI server
-    uvicorn.run(app, host="0.0.0.0", port=PORT_SERVEUR)
+    from starlette.datastructures import UploadFile
+
+    def _run_local_test() -> int:
+        global vlm_engine
+
+        video_path = Path(LOCAL_TEST_VIDEO_PATH)
+        if not video_path.is_file():
+            print(f"Error: test video not found: {video_path}")
+            return 2
+
+        if vlm_engine is None:
+            vlm_engine = get_vlm_engine()
+        if isinstance(vlm_engine, LlamaApiEngine) and LLAMA_SERVER_AUTOSTART and LLAMA_SERVER_PRESTART:
+            try:
+                vlm_engine.load_model(DEFAULT_VLM_MODEL_GGUF)
+            except Exception as e:
+                print(f"Warning: could not start llama-server: {e}")
+
+        out_path = Path(__file__).resolve().parent / "local_test_output.json"
+
+        with video_path.open("rb") as f:
+            upload = UploadFile(filename=video_path.name, file=f)
+            result = asyncio.run(
+                analyze_video(
+                    video_file=upload,
+                    video_url="",
+                    visual_user_prompt="Describe the scene factually from the frames. Max 80 words.",
+                    summary_user_prompt="Summarize the full video based on all scenes. Max 120 words.",
+                    vlm_model=DEFAULT_VLM_MODEL_GGUF,
+                    whisper_model=DEFAULT_WHISPER_MODEL,
+                    response_format="json",
+                    vlm_resolution=DEFAULT_RESOLUTION,
+                    scene_threshold=DEFAULT_SCENE_THRESHOLD,
+                    min_scene_duration=DEFAULT_MIN_DURATION,
+                    max_scene_duration=DEFAULT_MAX_DURATION,
+                    keyframes_per_scene=DEFAULT_KEYFRAMES_PER_SCENE,
+                    vlm_max_tokens_scene=DEFAULT_VLM_MAX_TOKENS_SCENE,
+                    vlm_max_tokens_summary=DEFAULT_VLM_MAX_TOKENS_SUMMARY,
+                    skip_audio=False,
+                    skip_visual=False,
+                    generate_txt=False,
+                    enable_audio_features=True,
+                    generate_summary=True,
+                )
+            )
+
+        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(str(out_path))
+        return 0
+
+    parser = argparse.ArgumentParser(description="VideoContext Engine v3.19 (server or local test).")
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help=f"Run FastAPI server on 0.0.0.0:{PORT_SERVEUR} (default runs local test on LOCAL_TEST_VIDEO_PATH)",
+    )
+    args = parser.parse_args()
+
+    if args.server:
+        uvicorn.run(app, host="0.0.0.0", port=PORT_SERVEUR)
+    else:
+        raise SystemExit(_run_local_test())
