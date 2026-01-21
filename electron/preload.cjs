@@ -163,6 +163,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('whisper:dispose');
   },
 
+  // Network detection API
+  getLocalIP: async () => {
+    return await ipcRenderer.invoke('network:get-local-ip');
+  },
+
+  getPublicIP: async () => {
+    return await ipcRenderer.invoke('network:get-public-ip');
+  },
+
+  // Qwen control API
+  startQwenRemote: async () => {
+    return await ipcRenderer.invoke('qwen:start-remote');
+  },
+
+  stopQwen: async () => {
+    return await ipcRenderer.invoke('qwen:stop');
+  },
+
   // =====================================================
   // LECTURE OVERLAY API (separate from Interview overlay)
   // =====================================================

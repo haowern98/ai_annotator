@@ -1,7 +1,36 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Server, Monitor, Wifi, Globe, Copy, Lightbulb, Check, X, Plug2 } from 'lucide-react';
+import { QwenHttpClient } from '../services/qwenHttpClient';
 
 type Mode = 'server' | 'client';
+
+interface RemoteConfig {
+  mode: 'local' | 'server' | 'client';
+  remoteUrl?: string;
+  lastConnected?: number;
+}
+
+const REMOTE_CONFIG_KEY = 'qwen_remote_config';
+
+const saveRemoteConfig = (config: RemoteConfig) => {
+  try {
+    localStorage.setItem(REMOTE_CONFIG_KEY, JSON.stringify(config));
+  } catch (e) {
+    console.error('Failed to save remote config:', e);
+  }
+};
+
+const loadRemoteConfig = (): RemoteConfig | null => {
+  try {
+    const saved = localStorage.getItem(REMOTE_CONFIG_KEY);
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('Failed to load remote config:', e);
+  }
+  return null;
+};
 
 interface RemoteProcessingModalProps {
   isOpen: boolean;
@@ -12,10 +41,46 @@ interface RemoteProcessingModalProps {
 const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, onClose, onSuccess }) => {
   const [mode, setMode] = useState<Mode>('server');
   const [serverUrl, setServerUrl] = useState('');
-  const [localIP, setLocalIP] = useState('192.168.1.100'); // Will be populated by IPC
-  const [publicIP, setPublicIP] = useState('Loading...'); // Will be populated by API
+  const [localIP, setLocalIP] = useState('Detecting...');
+  const [publicIP, setPublicIP] = useState('Loading...');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [latency, setLatency] = useState<number | null>(null);
+
+  // Load saved config and detect IPs on mount
+  useEffect(() => {
+    if (!isOpen) return;
+
+    // Load saved config
+    const savedConfig = loadRemoteConfig();
+    if (savedConfig?.mode === 'client' && savedConfig.remoteUrl) {
+      setServerUrl(savedConfig.remoteUrl);
+    }
+
+    // Detect local and public IPs
+    const detectIPs = async () => {
+      if (window.electronAPI?.getLocalIP) {
+        const localResult = await window.electronAPI.getLocalIP();
+        if (localResult.success) {
+          setLocalIP(localResult.ip);
+        } else {
+          setLocalIP('Not detected');
+        }
+      }
+
+      if (window.electronAPI?.getPublicIP) {
+        const publicResult = await window.electronAPI.getPublicIP();
+        if (publicResult.success) {
+          setPublicIP(publicResult.ip);
+        } else {
+          setPublicIP('Failed to detect');
+        }
+      }
+    };
+
+    detectIPs();
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -25,15 +90,101 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleStartServer = () => {
-    // Server mode: Start Qwen server with --host 0.0.0.0 and close modal
-    // TODO: IPC call to start server
-    onClose();
+  const handleTestConnectionServer = async () => {
+    setConnectionStatus('testing');
+    setLatency(null);
+    
+    try {
+      const startTime = Date.now();
+      const client = new QwenHttpClient('http://127.0.0.1:7556');
+      
+      await client.connect({
+        onReady: () => {
+          const latencyMs = Date.now() - startTime;
+          setLatency(latencyMs);
+          setConnectionStatus('connected');
+        },
+        onError: (msg) => {
+          console.error('Server connection test failed:', msg);
+          setConnectionStatus('error');
+        }
+      });
+    } catch (error) {
+      console.error('Server connection test error:', error);
+      setConnectionStatus('error');
+    }
+  };
+
+  const handleTestConnectionClient = async () => {
+    if (!serverUrl) {
+      setConnectionStatus('error');
+      return;
+    }
+
+    setConnectionStatus('testing');
+    setLatency(null);
+    
+    try {
+      const startTime = Date.now();
+      const client = new QwenHttpClient(serverUrl);
+      
+      await client.connect({
+        onReady: () => {
+          const latencyMs = Date.now() - startTime;
+          setLatency(latencyMs);
+          setConnectionStatus('connected');
+        },
+        onError: (msg) => {
+          console.error('Client connection test failed:', msg);
+          setConnectionStatus('error');
+        }
+      });
+    } catch (error) {
+      console.error('Client connection test error:', error);
+      setConnectionStatus('error');
+    }
+  };
+
+  const handleStartServer = async () => {
+    if (!window.electronAPI?.startQwenRemote) {
+      console.error('Electron API not available');
+      return;
+    }
+
+    setIsStarting(true);
+    
+    try {
+      const result = await window.electronAPI.startQwenRemote();
+      
+      if (result.success) {
+        // Save server mode config
+        saveRemoteConfig({ mode: 'server', lastConnected: Date.now() });
+        onClose();
+      } else {
+        console.error('Failed to start server:', result.error);
+        alert(`Failed to start server: ${result.error}`);
+      }
+    } catch (error) {
+      console.error('Server start error:', error);
+      alert('Failed to start server');
+    } finally {
+      setIsStarting(false);
+    }
   };
 
   const handleSaveAndConnect = () => {
-    // Client mode: Save config, close modal, and trigger upload modal
-    // TODO: Save serverUrl to localStorage
+    if (!serverUrl) {
+      alert('Please enter a server URL');
+      return;
+    }
+
+    // Save client mode config
+    saveRemoteConfig({
+      mode: 'client',
+      remoteUrl: serverUrl,
+      lastConnected: Date.now()
+    });
+
     onClose();
     onSuccess?.(); // Opens UploadLectureModal
   };
@@ -346,6 +497,8 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
               {/* Test Connection */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <button
+                  onClick={handleTestConnectionClient}
+                  disabled={!serverUrl || connectionStatus === 'testing'}
                   style={{
                     padding: '10px 20px',
                     backgroundColor: '#0E72ED',
@@ -354,17 +507,18 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                     color: '#ffffff',
                     fontSize: '13px',
                     fontWeight: 500,
-                    cursor: 'pointer',
+                    cursor: (!serverUrl || connectionStatus === 'testing') ? 'not-allowed' : 'pointer',
+                    opacity: (!serverUrl || connectionStatus === 'testing') ? 0.5 : 1,
                     display: 'flex',
                     alignItems: 'center',
                     gap: '6px'
                   }}
                 >
                   <Plug2 size={16} />
-                  Test Connection
+                  {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
                 </button>
 
-                {connectionStatus === 'connected' && (
+                {connectionStatus === 'connected' && latency !== null && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <div
                       style={{
@@ -375,7 +529,7 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                       }}
                     />
                     <span style={{ fontSize: '13px', color: '#10b981' }}>
-                      Connected (45ms)
+                      Connected ({latency}ms)
                     </span>
                   </div>
                 )}
@@ -457,6 +611,8 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
           {mode === 'server' ? (
             <>
               <button
+                onClick={handleTestConnectionServer}
+                disabled={connectionStatus === 'testing'}
                 style={{
                   padding: '10px 24px',
                   backgroundColor: '#333333',
@@ -465,17 +621,19 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                   color: '#ffffff',
                   fontSize: '14px',
                   fontWeight: 500,
-                  cursor: 'pointer',
+                  cursor: connectionStatus === 'testing' ? 'not-allowed' : 'pointer',
+                  opacity: connectionStatus === 'testing' ? 0.5 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   gap: '6px'
                 }}
               >
                 <Plug2 size={16} />
-                Test Connection
+                {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
               </button>
               <button
                 onClick={handleStartServer}
+                disabled={isStarting}
                 style={{
                   padding: '10px 24px',
                   backgroundColor: '#10b981',
@@ -484,19 +642,22 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                   color: '#ffffff',
                   fontSize: '14px',
                   fontWeight: 500,
-                  cursor: 'pointer',
+                  cursor: isStarting ? 'not-allowed' : 'pointer',
+                  opacity: isStarting ? 0.5 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   gap: '6px'
                 }}
               >
                 <Check size={16} />
-                Start Server
+                {isStarting ? 'Starting...' : 'Start Server'}
               </button>
             </>
           ) : (
             <>
               <button
+                onClick={handleTestConnectionClient}
+                disabled={!serverUrl || connectionStatus === 'testing'}
                 style={{
                   padding: '10px 24px',
                   backgroundColor: '#333333',
@@ -505,14 +666,15 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                   color: '#ffffff',
                   fontSize: '14px',
                   fontWeight: 500,
-                  cursor: 'pointer',
+                  cursor: (!serverUrl || connectionStatus === 'testing') ? 'not-allowed' : 'pointer',
+                  opacity: (!serverUrl || connectionStatus === 'testing') ? 0.5 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   gap: '6px'
                 }}
               >
                 <Plug2 size={16} />
-                Test Connection
+                {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
               </button>
               <button
                 onClick={handleSaveAndConnect}

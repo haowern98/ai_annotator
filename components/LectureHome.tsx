@@ -80,7 +80,23 @@ const LectureHome: React.FC<LectureHomeProps> = ({ onSessionStart, onSidebarMode
 
     // Batch clients: keep these independent from live capture/session manager
     const uploadParakeet = new ParakeetBatchTranscriber(addLog);
-    const uploadQwen = new QwenHttpClient('http://127.0.0.1:7556');
+    
+    // Load remote processing config to determine Qwen URL
+    let qwenUrl = 'http://127.0.0.1:7556'; // default local
+    try {
+      const remoteConfig = localStorage.getItem('qwen_remote_config');
+      if (remoteConfig) {
+        const config = JSON.parse(remoteConfig);
+        if (config.mode === 'client' && config.remoteUrl) {
+          qwenUrl = config.remoteUrl;
+          addLog(`[Upload Queue] Using remote Qwen server: ${qwenUrl}`, LogLevel.INFO);
+        }
+      }
+    } catch (e) {
+      addLog('[Upload Queue] Failed to load remote config, using local server', LogLevel.WARN);
+    }
+    
+    const uploadQwen = new QwenHttpClient(qwenUrl);
     uploadParakeetRef.current = uploadParakeet;
 
     const initUploadClients = async () => {

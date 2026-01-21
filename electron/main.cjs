@@ -11,6 +11,8 @@ const { setupWhisperHandlers } = require('./ipc/whisper.cjs');
 const { setupRecordingHandlers } = require('./ipc/recording.cjs');
 const { setupFileUtilsHandlers } = require('./ipc/fileUtils.cjs');
 const { setupYouTubeHandlers } = require('./ipc/youtube.cjs');
+const { setupNetworkHandlers } = require('./ipc/network.cjs');
+const { setupQwenControlHandlers } = require('./ipc/qwenControl.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
 // Only set command-line switches if app is properly loaded
@@ -476,6 +478,10 @@ function createWindow() {
       return { success: false, error: err.message };
     }
   });
+
+  // Network and Qwen control handlers
+  setupNetworkHandlers(ipcMain);
+  setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeout);
 
   // Setup IPC handlers
   setupScreenCaptureHandlers(ipcMain, desktopCapturer);

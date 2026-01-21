@@ -50,6 +50,14 @@ interface ElectronAPI {
   whisperTranscribe: (audioBuffer: ArrayBuffer, options: any) => Promise<any>;
   whisperDispose: () => Promise<void>;
 
+  // Network detection API
+  getLocalIP: () => Promise<{success: boolean; ip?: string; error?: string}>;
+  getPublicIP: () => Promise<{success: boolean; ip?: string; error?: string}>;
+
+  // Qwen control API
+  startQwenRemote: () => Promise<{success: boolean; error?: string}>;
+  stopQwen: () => Promise<{success: boolean; message?: string; error?: string}>;
+
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;
 
