@@ -1,22 +1,23 @@
 const path = require('path');
 const { spawn } = require('child_process');
 
-let qwenProcess = null;
-
 /**
  * Setup Qwen control IPC handlers
  * @param {Electron.IpcMain} ipcMain
  * @param {Function} getVenvPythonPath 
  * @param {Function} fetchJsonWithTimeout 
+ * @param {Function} getQwenProcess - Get the main qwenProcess from main.cjs
+ * @param {Function} setQwenProcess - Set the main qwenProcess in main.cjs
  */
-function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeout) {
+function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeout, getQwenProcess, setQwenProcess) {
   // Start Qwen in remote mode (0.0.0.0)
   ipcMain.handle('qwen:start-remote', async () => {
     try {
-      // Stop existing Qwen process if running
-      if (qwenProcess && !qwenProcess.killed) {
-        console.log('[Qwen] Stopping existing process for remote mode...');
-        qwenProcess.kill();
+      // Stop existing Qwen process from app startup
+      const existingProcess = getQwenProcess();
+      if (existingProcess && !existingProcess.killed) {
+        console.log('[Qwen] Stopping startup process (127.0.0.1) for remote mode (0.0.0.0)...');
+        existingProcess.kill();
         await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for cleanup
       }
 
@@ -25,7 +26,7 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
 
       console.log('[Qwen] Starting in remote mode (0.0.0.0)...');
       
-      qwenProcess = spawn(
+      const newProcess = spawn(
         pythonCmd,
         ['-m', 'uvicorn', 'server:app', '--host', '0.0.0.0', '--port', qwenPort, '--log-level', 'info'],
         {
@@ -36,12 +37,15 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
         }
       );
 
-      qwenProcess.stdout?.on('data', (buf) => {
+      // Update main.cjs qwenProcess reference
+      setQwenProcess(newProcess);
+
+      newProcess.stdout?.on('data', (buf) => {
         const chunk = String(buf);
         chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.log(`[QwenWorker] ${l}`));
       });
 
-      qwenProcess.stderr?.on('data', (buf) => {
+      newProcess.stderr?.on('data', (buf) => {
         const chunk = String(buf);
         chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(`[QwenWorker] ${l}`));
       });
@@ -75,9 +79,11 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
   // Stop Qwen process
   ipcMain.handle('qwen:stop', async () => {
     try {
-      if (qwenProcess && !qwenProcess.killed) {
+      const existingProcess = getQwenProcess();
+      if (existingProcess && !existingProcess.killed) {
         console.log('[Qwen] Stopping process...');
-        qwenProcess.kill();
+        existingProcess.kill();
+        setQwenProcess(null);
         await new Promise(resolve => setTimeout(resolve, 1000));
         return { success: true };
       }
@@ -87,12 +93,6 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
       return { success: false, error: error.message };
     }
   });
-
-  // Store reference for cleanup
-  return {
-    getQwenProcess: () => qwenProcess,
-    setQwenProcess: (proc) => { qwenProcess = proc; }
-  };
 }
 
 module.exports = { setupQwenControlHandlers };

@@ -481,7 +481,13 @@ function createWindow() {
 
   // Network and Qwen control handlers
   setupNetworkHandlers(ipcMain);
-  setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeout);
+  setupQwenControlHandlers(
+    ipcMain, 
+    getVenvPythonPath, 
+    fetchJsonWithTimeout,
+    () => qwenProcess,
+    (proc) => { qwenProcess = proc; }
+  );
 
   // Setup IPC handlers
   setupScreenCaptureHandlers(ipcMain, desktopCapturer);
