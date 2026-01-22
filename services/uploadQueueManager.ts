@@ -292,7 +292,22 @@ export class UploadQueueManager {
 
       try {
         // Upload video to server for processing
-        const result = await this.qwenClient.uploadVideoToRemoteServer(video.file);
+        const result = await this.qwenClient.uploadVideoToRemoteServer(
+          video.file,
+          (uploadedBytes, totalBytes, percentage) => {
+            // Upload progress: 0-30% of total
+            video.progress.percentage = Math.floor(percentage * 0.3);
+            const uploadedMB = (uploadedBytes / 1024 / 1024).toFixed(1);
+            const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
+            video.progress.phase = `Uploading to server (${uploadedMB}MB / ${totalMB}MB)`;
+            this.notifyQueueUpdate();
+          }
+        );
+
+        // Upload complete, server is processing (30-90%)
+        video.progress.percentage = 30;
+        video.progress.phase = 'Server processing (extracting, transcribing, analyzing)';
+        this.notifyQueueUpdate();
 
         this.log(`Remote processing complete: ${video.fileName}`, LogLevel.SUCCESS);
 

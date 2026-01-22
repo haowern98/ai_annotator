@@ -2724,7 +2724,7 @@ async def receive_client_video(
             [str(venv_python), str(script_path), "--video-path", temp_path],
             capture_output=True,
             text=True,
-            timeout=1800  # 30 minute timeout
+            timeout=10800  # 180 minute timeout for 2-hour videos
         )
         
         if result.returncode != 0:

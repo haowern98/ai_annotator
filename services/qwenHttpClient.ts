@@ -414,7 +414,10 @@ export class QwenHttpClient {
    * Upload video to remote server for processing
    * Server extracts frames, transcribes with Parakeet, analyzes with Qwen
    */
-  async uploadVideoToRemoteServer(videoFile: File): Promise<{
+  async uploadVideoToRemoteServer(
+    videoFile: File,
+    onProgress?: (uploadedBytes: number, totalBytes: number, percentage: number) => void
+  ): Promise<{
     transcripts: any[];
     batches: any[];
     words: any[];
@@ -423,41 +426,57 @@ export class QwenHttpClient {
       throw new Error('This method only works with remote servers');
     }
 
-    const formData = new FormData();
-    formData.append('video_file', videoFile);
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('video_file', videoFile);
 
-    try {
-      const response = await fetch(`${this.baseUrl}/api/v1/receive_client_video`, {
-        method: 'POST',
-        body: formData,
-        signal: AbortSignal.timeout(1800000), // 30 minute timeout
+      // Upload progress
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && onProgress) {
+          const percentage = (e.loaded / e.total) * 100;
+          onProgress(e.loaded, e.total, percentage);
+        }
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Server processing failed (${response.status}): ${errorText}`);
-      }
-
-      const result = await response.json();
-
-      if (result.status !== 'success') {
-        throw new Error(`Server processing error: ${result.message || 'Unknown error'}`);
-      }
-
-      return {
-        transcripts: result.transcripts || [],
-        batches: result.batches || [],
-        words: result.words || [],
-      };
-    } catch (error) {
-      if (error instanceof Error) {
-        if (error.name === 'TimeoutError') {
-          throw new Error('Server processing timeout (30 minutes exceeded)');
+      // Request completed
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const result = JSON.parse(xhr.responseText);
+            if (result.status !== 'success') {
+              reject(new Error(`Server processing error: ${result.message || 'Unknown error'}`));
+              return;
+            }
+            resolve({
+              transcripts: result.transcripts || [],
+              batches: result.batches || [],
+              words: result.words || [],
+            });
+          } catch (error) {
+            reject(new Error(`Failed to parse server response: ${error}`));
+          }
+        } else {
+          reject(new Error(`Server processing failed (${xhr.status}): ${xhr.responseText}`));
         }
-        throw error;
-      }
-      throw new Error('Unknown error during server upload');
-    }
+      });
+
+      // Request failed
+      xhr.addEventListener('error', () => {
+        reject(new Error('Network error during upload'));
+      });
+
+      // Request timeout
+      xhr.addEventListener('timeout', () => {
+        reject(new Error('Server processing timeout (180 minutes exceeded)'));
+      });
+
+      // Set 180 minute timeout for 2-hour videos
+      xhr.timeout = 10800000; // 180 minutes
+
+      xhr.open('POST', `${this.baseUrl}/api/v1/receive_client_video`);
+      xhr.send(formData);
+    });
   }
 
   /**
