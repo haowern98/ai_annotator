@@ -966,6 +966,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       <LectureHomeSidebar 
         uploadQueue={uploadQueue}
         onCancelVideo={(videoId) => uploadQueueRef.current?.cancelVideo(videoId)}
+        onClearCompleted={() => uploadQueueRef.current?.clearCompleted()}
       />
     </div>
   );

@@ -29,9 +29,14 @@ interface RemoteConfig {
 interface LectureHomeSidebarProps {
   uploadQueue: QueuedVideo[];
   onCancelVideo?: (videoId: string) => void;
+  onClearCompleted?: () => void;
 }
 
-const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, onCancelVideo }) => {
+const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
+  uploadQueue,
+  onCancelVideo,
+  onClearCompleted,
+}) => {
   const [remoteConfig, setRemoteConfig] = useState<RemoteConfig | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
@@ -230,6 +235,20 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
     return `${size} · ${phase}`;
   };
 
+  const stats = {
+    total: uploadQueue.length,
+    pending: uploadQueue.filter((v) => v.status === 'pending').length,
+    processing: uploadQueue.filter((v) =>
+      v.status === 'downloading' ||
+      v.status === 'extracting' ||
+      v.status === 'transcribing' ||
+      v.status === 'analyzing' ||
+      v.status === 'saving'
+    ).length,
+    complete: uploadQueue.filter((v) => v.status === 'complete').length,
+    error: uploadQueue.filter((v) => v.status === 'error').length,
+  };
+
   const isConnectedToRemote = remoteConfig?.mode === 'client' && remoteConfig?.remoteUrl;
   const isServerMode = remoteConfig?.mode === 'server';
 
@@ -315,29 +334,43 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
 
       {/* Processing Queue Card */}
       <div className="bg-[#242424] rounded-lg border border-[#333333] p-5 flex-1 overflow-hidden flex flex-col">
-        <div className="flex items-center gap-2 mb-3">
-          <Activity className="w-5 h-5 text-[#0E72ED]" />
-          <h3 className="text-sm font-semibold text-white">
-            Processing Queue {uploadQueue.length > 0 && `(${uploadQueue.length})`}
-          </h3>
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="flex items-center gap-2">
+            <Activity className="w-5 h-5 text-[#0E72ED]" />
+            <h3 className="text-sm font-semibold text-white">Upload Queue</h3>
+          </div>
+          <div className="text-xs text-[#8a8a8a]">
+            {stats.processing > 0 ? `Processing ${stats.processing}` : `${stats.complete} / ${stats.total} complete`}
+          </div>
         </div>
         <div className="border-t border-[#3a3a3a] pt-3 mt-3 overflow-y-auto flex-1">
           {uploadQueue.length === 0 ? (
             <div className="text-center py-8 text-[#8a8a8a] text-sm">
-              No videos processing
+              No videos in queue
             </div>
           ) : (
             <div className="space-y-4">
               {uploadQueue.map((video) => (
-                <div key={video.id} className="space-y-2">
+                <div
+                  key={video.id}
+                  className={`space-y-2 p-3 rounded-lg border ${
+                    video.status === 'error' ? 'border-[#ef4444]' : 'border-[#333333]'
+                  } bg-[#1a1a1a]`}
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2 flex-1 min-w-0">
-                      {video.status === 'analyzing' || video.status === 'extracting' || video.status === 'transcribing' || video.status === 'saving' ? (
+                      {video.status === 'downloading' ||
+                      video.status === 'analyzing' ||
+                      video.status === 'extracting' ||
+                      video.status === 'transcribing' ||
+                      video.status === 'saving' ? (
                         <Loader2 className="w-5 h-5 text-[#0E72ED] animate-spin flex-shrink-0" />
                       ) : video.status === 'complete' ? (
                         <CheckCircle2 className="w-5 h-5 text-[#10b981] flex-shrink-0" />
                       ) : video.status === 'error' ? (
                         <XCircle className="w-5 h-5 text-[#ef4444] flex-shrink-0" />
+                      ) : video.status === 'cancelled' ? (
+                        <X className="w-5 h-5 text-[#8a8a8a] flex-shrink-0" />
                       ) : (
                         <Clock className="w-5 h-5 text-[#8a8a8a] flex-shrink-0" />
                       )}
@@ -346,30 +379,71 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
                           {video.fileName}
                         </div>
                         <div className="text-xs text-[#8a8a8a] truncate">
-                          {getDetailedStatus(video)}
+                          {formatFileSize(video.fileSize)} {'\u00b7'} {video.progress?.phase || getPhaseText(video.status)}
                         </div>
                       </div>
                     </div>
-                    {video.status !== 'complete' && video.status !== 'error' && video.status !== 'cancelled' && onCancelVideo && (
+                    {(video.status === 'pending' ||
+                      video.status === 'downloading' ||
+                      video.status === 'extracting' ||
+                      video.status === 'transcribing' ||
+                      video.status === 'analyzing' ||
+                      video.status === 'saving') &&
+                      onCancelVideo && (
                       <button
                         onClick={() => onCancelVideo(video.id)}
-                        className="px-3 py-1 text-xs text-[#8a8a8a] hover:text-white hover:bg-[#3a3a3a] rounded transition-colors flex-shrink-0"
+                        className="px-3 py-1 text-xs text-[#8a8a8a] hover:text-white hover:bg-[#2a2a2a] rounded transition-colors flex-shrink-0 border border-[#444444]"
                       >
                         Cancel
                       </button>
                     )}
                   </div>
 
-                  <div className="w-full bg-[#3a3a3a] rounded-full h-2 overflow-hidden">
-                    <div
-                      className="bg-[#0E72ED] h-full rounded-full transition-all duration-300"
-                      style={{ width: `${video.progress?.percentage || 0}%` }}
-                    />
-                  </div>
+                  {(video.status === 'downloading' ||
+                    video.status === 'extracting' ||
+                    video.status === 'transcribing' ||
+                    video.status === 'analyzing' ||
+                    video.status === 'saving') && (
+                    <div className="w-full bg-[#2a2a2a] rounded-full h-1 overflow-hidden">
+                      <div
+                        className="bg-[#0E72ED] h-full rounded-full transition-all duration-300"
+                        style={{ width: `${video.progress?.percentage || 0}%` }}
+                      />
+                    </div>
+                  )}
+
+                  {video.status === 'error' && video.error && (
+                    <div className="mt-1 p-2 bg-[rgba(239,68,68,0.1)] border border-[rgba(239,68,68,0.3)] rounded text-xs text-[#ef4444]">
+                      {video.error}
+                    </div>
+                  )}
+
+                  {video.status === 'complete' && video.startTime && video.endTime && (
+                    <div className="text-xs text-[#4ade80]">
+                      Completed in {Math.floor((video.endTime - video.startTime) / 1000)}s
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           )}
+        </div>
+
+        <div className="border-t border-[#3a3a3a] pt-3 mt-3 flex items-center justify-between gap-3">
+          <button
+            onClick={() => onClearCompleted?.()}
+            disabled={!onClearCompleted || (stats.complete === 0 && stats.error === 0)}
+            className={`px-4 py-2 text-sm rounded border transition-colors ${
+              !onClearCompleted || (stats.complete === 0 && stats.error === 0)
+                ? 'opacity-50 cursor-not-allowed border-[#444444] text-[#8a8a8a]'
+                : 'border-[#444444] text-[#8a8a8a] hover:text-white hover:bg-[#2a2a2a]'
+            }`}
+          >
+            Clear Completed
+          </button>
+          <div className="text-xs text-[#8a8a8a]">
+            {stats.total > 0 ? `${stats.complete} complete \u00b7 ${stats.error} errors` : ''}
+          </div>
         </div>
       </div>
 
