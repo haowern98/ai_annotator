@@ -404,6 +404,63 @@ export class QwenHttpClient {
   }
 
   /**
+   * Check if connected to remote server (not local)
+   */
+  isRemote(): boolean {
+    return !this.baseUrl.startsWith('http://127.0.0.1') && !this.baseUrl.startsWith('http://localhost');
+  }
+
+  /**
+   * Upload video to remote server for processing
+   * Server extracts frames, transcribes with Parakeet, analyzes with Qwen
+   */
+  async uploadVideoToRemoteServer(videoFile: File): Promise<{
+    transcripts: any[];
+    batches: any[];
+    words: any[];
+  }> {
+    if (!this.isRemote()) {
+      throw new Error('This method only works with remote servers');
+    }
+
+    const formData = new FormData();
+    formData.append('video_file', videoFile);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/receive_client_video`, {
+        method: 'POST',
+        body: formData,
+        signal: AbortSignal.timeout(1800000), // 30 minute timeout
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Server processing failed (${response.status}): ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      if (result.status !== 'success') {
+        throw new Error(`Server processing error: ${result.message || 'Unknown error'}`);
+      }
+
+      return {
+        transcripts: result.transcripts || [],
+        batches: result.batches || [],
+        words: result.words || [],
+      };
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.name === 'TimeoutError') {
+          throw new Error('Server processing timeout (30 minutes exceeded)');
+        }
+        throw error;
+      }
+      throw new Error('Unknown error during server upload');
+    }
+  }
+
+  /**
    * Start periodic health checks
    */
   private startHealthCheck(): void {

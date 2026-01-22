@@ -2681,6 +2681,88 @@ async def analyze_keyframes(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/receive_client_video")
+async def receive_client_video(
+    video_file: UploadFile = File(..., description="Video file from client")
+):
+    """
+    Receive video from client, process server-side with sequential pipeline,
+    return transcripts and batches.
+    """
+    temp_path = None
+    try:
+        logger.info(f"[ReceiveClientVideo] Receiving video: {video_file.filename}")
+        
+        # Save uploaded file to temp location
+        ext = Path(video_file.filename).suffix.lower() if video_file.filename else '.mp4'
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(400, f"Extension interdite: {ext}")
+        
+        clean_name = sanitize_filename(video_file.filename or "upload")
+        temp_path = os.path.abspath(f"temp_client_{int(time.time())}_{clean_name}")
+        
+        with open(temp_path, "wb") as f:
+            shutil.copyfileobj(video_file.file, f)
+        
+        logger.info(f"[ReceiveClientVideo] Saved to: {temp_path}")
+        
+        # Spawn processing script
+        repo_root = Path(__file__).parent.parent
+        script_path = repo_root / "scripts" / "process_client_upload.py"
+        
+        if not script_path.exists():
+            raise HTTPException(500, f"Processing script not found: {script_path}")
+        
+        # Get venv python
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.exists():
+            venv_python = "python"
+        
+        # Run processing script
+        logger.info(f"[ReceiveClientVideo] Running processing script...")
+        result = subprocess.run(
+            [str(venv_python), str(script_path), "--video-path", temp_path],
+            capture_output=True,
+            text=True,
+            timeout=1800  # 30 minute timeout
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"[ReceiveClientVideo] Script failed: {result.stderr}")
+            raise HTTPException(500, f"Processing failed: {result.stderr}")
+        
+        # Parse JSON output
+        try:
+            output_data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.error(f"[ReceiveClientVideo] Failed to parse output: {result.stdout}")
+            raise HTTPException(500, f"Invalid JSON output: {e}")
+        
+        logger.info(f"[ReceiveClientVideo] Processing complete")
+        
+        return {
+            "status": "success",
+            "transcripts": output_data.get("transcripts", []),
+            "batches": output_data.get("batches", []),
+            "words": output_data.get("words", []),
+        }
+        
+    except subprocess.TimeoutExpired:
+        logger.error("[ReceiveClientVideo] Processing timeout")
+        raise HTTPException(504, "Processing timeout (30 minutes)")
+    except Exception as e:
+        logger.error(f"[ReceiveClientVideo] Error: {str(e)}", exc_info=True)
+        raise HTTPException(500, str(e))
+    finally:
+        # Cleanup temp file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                logger.info(f"[ReceiveClientVideo] Cleaned up: {temp_path}")
+            except Exception as e:
+                logger.warning(f"[ReceiveClientVideo] Cleanup failed: {e}")
+
+
 # ==================== Server Startup ====================
 
 if __name__ == "__main__":

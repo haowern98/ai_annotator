@@ -18,6 +18,7 @@ export type VideoStatus =
   | 'transcribing'
   | 'analyzing'
   | 'saving'
+  | 'uploading'
   | 'complete'
   | 'error'
   | 'cancelled';
@@ -35,9 +36,12 @@ export interface QueuedVideo {
     totalSteps: number;
   };
   result?: {
-    frames: ExtractedFrame[];
-    transcriptPath: string;
-    batches: QwenBatchResult[];
+    frames?: ExtractedFrame[];
+    transcriptPath?: string;
+    batches?: QwenBatchResult[];
+    transcriptsArray?: any[];
+    batchesArray?: any[];
+    wordsArray?: any[];
   };
   error?: string;
   startTime?: number;
@@ -275,6 +279,63 @@ export class UploadQueueManager {
       throw new Error('Video cancelled by user');
     }
 
+    // ============================
+    // REMOTE SERVER MODE
+    // ============================
+    if (this.qwenClient.isRemote() && video.file instanceof File) {
+      this.log(`Uploading to remote server: ${video.fileName}`, LogLevel.INFO);
+      video.status = 'uploading';
+      video.progress.phase = 'Uploading to remote server';
+      video.progress.currentStep = 1;
+      video.progress.percentage = 0;
+      this.notifyQueueUpdate();
+
+      try {
+        // Upload video to server for processing
+        const result = await this.qwenClient.uploadVideoToRemoteServer(video.file);
+
+        this.log(`Remote processing complete: ${video.fileName}`, LogLevel.SUCCESS);
+
+        // Check if cancelled during upload
+        const currentStatus = video.status as VideoStatus;
+        if (currentStatus === 'cancelled') {
+          throw new Error('Video cancelled by user');
+        }
+
+        // Save/conversion phase
+        video.status = 'saving';
+        video.progress.currentStep = 2;
+        video.progress.phase = 'Saving (converting to WebM)';
+        video.progress.percentage = 90;
+        this.notifyQueueUpdate();
+
+        video.endTime = Date.now();
+        video.result = {
+          transcriptsArray: result.transcripts,
+          batchesArray: result.batches,
+          wordsArray: result.words,
+        };
+
+        // Save with arrays (no file paths)
+        await this.saveUploadToRecordings(
+          video,
+          undefined, // No transcript path
+          result.batches,
+          result.transcripts,
+          result.words
+        );
+
+        return;
+      } catch (error) {
+        this.log(`Remote processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`, LogLevel.ERROR);
+        throw error;
+      }
+    }
+
+    // ============================
+    // LOCAL PROCESSING MODE
+    // ============================
+
     // Phase 1: Extract frames
     this.log(`Extracting frames: ${video.fileName}`, LogLevel.INFO);
     video.status = 'extracting';
@@ -295,7 +356,8 @@ export class UploadQueueManager {
     }
 
     // Check if video was cancelled
-    if (video.status === 'cancelled') {
+    const statusAfterExtraction = video.status as VideoStatus;
+    if (statusAfterExtraction === 'cancelled') {
       throw new Error('Video cancelled by user');
     }
 
@@ -337,7 +399,8 @@ export class UploadQueueManager {
     }
 
     // Check if video was cancelled
-    if (video.status === 'cancelled') {
+    const statusAfterTranscription = video.status as VideoStatus;
+    if (statusAfterTranscription === 'cancelled') {
       throw new Error('Video cancelled by user');
     }
 
@@ -390,22 +453,35 @@ export class UploadQueueManager {
    */
   private async saveUploadToRecordings(
     video: QueuedVideo,
-    transcriptPath: string,
-    batches: any[]
+    transcriptPath?: string,
+    batches: any[] = [],
+    transcriptsArray?: any[],
+    wordsArray?: any[]
   ): Promise<void> {
     try {
       this.log(`Saving ${video.fileName} to recordings...`, LogLevel.INFO);
 
-      // Read transcripts from file
-      const transcriptsJson = await window.electronAPI.readFile(transcriptPath);
-      const transcriptsArray = JSON.parse(transcriptsJson);
-
-      // Convert Parakeet format to metadata format
-      const transcripts = transcriptsArray.map((t: any, index: number) => ({
-        text: t.text || '',
-        timestamp: this.formatTimestamp(((t.start ?? index) as number) * 1000),
-        timestampMs: ((t.start ?? index) as number) * 1000
-      }));
+      // Get transcripts - either from array or file
+      let transcripts: any[];
+      if (transcriptsArray) {
+        // Remote mode: transcripts provided as array
+        transcripts = transcriptsArray.map((t: any, index: number) => ({
+          text: t.text || '',
+          timestamp: this.formatTimestamp(((t.start ?? index) as number) * 1000),
+          timestampMs: ((t.start ?? index) as number) * 1000
+        }));
+      } else if (transcriptPath) {
+        // Local mode: read from file
+        const transcriptsJson = await window.electronAPI.readFile(transcriptPath);
+        const transcriptsFromFile = JSON.parse(transcriptsJson);
+        transcripts = transcriptsFromFile.map((t: any, index: number) => ({
+          text: t.text || '',
+          timestamp: this.formatTimestamp(((t.start ?? index) as number) * 1000),
+          timestampMs: ((t.start ?? index) as number) * 1000
+        }));
+      } else {
+        throw new Error('Either transcriptPath or transcriptsArray must be provided');
+      }
 
       // Convert QwenBatchResult to summaries format
       const summaries = batches.map((batch: any) => ({
@@ -446,14 +522,14 @@ export class UploadQueueManager {
       if (video.file instanceof File) {
         recordedMimeType = (video.file.type || '').trim() || inferMimeFromName(video.file.name);
         if (recordedMimeType === 'video/mp4' || recordedMimeType === 'video/webm') {
-          videoBytes = await video.file.arrayBuffer();
+          videoBytes = await video.file.arrayBuffer() as ArrayBuffer;
         }
       } else {
         const pathMime = inferMimeFromName(video.file.path) || inferMimeFromName(video.fileName);
         recordedMimeType = pathMime;
         if (recordedMimeType === 'video/mp4' || recordedMimeType === 'video/webm') {
           const base64 = await window.electronAPI.readBinary(video.file.path);
-          videoBytes = toBytesFromBase64(base64).buffer;
+          videoBytes = toBytesFromBase64(base64).buffer as ArrayBuffer;
         }
       }
 
@@ -488,7 +564,7 @@ export class UploadQueueManager {
         conversionOutputPath = convertResult.outputPath;
 
         const webmBase64 = await window.electronAPI.readBinary(convertResult.outputPath);
-        videoBytes = toBytesFromBase64(webmBase64).buffer;
+        videoBytes = toBytesFromBase64(webmBase64).buffer as ArrayBuffer;
         recordedMimeType = 'video/webm';
       }
 
@@ -513,8 +589,18 @@ export class UploadQueueManager {
 
         // Persist word-level timestamps next to the recording metadata (if available).
         try {
-          const wordsPath = transcriptPath.replace(/\.json$/i, '_words.json');
-          const wordsJson = await window.electronAPI.readFile(wordsPath);
+          let wordsJson: string;
+          
+          if (wordsArray) {
+            // Remote mode: use provided array
+            wordsJson = JSON.stringify(wordsArray, null, 2);
+          } else if (transcriptPath) {
+            // Local mode: read from file
+            const wordsPath = transcriptPath.replace(/\.json$/i, '_words.json');
+            wordsJson = await window.electronAPI.readFile(wordsPath);
+          } else {
+            throw new Error('No words data available');
+          }
 
           const metadataPath: string | undefined = result.metadataPath;
           if (metadataPath) {
@@ -532,9 +618,11 @@ export class UploadQueueManager {
           this.log(`Word timestamps save warning: ${err}`, LogLevel.WARN);
         }
         
-        // Cleanup temp files
-        await window.electronAPI.deleteFile(transcriptPath);
-        await window.electronAPI.deleteFile(transcriptPath.replace(/\.json$/i, '_words.json'));
+        // Cleanup temp files (only in local mode)
+        if (transcriptPath) {
+          await window.electronAPI.deleteFile(transcriptPath);
+          await window.electronAPI.deleteFile(transcriptPath.replace(/\.json$/i, '_words.json'));
+        }
         if (tempVideoPathForConversion) {
           await window.electronAPI.deleteFile(tempVideoPathForConversion);
         }
