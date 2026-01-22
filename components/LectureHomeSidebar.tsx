@@ -208,6 +208,12 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
 
   const getDetailedStatus = (video: QueuedVideo): string => {
     const size = formatFileSize(video.fileSize);
+    
+    // For active processing, show the detailed phase message (includes MB/GB for uploads)
+    if (video.progress?.phase && video.status !== 'pending' && video.status !== 'complete' && video.status !== 'error') {
+      return `${size} · ${video.progress.phase}`;
+    }
+    
     const phase = getPhaseText(video.status);
     
     if (video.status === 'pending') {
@@ -220,11 +226,6 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
     
     if (video.status === 'error') {
       return `${size} · Error`;
-    }
-    
-    // Show progress details for active phases
-    if (video.progress?.currentStep && video.progress?.totalSteps) {
-      return `${size} · ${phase} (${video.progress.currentStep}/${video.progress.totalSteps})`;
     }
     
     return `${size} · ${phase}`;
@@ -332,7 +333,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
                 <div key={video.id} className="space-y-2">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2 flex-1 min-w-0">
-                      {video.status === 'analyzing' || video.status === 'extracting' || video.status === 'transcribing' || video.status === 'saving' ? (
+                      {video.status === 'uploading' || video.status === 'downloading' || video.status === 'analyzing' || video.status === 'extracting' || video.status === 'transcribing' || video.status === 'saving' ? (
                         <Loader2 className="w-5 h-5 text-[#0E72ED] animate-spin flex-shrink-0" />
                       ) : video.status === 'complete' ? (
                         <CheckCircle2 className="w-5 h-5 text-[#10b981] flex-shrink-0" />
@@ -373,18 +374,33 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
         </div>
       </div>
 
-      {/* Server Activity Card (only in server mode) */}
-      {isServerMode && (
+      {/* Server Activity Card (only in client mode - shows uploads to remote server) */}
+      {isConnectedToRemote && (
         <div className="bg-[#242424] rounded-lg border border-[#333333] p-5">
           <div className="flex items-center gap-2 mb-3">
             <Monitor className="w-5 h-5 text-[#0E72ED]" />
             <h3 className="text-sm font-semibold text-white">Server Activity</h3>
           </div>
           <div className="border-t border-[#3a3a3a] pt-3 mt-3">
-            <div className="text-center py-8 text-[#8a8a8a] text-sm">
-              No active connections
-            </div>
-            {/* TODO: Add real-time server activity monitoring */}
+            {uploadQueue.some(v => v.status === 'uploading') ? (
+              <div className="space-y-3">
+                {uploadQueue
+                  .filter(v => v.status === 'uploading')
+                  .map(video => (
+                    <div key={video.id} className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 text-[#0E72ED] animate-spin flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-white truncate">{video.fileName}</div>
+                        <div className="text-xs text-[#8a8a8a]">{video.progress?.phase || 'Uploading...'}</div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-[#8a8a8a] text-sm">
+                No active uploads
+              </div>
+            )}
           </div>
         </div>
       )}
