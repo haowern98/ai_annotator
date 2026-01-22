@@ -79,35 +79,27 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
     };
   }, []);
 
-  // Check if server is actually running when mode is server
+  // Check server mode status using IPC flag (source of truth)
   useEffect(() => {
-    if (remoteConfig?.mode !== 'server') {
-      setIsServerRunning(false);
-      return;
-    }
-
-    const checkServerHealth = async () => {
+    const checkServerMode = async () => {
       setIsCheckingServer(true);
       try {
-        const response = await fetch('http://127.0.0.1:7556/health', {
-          method: 'GET',
-          signal: AbortSignal.timeout(2000)
-        });
-        const data = await response.json();
-        setIsServerRunning(data?.status === 'healthy');
+        if (window.electronAPI?.getServerMode) {
+          const result = await window.electronAPI.getServerMode();
+          if (result.success) {
+            setIsServerRunning(result.isServerMode);
+          }
+        }
       } catch (error) {
-        setIsServerRunning(false);
-        // Server not running, clear server mode
-        localStorage.setItem('qwen_remote_config', JSON.stringify({ mode: 'local' }));
-        setRemoteConfig({ mode: 'local' });
+        console.warn('[Sidebar] Failed to check server mode:', error);
       } finally {
         setIsCheckingServer(false);
       }
     };
 
-    checkServerHealth();
+    checkServerMode();
     // Re-check every 10 seconds
-    const interval = setInterval(checkServerHealth, 10000);
+    const interval = setInterval(checkServerMode, 10000);
     return () => clearInterval(interval);
   }, [remoteConfig?.mode]);
 

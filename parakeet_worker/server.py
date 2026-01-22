@@ -133,6 +133,12 @@ class ParakeetModel:
     if self._model is None:
       raise RuntimeError("Model not loaded")
 
+    # Reset model to eval mode to clear any accumulated state
+    try:
+      self._model.eval()
+    except Exception:
+      pass
+
     kwargs = {"batch_size": 1}
     try:
       sig = inspect.signature(self._model.transcribe)
