@@ -189,7 +189,9 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
   };
 
   const handleStopServer = async () => {
-    if (!window.electronAPI?.stopQwen) {
+    // "Close Connection" in server mode should restore the default local worker (127.0.0.1)
+    // so the app can immediately continue using Qwen without a reload.
+    if (!window.electronAPI?.startQwenLocal) {
       console.error('Electron API not available');
       return;
     }
@@ -197,20 +199,20 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     setIsStarting(true);
     
     try {
-      const result = await window.electronAPI.stopQwen();
+      const result = await window.electronAPI.startQwenLocal();
       
       if (result.success) {
-        // Clear server mode config
+        // Clear server mode config (back to local)
         saveRemoteConfig({ mode: 'local' });
         setIsServerRunning(false);
         onClose();
       } else {
-        console.error('Failed to stop server:', result.error);
-        alert(`Failed to stop server: ${result.error}`);
+        console.error('Failed to restart local server:', result.error);
+        alert(`Failed to restart local server: ${result.error}`);
       }
     } catch (error) {
-      console.error('Server stop error:', error);
-      alert('Failed to stop server');
+      console.error('Local restart error:', error);
+      alert('Failed to restart local server');
     } finally {
       setIsStarting(false);
     }
