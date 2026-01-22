@@ -164,7 +164,71 @@ export default function App() {
 
     initUploadClients();
 
+    // Listen for remote config changes
+    const handleConfigChange = () => {
+      const remoteConfig = localStorage.getItem('qwen_remote_config');
+      if (remoteConfig) {
+        try {
+          const config = JSON.parse(remoteConfig);
+          let newUrl = 'http://127.0.0.1:7556';
+          if (config.mode === 'client' && config.remoteUrl) {
+            newUrl = config.remoteUrl;
+          }
+          
+          // Only reinitialize if URL actually changed
+          if (uploadQwen.getBaseUrl() !== newUrl) {
+            console.log(`[Upload Queue] Remote config changed, reinitializing with: ${newUrl}`);
+            
+            // Disconnect old client
+            uploadQwen.disconnect();
+            
+            // Create new client with new URL
+            const newUploadQwen = new QwenHttpClient(newUrl);
+            
+            // Retry connection with exponential backoff
+            const connectWithRetry = async (retries = 0, maxRetries = 5) => {
+              try {
+                await newUploadQwen.connect({
+                  onReady: () => console.log('[Upload Queue] Qwen worker reconnected'),
+                  onError: (err) => console.error(`[Upload Queue] Qwen reconnection error: ${err}`),
+                  onProgress: (msg) => console.log(`[Upload Queue] ${msg}`),
+                });
+                
+                // Recreate upload queue manager with new client
+                if (uploadQueueRef.current) {
+                  uploadQueueRef.current = new UploadQueueManager(uploadParakeet, newUploadQwen, () => false, {
+                    onQueueUpdate: (queue) => setUploadQueue(queue),
+                    onVideoComplete: (video) => console.log(`Upload complete: ${video.fileName}`),
+                    onVideoError: (video, err) => console.error(`Upload failed: ${video.fileName} - ${err}`),
+                  });
+                  console.log('[Upload Queue] Upload queue manager reinitialized');
+                }
+              } catch (error) {
+                if (retries < maxRetries) {
+                  const delay = Math.min(1000 * Math.pow(2, retries), 5000);
+                  console.log(`[Upload Queue] Connection failed, retrying in ${delay}ms... (${retries + 1}/${maxRetries})`);
+                  await new Promise(resolve => setTimeout(resolve, delay));
+                  return connectWithRetry(retries + 1, maxRetries);
+                } else {
+                  console.error('[Upload Queue] Failed to reconnect after multiple attempts');
+                }
+              }
+            };
+            
+            connectWithRetry();
+          }
+        } catch (e) {
+          console.error('[Upload Queue] Failed to handle config change:', e);
+        }
+      }
+    };
+
+    window.addEventListener('qwen-config-changed', handleConfigChange);
+    window.addEventListener('storage', handleConfigChange);
+
     return () => {
+      window.removeEventListener('qwen-config-changed', handleConfigChange);
+      window.removeEventListener('storage', handleConfigChange);
       if (uploadQueueRef.current) {
         uploadQueueRef.current = null;
       }

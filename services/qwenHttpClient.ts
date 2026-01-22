@@ -393,6 +393,11 @@ export class QwenHttpClient {
   disconnect(): void {
     this.stopHealthCheck();
     this.isConnectedFlag = false;
+    // Don't null out callbacks immediately to avoid errors during shutdown
+    if (this.callbacks?.onError) {
+      // Notify that we're disconnecting
+      this.callbacks.onError('Disconnected');
+    }
     this.callbacks = null;
   }
 
@@ -408,6 +413,13 @@ export class QwenHttpClient {
    */
   isRemote(): boolean {
     return !this.baseUrl.startsWith('http://127.0.0.1') && !this.baseUrl.startsWith('http://localhost');
+  }
+
+  /**
+   * Get current base URL
+   */
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /**

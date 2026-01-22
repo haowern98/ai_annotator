@@ -135,25 +135,48 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({ uploadQueue, on
     setIsDisconnecting(true);
 
     try {
-      // Clear remote config
-      localStorage.setItem('qwen_remote_config', JSON.stringify({ mode: 'local' }));
-
-      // Restart local Qwen server
+      // Restart local Qwen server first
       if (window.electronAPI?.startQwenLocal) {
         const result = await window.electronAPI.startQwenLocal();
         if (result.success) {
-          console.log('Local Qwen server restarted');
-          // Reload page to reinitialize with local config
+          console.log('Local Qwen server started, waiting for ready...');
+          
+          // Wait for server to be ready (health check)
+          let retries = 0;
+          const maxRetries = 20; // 20 seconds max
+          while (retries < maxRetries) {
+            try {
+              const testClient = new QwenHttpClient('http://127.0.0.1:7556');
+              await fetch('http://127.0.0.1:7556/health');
+              console.log('Local Qwen server is ready');
+              break;
+            } catch (e) {
+              retries++;
+              if (retries >= maxRetries) {
+                throw new Error('Server did not become ready in time');
+              }
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+          
+          // Now clear remote config and reload
+          localStorage.setItem('qwen_remote_config', JSON.stringify({ mode: 'local' }));
+          window.dispatchEvent(new Event('qwen-config-changed'));
           window.location.reload();
         } else {
           console.error('Failed to restart local Qwen:', result.error);
           alert('Failed to restart local server. Please restart the application.');
           setIsDisconnecting(false);
         }
+      } else {
+        // No Electron API, just clear config
+        localStorage.setItem('qwen_remote_config', JSON.stringify({ mode: 'local' }));
+        window.dispatchEvent(new Event('qwen-config-changed'));
+        setIsDisconnecting(false);
       }
     } catch (error) {
       console.error('Disconnect error:', error);
-      alert('Disconnect failed. Please restart the application.');
+      alert(`Disconnect failed: ${error instanceof Error ? error.message : 'Unknown error'}. Please restart the application.`);
       setIsDisconnecting(false);
     }
   };
