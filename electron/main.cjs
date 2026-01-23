@@ -60,6 +60,119 @@ let splashWindow;
 let parakeetProcess = null;
 let qwenProcess = null;
 
+// Track Qwen server activity (remote "server mode" UX).
+// Driven by qwen_worker stdout/stderr logs (uvicorn access logs + batch logs),
+// without requiring any changes to qwen_worker/server.py.
+const qwenActivityState = {
+  active: false,
+  clientIp: null,
+  phase: null,
+  progressPercent: 0,
+  updatedAt: 0,
+  lastError: null,
+};
+
+function broadcastQwenActivity() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('qwen:activity', qwenActivityState);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function setQwenActivity(partial) {
+  Object.assign(qwenActivityState, partial);
+  qwenActivityState.updatedAt = Date.now();
+  broadcastQwenActivity();
+}
+
+function resetQwenActivity() {
+  setQwenActivity({
+    active: false,
+    clientIp: null,
+    phase: null,
+    progressPercent: 0,
+    lastError: null,
+  });
+}
+
+function parseQwenLogLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return;
+
+  // Batch logs emitted by qwen_worker (sequential VLM batching)
+  // Example: [BATCH 3/19] Time: 10.0s - 14.0s
+  const batchMatch = text.match(/^\[BATCH\s+(\d+)\s*\/\s*(\d+)\]/i);
+  if (batchMatch) {
+    const current = Number(batchMatch[1]);
+    const total = Number(batchMatch[2]);
+    if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+      const pct = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+      setQwenActivity({
+        active: true,
+        phase: `Analyzing with VLM (${current}/${total})`,
+        progressPercent: pct,
+      });
+    }
+    return;
+  }
+
+  // Uvicorn access logs include the client IP + path.
+  // Example: INFO:     192.168.1.10:53421 - "POST /api/v1/analyze_sequential HTTP/1.1" 200 OK
+  const accessMatch = text.match(
+    /\b(\d{1,3}(?:\.\d{1,3}){3}):\d+\s*-\s*\"[A-Z]+\s+([^ ]+)\s+HTTP\/[0-9.]+\"\s+(\d{3})\b/
+  );
+  if (accessMatch) {
+    const ip = accessMatch[1];
+    const path = accessMatch[2];
+    const statusCode = Number(accessMatch[3]);
+
+    if (path.includes('/api/v1/analyze_sequential') || path.includes('/api/v1/analyze')) {
+      setQwenActivity({ clientIp: ip });
+    }
+
+    if (Number.isFinite(statusCode) && statusCode >= 400) {
+      setQwenActivity({
+        active: false,
+        lastError: `${ip} ${path} failed (${statusCode})`,
+      });
+    }
+    return;
+  }
+
+  if (/traceback/i.test(text) || /\b(error|exception)\b/i.test(text)) {
+    setQwenActivity({ lastError: text });
+  }
+}
+
+function attachQwenActivityListeners(proc) {
+  if (!proc || proc.killed) return;
+  if (proc.__qwenActivityAttached) return;
+  proc.__qwenActivityAttached = true;
+
+  proc.stdout?.on('data', (buf) => {
+    String(buf)
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .forEach((l) => parseQwenLogLine(l));
+  });
+
+  proc.stderr?.on('data', (buf) => {
+    String(buf)
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .forEach((l) => parseQwenLogLine(l));
+  });
+}
+
+// Expose Qwen activity snapshot to renderer (optional initial fetch).
+// Register once at module load (not per-window) to avoid duplicate handler errors.
+ipcMain.handle('qwen:get-activity', async () => {
+  return { success: true, activity: qwenActivityState };
+});
+
 const splashState = {
   parakeet: { progress: 0, status: 'Waiting…', isError: false },
   qwen: { progress: 0, status: 'Waiting…', isError: false },
@@ -331,6 +444,7 @@ async function ensureQwenReady() {
     const chunk = String(buf);
     // Forward worker logs to the parent process so dev terminal shows stage-by-stage progress.
     chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.log(`[QwenWorker] ${l}`));
+    chunk.split(/\r?\n/).filter(Boolean).forEach((l) => parseQwenLogLine(l));
 
     if (/\[QwenWorker\]\s*Model ready/i.test(chunk) || /Uvicorn running on/i.test(chunk)) {
       sendSplashUpdate({ qwen: { progress: 95, status: 'Almost ready…', isError: false } });
@@ -340,6 +454,7 @@ async function ensureQwenReady() {
   qwenProcess.stderr?.on('data', (buf) => {
     const chunk = String(buf);
     chunk.split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(`[QwenWorker] ${l}`));
+    chunk.split(/\r?\n/).filter(Boolean).forEach((l) => parseQwenLogLine(l));
     lastStderr = chunk.trim().slice(-400);
   });
 
@@ -491,7 +606,11 @@ function createWindow() {
     getVenvPythonPath, 
     fetchJsonWithTimeout,
     () => qwenProcess,
-    (proc) => { qwenProcess = proc; },
+    (proc) => {
+      qwenProcess = proc;
+      resetQwenActivity();
+      attachQwenActivityListeners(proc);
+    },
     getServerMode,
     setServerMode
   );

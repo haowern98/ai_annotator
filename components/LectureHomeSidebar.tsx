@@ -44,6 +44,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [isServerRunning, setIsServerRunning] = useState(false);
   const [isCheckingServer, setIsCheckingServer] = useState(false);
+  const [qwenActivity, setQwenActivity] = useState<any | null>(null);
 
   // Load remote config on mount
   useEffect(() => {
@@ -83,6 +84,27 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
       window.removeEventListener('qwen-config-changed', handleConfigChange);
     };
   }, []);
+
+  // Subscribe to Qwen server activity (server mode only)
+  useEffect(() => {
+    const api = window.electronAPI as any;
+    if (!api?.onQwenActivity) return;
+
+    api.getQwenActivity?.()
+      .then((res: any) => {
+        if (res?.success && res.activity) setQwenActivity(res.activity);
+      })
+      .catch(() => {});
+
+    api.onQwenActivity((activity: any) => setQwenActivity(activity));
+    return () => {
+      api.removeQwenActivityListener?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (remoteConfig?.mode !== 'server') setQwenActivity(null);
+  }, [remoteConfig?.mode]);
 
   // Check server mode status using IPC flag (source of truth)
   useEffect(() => {
@@ -455,10 +477,35 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
             <h3 className="text-sm font-semibold text-white">Server Activity</h3>
           </div>
           <div className="border-t border-[#3a3a3a] pt-3 mt-3">
-            <div className="text-center py-8 text-[#8a8a8a] text-sm">
-              No active connections
-            </div>
-            {/* TODO: Add real-time server activity monitoring */}
+            {qwenActivity?.active && qwenActivity?.phase ? (
+              <div className="space-y-2 p-3 rounded-lg border border-[#333333] bg-[#1a1a1a]">
+                <div className="flex items-center gap-3">
+                  <Loader2 className="w-5 h-5 text-[#0E72ED] animate-spin flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-white font-medium truncate">
+                      {qwenActivity?.clientIp || 'Remote client'}
+                    </div>
+                    <div className="text-xs text-[#8a8a8a] truncate">
+                      {qwenActivity.phase}
+                    </div>
+                  </div>
+                </div>
+                <div className="w-full bg-[#2a2a2a] rounded-full h-1 overflow-hidden">
+                  <div
+                    className="bg-[#0E72ED] h-full rounded-full transition-all duration-300"
+                    style={{ width: `${qwenActivity?.progressPercent || 0}%` }}
+                  />
+                </div>
+              </div>
+            ) : qwenActivity?.lastError ? (
+              <div className="p-3 rounded-lg border border-[rgba(239,68,68,0.3)] bg-[rgba(239,68,68,0.1)] text-sm text-[#ef4444]">
+                {String(qwenActivity.lastError)}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-[#8a8a8a] text-sm">
+                No active connections
+              </div>
+            )}
           </div>
         </div>
       )}

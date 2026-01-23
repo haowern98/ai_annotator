@@ -189,6 +189,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('qwen:get-server-mode');
   },
 
+  // Qwen server activity (remote server mode)
+  getQwenActivity: async () => {
+    return await ipcRenderer.invoke('qwen:get-activity');
+  },
+  onQwenActivity: (callback) => {
+    ipcRenderer.on('qwen:activity', (event, activity) => callback(activity));
+  },
+  removeQwenActivityListener: () => {
+    ipcRenderer.removeAllListeners('qwen:activity');
+  },
+
   // =====================================================
   // LECTURE OVERLAY API (separate from Interview overlay)
   // =====================================================
