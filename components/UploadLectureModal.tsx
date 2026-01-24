@@ -1,20 +1,21 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { VideoIcon, FileVideoIcon } from './icons';
 import { Check, X, Upload } from 'lucide-react';
 
+type SelectedVideoFile = { path: string; name: string; size: number };
+
 interface UploadLectureModalProps {
   isOpen: boolean;
-  onUpload: (source: { type: 'youtube' | 'file'; value: string | File }) => void;
+  onUpload: (source: { type: 'youtube'; value: string } | { type: 'file'; value: SelectedVideoFile }) => void;
   onCancel: () => void;
 }
 
 export function UploadLectureModal({ isOpen, onUpload, onCancel }: UploadLectureModalProps) {
   const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFile, setSelectedFile] = useState<SelectedVideoFile | null>(null);
   const [selectedSource, setSelectedSource] = useState<'youtube' | 'file' | null>(null);
   const [hoveredSource, setHoveredSource] = useState<'youtube' | 'file' | null>(null);
   const [hoveredButton, setHoveredButton] = useState<'cancel' | 'upload' | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Reset when modal opens
   useEffect(() => {
@@ -47,13 +48,24 @@ export function UploadLectureModal({ isOpen, onUpload, onCancel }: UploadLecture
     }
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setSelectedSource('file');
-      setYoutubeUrl('');
+  const handlePickFile = async () => {
+    const api = (window as any).electronAPI;
+    if (!api?.pickVideoFile) {
+      console.error('electronAPI.pickVideoFile not available');
+      return;
     }
+
+    const res = await api.pickVideoFile();
+    if (!res?.success || res?.canceled) return;
+    if (!res?.path) return;
+
+    setSelectedFile({
+      path: String(res.path),
+      name: String(res.name || 'video'),
+      size: Number(res.size || 0),
+    });
+    setSelectedSource('file');
+    setYoutubeUrl('');
   };
 
   const handleYoutubeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -200,7 +212,7 @@ export function UploadLectureModal({ isOpen, onUpload, onCancel }: UploadLecture
 
             {/* File Option */}
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={handlePickFile}
               onMouseEnter={() => setHoveredSource('file')}
               onMouseLeave={() => setHoveredSource(null)}
               style={{
@@ -253,14 +265,6 @@ export function UploadLectureModal({ isOpen, onUpload, onCancel }: UploadLecture
                 Supported: MP4, WebM, MKV
               </div>
             </button>
-
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept="video/mp4,video/webm,video/x-matroska"
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
           </div>
         </div>
 

@@ -7,6 +7,22 @@ function getUserDataPath() {
   return app.getPath('userData');
 }
 
+function getRecordingsDir() {
+  // Match electron/ipc/recording.cjs (dev-friendly repo-local recordings dir)
+  return path.join(__dirname, '..', '..', '.recordings');
+}
+
+function generateFilename() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  return `lecture_${year}${month}${day}_${hours}${minutes}${seconds}`;
+}
+
 function getVenvPythonPath() {
   // Repo root is one level up from electron/
   const repoRoot = path.join(__dirname, '..', '..');
@@ -21,7 +37,15 @@ function setupYouTubeHandlers(ipcMain) {
     const id = String(payload?.id || '');
     if (!url) return { success: false, error: 'URL is required' };
 
-    const outDir = path.join(getUserDataPath(), 'youtube_downloads');
+    // Download directly into recordings so we never have to load huge videos into renderer memory just to "save" them.
+    const outDir = getRecordingsDir();
+    try {
+      fs.mkdirSync(outDir, { recursive: true });
+    } catch {
+      // ignore
+    }
+
+    const outputBase = `${generateFilename()}_youtube_${Math.random().toString(36).slice(2, 7)}`;
     const pythonCmd = getVenvPythonPath();
     const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'download_youtube.py');
 
@@ -32,7 +56,7 @@ function setupYouTubeHandlers(ipcMain) {
 
       const child = spawn(
         pythonCmd,
-        [scriptPath, '--url', url, '--output-dir', outDir],
+        [scriptPath, '--url', url, '--output-dir', outDir, '--output-base', outputBase],
         { windowsHide: true }
       );
 

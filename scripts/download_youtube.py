@@ -59,6 +59,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--output-base",
+        default="",
+        help="Optional base filename (without extension) to force output naming (e.g. lecture_YYYYMMDD_HHMMSS_youtube).",
+    )
     args = parser.parse_args()
 
     try:
@@ -124,7 +129,11 @@ def main() -> int:
 
     title = sanitize_filename(info.get("title") or "youtube_video")
     video_id = sanitize_filename(info.get("id") or "id")
-    outtmpl = os.path.join(out_dir, f"{title}_{video_id}.%(ext)s")
+    forced_base = sanitize_filename(str(args.output_base or "").strip())
+    if forced_base:
+        outtmpl = os.path.join(out_dir, f"{forced_base}.%(ext)s")
+    else:
+        outtmpl = os.path.join(out_dir, f"{title}_{video_id}.%(ext)s")
 
     ffmpeg_loc = find_ffmpeg_location()
 
@@ -193,6 +202,7 @@ def main() -> int:
             "title": title,
             "duration_s": float(duration or 0),
             "size": int(size),
+            "output_base": forced_base or "",
         }
     )
     return 0

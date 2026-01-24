@@ -85,6 +85,22 @@ function setupFileUtilsHandlers(ipcMain) {
     return getUserDataPath();
   });
 
+  ipcMain.handle('fs:copyFile', async (_event, srcPath, dstPath) => {
+    const src = await safeResolve(srcPath);
+    const dst = await safeResolve(dstPath);
+    await fs.mkdir(path.dirname(dst), { recursive: true });
+    await fs.copyFile(src, dst);
+    return true;
+  });
+
+  ipcMain.handle('fs:renameFile', async (_event, srcPath, dstPath) => {
+    const src = await safeResolve(srcPath);
+    const dst = await safeResolve(dstPath);
+    await fs.mkdir(path.dirname(dst), { recursive: true });
+    await fs.rename(src, dst);
+    return true;
+  });
+
   ipcMain.handle('fs:writeBinary', async (_event, targetPath, base64) => {
     const p = await safeResolve(targetPath);
     const buf = Buffer.from(String(base64 || ''), 'base64');

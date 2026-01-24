@@ -674,7 +674,11 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     setIsUploadModalOpen(false);
   };
 
-  const handleUploadModalUpload = (source: { type: 'youtube' | 'file'; value: string | File }) => {
+  const handleUploadModalUpload = async (
+    source:
+      | { type: 'youtube'; value: string }
+      | { type: 'file'; value: { path: string; name: string; size: number } }
+  ) => {
     if (source.type === 'youtube') {
       if (!uploadQueueRef.current) {
         addLog('Upload queue not ready', LogLevel.ERROR);
@@ -694,14 +698,36 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       return;
     }
 
-    const file = source.value as File;
     if (!uploadQueueRef.current) {
       addLog('Upload queue not ready', LogLevel.ERROR);
       setError('Upload queue not ready yet. Try again in a moment.');
       return;
     }
 
-    uploadQueueRef.current.addVideo(file);
+    try {
+      const api = window.electronAPI as any;
+      if (!api?.ingestVideoToRecordings) {
+        throw new Error('Electron API ingestVideoToRecordings not available');
+      }
+
+      addLog('Copying video into recordings...', LogLevel.INFO);
+      const ingest = await api.ingestVideoToRecordings(source.value.path);
+      if (!ingest?.success || !ingest.videoPath) {
+        throw new Error(ingest?.error || 'Failed to copy video into recordings');
+      }
+
+      uploadQueueRef.current.addVideoPath(
+        ingest.videoPath,
+        source.value.name || 'video',
+        Number(ingest.fileSize || source.value.size || 0)
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addLog(`Failed to ingest local video: ${message}`, LogLevel.ERROR);
+      setError(message);
+      return;
+    }
+
     setIsUploadModalOpen(false);
     setIsUploadProgressOpen(true);
   };

@@ -1,4 +1,4 @@
-const { app } = require('electron');
+const { app, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
 
@@ -271,6 +271,113 @@ function setupRecordingHandlers(ipcMain) {
       };
     } catch (err) {
       console.error('[Recording] Failed to read video:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Pick a local video file using a native dialog (returns a filesystem path, not a browser File).
+  ipcMain.handle('recording:pickVideoFile', async () => {
+    try {
+      const result = await dialog.showOpenDialog({
+        title: 'Select a video file',
+        properties: ['openFile'],
+        filters: [
+          { name: 'Video Files', extensions: ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+
+      if (result.canceled || !result.filePaths?.length) {
+        return { success: true, canceled: true };
+      }
+
+      const filePath = result.filePaths[0];
+      const st = await fs.stat(filePath);
+      return {
+        success: true,
+        canceled: false,
+        path: filePath,
+        name: path.basename(filePath),
+        size: st.size,
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Copy an existing local video file into the recordings directory immediately (ingest step).
+  // This avoids loading huge files into renderer memory.
+  ipcMain.handle('recording:ingestVideo', async (event, sourcePath) => {
+    try {
+      const src = String(sourcePath || '').trim();
+      if (!src) return { success: false, error: 'Missing sourcePath' };
+
+      const dir = await initRecordingsDir();
+      const st = await fs.stat(src);
+      if (!st.isFile()) return { success: false, error: 'Source is not a file' };
+
+      const ext = (path.extname(src) || '').toLowerCase() || '.mp4';
+      let baseFilename = `${generateFilename()}_upload`;
+      let videoFilename = `${baseFilename}${ext}`;
+      let videoPath = path.join(dir, videoFilename);
+
+      // Ensure uniqueness (avoid collisions when importing multiple files quickly).
+      for (let i = 0; i < 50; i++) {
+        try {
+          await fs.access(videoPath);
+          baseFilename = `${generateFilename()}_upload_${i + 1}`;
+          videoFilename = `${baseFilename}${ext}`;
+          videoPath = path.join(dir, videoFilename);
+        } catch {
+          break;
+        }
+      }
+
+      await fs.copyFile(src, videoPath);
+      const st2 = await fs.stat(videoPath);
+
+      return {
+        success: true,
+        videoPath,
+        filename: baseFilename,
+        videoFilename,
+        fileSize: st2.size,
+      };
+    } catch (err) {
+      console.error('[Recording] Failed to ingest video:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Save metadata for an already-present video file (no in-memory video transfer).
+  ipcMain.handle('recording:saveExisting', async (event, videoPath, metadata) => {
+    try {
+      const dir = await initRecordingsDir();
+      const vp = String(videoPath || '').trim();
+      if (!vp) return { success: false, error: 'Missing videoPath' };
+
+      const st = await fs.stat(vp);
+      const fileSize = st.size;
+
+      const rawName = path.basename(vp);
+      const baseFilename = rawName.replace(/\.(webm|mp4|mkv|mov|m4v|avi)$/i, '');
+      const metadataFilename = `${baseFilename}.json`;
+      const metadataPath = path.join(dir, metadataFilename);
+
+      const fullMetadata = {
+        ...metadata,
+        videoFilename: rawName,
+        videoPath: vp,
+        savedAt: new Date().toISOString(),
+        fileSize,
+      };
+
+      await fs.writeFile(metadataPath, JSON.stringify(fullMetadata, null, 2));
+      console.log('[Recording] Metadata saved (existing video):', metadataPath);
+
+      return { success: true, videoPath: vp, metadataPath, filename: baseFilename };
+    } catch (err) {
+      console.error('[Recording] Failed to save metadata for existing video:', err);
       return { success: false, error: err.message };
     }
   });

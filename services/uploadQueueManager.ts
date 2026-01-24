@@ -105,6 +105,45 @@ export class UploadQueueManager {
   }
 
   /**
+   * Add a local filesystem video path to queue (already on disk).
+   * This avoids loading huge files into renderer memory.
+   */
+  public addVideoPath(filePath: string, displayName?: string, size?: number): string {
+    const p = String(filePath || '').trim();
+    if (!p) {
+      throw new Error('Missing file path');
+    }
+
+    const videoId = `path_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const fileSize = Number(size || 0);
+    const fileName = String(displayName || p.split(/[\\/]/).pop() || 'video');
+
+    const queuedVideo: QueuedVideo = {
+      id: videoId,
+      file: { path: p, size: fileSize },
+      fileName,
+      fileSize,
+      status: 'pending',
+      progress: {
+        phase: 'Pending',
+        percentage: 0,
+        currentStep: 0,
+        totalSteps: 4,
+      },
+    };
+
+    this.queue.push(queuedVideo);
+    this.log(`Added to queue: ${fileName}`, LogLevel.INFO);
+    this.notifyQueueUpdate();
+
+    if (!this.isProcessing) {
+      this.processQueue();
+    }
+
+    return videoId;
+  }
+
+  /**
    * Add YouTube URL to queue (downloads first, then processes locally).
    * File upload path is unchanged.
    */
@@ -157,7 +196,7 @@ export class UploadQueueManager {
       }
 
       queuedVideo.file = { path: res.file_path, size: Number(res.size || 0) };
-      queuedVideo.fileName = String(res.file_name || res.title || 'youtube_video');
+       queuedVideo.fileName = String(res.title || res.file_name || 'youtube_video');
       queuedVideo.fileSize = Number(res.size || 0);
       queuedVideo.status = 'pending';
       queuedVideo.progress.phase = 'Pending';
@@ -439,7 +478,8 @@ export class UploadQueueManager {
       };
 
       let recordedMimeType: string | null = null;
-      let videoBytes: ArrayBuffer | null = null;
+      let videoBytes: ArrayBuffer | null = null; // Only used for legacy File-based saves.
+      let existingVideoPath: string | null = null;
       let tempVideoPathForConversion: string | null = null;
       let conversionOutputPath: string | null = null;
 
@@ -449,36 +489,27 @@ export class UploadQueueManager {
           videoBytes = await video.file.arrayBuffer();
         }
       } else {
-        const pathMime = inferMimeFromName(video.file.path) || inferMimeFromName(video.fileName);
+        existingVideoPath = String(video.file.path || '').trim();
+        const pathMime = inferMimeFromName(existingVideoPath) || inferMimeFromName(video.fileName);
         recordedMimeType = pathMime;
-        if (recordedMimeType === 'video/mp4' || recordedMimeType === 'video/webm') {
-          const base64 = await window.electronAPI.readBinary(video.file.path);
-          videoBytes = toBytesFromBase64(base64).buffer;
-        }
       }
 
-      // Fallback: for unsupported input containers, convert to WebM for consistent playback.
-      if (!videoBytes) {
+      // Fallback for legacy File-based inputs: convert to WebM then transfer bytes.
+      if (video.file instanceof File && !videoBytes) {
         this.log(`Converting ${video.fileName} to WebM for storage...`, LogLevel.WARN);
 
         const userDataPath = await window.electronAPI.getUserDataPath();
-        let tempVideoPath: string;
+        const tempVideoPath = `${userDataPath}/upload_video_${video.id}.mp4`;
+        tempVideoPathForConversion = tempVideoPath;
 
-        if (video.file instanceof File) {
-          tempVideoPath = `${userDataPath}/upload_video_${video.id}.mp4`;
-          tempVideoPathForConversion = tempVideoPath;
+        const arrayBuffer = await video.file.arrayBuffer();
+        const videoBase64 = btoa(
+          new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+        );
 
-          const arrayBuffer = await video.file.arrayBuffer();
-          const videoBase64 = btoa(
-            new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-          );
-
-          const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
-          if (!saveResult) {
-            throw new Error('Failed to save temp video file');
-          }
-        } else {
-          tempVideoPath = video.file.path;
+        const saveResult = await window.electronAPI.writeBinary(tempVideoPath, videoBase64);
+        if (!saveResult) {
+          throw new Error('Failed to save temp video file');
         }
 
         const convertResult = await window.electronAPI.convertVideoToWebM(tempVideoPath);
@@ -488,8 +519,32 @@ export class UploadQueueManager {
         conversionOutputPath = convertResult.outputPath;
 
         const webmBase64 = await window.electronAPI.readBinary(convertResult.outputPath);
-        videoBytes = toBytesFromBase64(webmBase64).buffer;
+        const bytes = toBytesFromBase64(webmBase64);
+        // Make sure we hand an ArrayBuffer (not ArrayBufferLike) across IPC.
+        videoBytes = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         recordedMimeType = 'video/webm';
+      }
+
+      // Path-based inputs (YouTube/local-path) are already on disk.
+      // Keep them on disk and only write metadata into recordings to avoid huge in-memory transfers.
+      if (existingVideoPath) {
+        if (recordedMimeType !== 'video/mp4' && recordedMimeType !== 'video/webm') {
+          this.log(`Converting ${video.fileName} to WebM for storage...`, LogLevel.WARN);
+          const convertResult = await window.electronAPI.convertVideoToWebM(existingVideoPath);
+          if (!convertResult.success || !convertResult.outputPath) {
+            throw new Error(`Video conversion failed: ${convertResult.error}`);
+          }
+
+          const baseNoExt = existingVideoPath.replace(/\\.[^\\\\/.]+$/, '');
+          const finalWebmPath = `${baseNoExt}.webm`;
+          // Keep the original output path for cleanup; the rename moves it into recordings.
+          conversionOutputPath = convertResult.outputPath;
+          await (window.electronAPI as any).renameFile(convertResult.outputPath, finalWebmPath);
+
+          await window.electronAPI.deleteFile(existingVideoPath);
+          existingVideoPath = finalWebmPath;
+          recordedMimeType = 'video/webm';
+        }
       }
 
       // Prepare metadata with video
@@ -505,8 +560,11 @@ export class UploadQueueManager {
         recordedMimeType: recordedMimeType || 'video/webm'
       };
 
-      // Save via Electron IPC with video data
-      const result = await window.electronAPI.saveRecording(videoBytes, metadata);
+      // Save metadata/video into recordings.
+      // Path-based inputs avoid loading huge files into renderer memory.
+      const result = existingVideoPath
+        ? await (window.electronAPI as any).saveRecordingExisting(existingVideoPath, metadata)
+        : await window.electronAPI.saveRecording(videoBytes, metadata);
 
       if (result.success) {
         this.log(`Saved to recordings: ${result.filename}`, LogLevel.SUCCESS);

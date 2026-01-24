@@ -311,6 +311,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('recording:save', videoData, metadata);
   },
 
+  // Pick a local video file (main-process dialog; returns a filesystem path)
+  pickVideoFile: async () => {
+    return await ipcRenderer.invoke('recording:pickVideoFile');
+  },
+
+  // Copy a local video file into recordings immediately (ingest step)
+  ingestVideoToRecordings: async (sourcePath) => {
+    return await ipcRenderer.invoke('recording:ingestVideo', sourcePath);
+  },
+
+  // Save metadata for an already-present video file (no in-memory video transfer)
+  saveRecordingExisting: async (videoPath, metadata) => {
+    return await ipcRenderer.invoke('recording:saveExisting', videoPath, metadata);
+  },
+
   // List all saved recordings
   listRecordings: async () => {
     return await ipcRenderer.invoke('recording:list');
@@ -358,6 +373,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   readFile: async (filePath) => {
     return await ipcRenderer.invoke('fs:readFile', filePath);
+  },
+
+  copyFile: async (srcPath, dstPath) => {
+    return await ipcRenderer.invoke('fs:copyFile', srcPath, dstPath);
+  },
+
+  renameFile: async (srcPath, dstPath) => {
+    return await ipcRenderer.invoke('fs:renameFile', srcPath, dstPath);
   },
 
   deleteFile: async (filePath) => {
