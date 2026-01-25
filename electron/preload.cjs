@@ -189,6 +189,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('qwen:get-server-mode');
   },
 
+  // =====================================================
+  // REMOTE FULL-VIDEO UPLOAD (client/server inbox)
+  // =====================================================
+
+  getInboxStatus: async () => {
+    return await ipcRenderer.invoke('inbox:status');
+  },
+  onInboxActivity: (callback) => {
+    ipcRenderer.on('inbox:activity', (event, activity) => callback(activity));
+  },
+  onInboxFileReceived: (callback) => {
+    ipcRenderer.on('inbox:file-received', (event, payload) => callback(payload));
+  },
+  removeInboxListeners: () => {
+    ipcRenderer.removeAllListeners('inbox:activity');
+    ipcRenderer.removeAllListeners('inbox:file-received');
+  },
+
+  sendVideoToRemoteServer: async (serverUrl, filePath, displayName) => {
+    return await ipcRenderer.invoke('remoteUpload:sendFile', serverUrl, filePath, displayName);
+  },
+  onRemoteUploadProgress: (callback) => {
+    ipcRenderer.on('remoteUpload:progress', (event, payload) => callback(payload));
+  },
+  onRemoteUploadComplete: (callback) => {
+    ipcRenderer.on('remoteUpload:complete', (event, payload) => callback(payload));
+  },
+  onRemoteUploadError: (callback) => {
+    ipcRenderer.on('remoteUpload:error', (event, payload) => callback(payload));
+  },
+  removeRemoteUploadListeners: () => {
+    ipcRenderer.removeAllListeners('remoteUpload:progress');
+    ipcRenderer.removeAllListeners('remoteUpload:complete');
+    ipcRenderer.removeAllListeners('remoteUpload:error');
+  },
+
   // Qwen server activity (remote server mode)
   getQwenActivity: async () => {
     return await ipcRenderer.invoke('qwen:get-activity');

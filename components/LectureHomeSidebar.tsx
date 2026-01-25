@@ -45,6 +45,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
   const [isServerRunning, setIsServerRunning] = useState(false);
   const [isCheckingServer, setIsCheckingServer] = useState(false);
   const [qwenActivity, setQwenActivity] = useState<any | null>(null);
+  const [inboxActivity, setInboxActivity] = useState<any | null>(null);
 
   // Load remote config on mount
   useEffect(() => {
@@ -102,8 +103,27 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
     };
   }, []);
 
+  // Subscribe to inbox activity (server mode only)
+  useEffect(() => {
+    const api = window.electronAPI as any;
+    if (!api?.onInboxActivity) return;
+    api.getInboxStatus?.()
+      .then((res: any) => {
+        if (res?.success && res.status) setInboxActivity(res.status);
+      })
+      .catch(() => {});
+    api.onInboxActivity((activity: any) => setInboxActivity(activity));
+    return () => {
+      // Do not remove inbox listeners here; App.tsx owns the file-received subscription.
+    };
+  }, []);
+
   useEffect(() => {
     if (remoteConfig?.mode !== 'server') setQwenActivity(null);
+  }, [remoteConfig?.mode]);
+
+  useEffect(() => {
+    if (remoteConfig?.mode !== 'server') setInboxActivity(null);
   }, [remoteConfig?.mode]);
 
   // Check server mode status using IPC flag (source of truth)
@@ -477,7 +497,27 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
             <h3 className="text-sm font-semibold text-white">Server Activity</h3>
           </div>
           <div className="border-t border-[#3a3a3a] pt-3 mt-3">
-            {qwenActivity?.active && qwenActivity?.phase ? (
+            {inboxActivity?.active ? (
+              <div className="space-y-2 p-3 rounded-lg border border-[#333333] bg-[#1a1a1a]">
+                <div className="flex items-center gap-3">
+                  <Loader2 className="w-5 h-5 text-[#0E72ED] animate-spin flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-white font-medium truncate">
+                      {inboxActivity?.clientIp || 'Remote client'}
+                    </div>
+                    <div className="text-xs text-[#8a8a8a] truncate">
+                      Receiving upload ({Math.max(0, Math.min(100, Number(inboxActivity?.progressPercent || 0)))}%)
+                    </div>
+                  </div>
+                </div>
+                <div className="w-full bg-[#2a2a2a] rounded-full h-1 overflow-hidden">
+                  <div
+                    className="bg-[#0E72ED] h-full rounded-full transition-all duration-300"
+                    style={{ width: `${inboxActivity?.progressPercent || 0}%` }}
+                  />
+                </div>
+              </div>
+            ) : qwenActivity?.active && qwenActivity?.phase ? (
               <div className="space-y-2 p-3 rounded-lg border border-[#333333] bg-[#1a1a1a]">
                 <div className="flex items-center gap-3">
                   <Loader2 className="w-5 h-5 text-[#0E72ED] animate-spin flex-shrink-0" />
@@ -496,6 +536,10 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
                     style={{ width: `${qwenActivity?.progressPercent || 0}%` }}
                   />
                 </div>
+              </div>
+            ) : inboxActivity?.lastError ? (
+              <div className="p-3 rounded-lg border border-[rgba(239,68,68,0.3)] bg-[rgba(239,68,68,0.1)] text-sm text-[#ef4444]">
+                {String(inboxActivity.lastError)}
               </div>
             ) : qwenActivity?.lastError ? (
               <div className="p-3 rounded-lg border border-[rgba(239,68,68,0.3)] bg-[rgba(239,68,68,0.1)] text-sm text-[#ef4444]">

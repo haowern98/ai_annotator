@@ -164,7 +164,31 @@ export default function App() {
 
     initUploadClients();
 
+    // In server mode, accept full-video uploads via the Electron main-process inbox.
+    // When a file arrives, enqueue it for local processing (same pipeline as local path/YouTube uploads).
+    const api = window.electronAPI as any;
+    const handleInboxFile = (payload: any) => {
+      try {
+        const videoPath = String(payload?.videoPath || '').trim();
+        if (!videoPath) return;
+        const fileName = String(payload?.fileName || 'remote_upload');
+        const fileSize = Number(payload?.fileSize || 0);
+        uploadQueueRef.current?.addVideoPath(videoPath, fileName, fileSize);
+      } catch (e) {
+        console.warn('[Upload Queue] Failed to enqueue inbox file:', e);
+      }
+    };
+
+    if (api?.onInboxFileReceived) {
+      api.onInboxFileReceived(handleInboxFile);
+    }
+
     return () => {
+      try {
+        (window.electronAPI as any)?.removeInboxListeners?.();
+      } catch {
+        // ignore
+      }
       if (uploadQueueRef.current) {
         uploadQueueRef.current = null;
       }

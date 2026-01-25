@@ -13,6 +13,8 @@ const { setupFileUtilsHandlers } = require('./ipc/fileUtils.cjs');
 const { setupYouTubeHandlers } = require('./ipc/youtube.cjs');
 const { setupNetworkHandlers } = require('./ipc/network.cjs');
 const { setupQwenControlHandlers } = require('./ipc/qwenControl.cjs');
+const { setupRemoteInboxHandlers } = require('./ipc/remoteInbox.cjs');
+const { setupRemoteUploadHandlers } = require('./ipc/remoteUpload.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
 // Only set command-line switches if app is properly loaded
@@ -59,6 +61,11 @@ let splashWindow;
 
 let parakeetProcess = null;
 let qwenProcess = null;
+
+function getRecordingsDirFallback() {
+  // Keep in sync with electron/ipc/recording.cjs default.
+  return path.join(__dirname, '..', '..', '.recordings');
+}
 
 // Track Qwen server activity (remote "server mode" UX).
 // Driven by qwen_worker stdout/stderr logs (uvicorn access logs + batch logs),
@@ -599,6 +606,37 @@ function createWindow() {
   const getServerMode = () => isServerMode;
   const setServerMode = (mode) => { isServerMode = mode; };
 
+  // Remote inbox for full-video uploads (server mode).
+  const remoteInbox = setupRemoteInboxHandlers(ipcMain, {
+    getRecordingsDir: getRecordingsDirFallback,
+    sendToRenderer: (channel, payload) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(channel, payload);
+        }
+      } catch {
+        // ignore
+      }
+    },
+    defaultPort: 7557,
+  });
+
+  const startInbox = async () => {
+    try {
+      await remoteInbox.start(7557);
+    } catch {
+      // ignore
+    }
+  };
+
+  const stopInbox = async () => {
+    try {
+      await remoteInbox.stop();
+    } catch {
+      // ignore
+    }
+  };
+
   // Network and Qwen control handlers
   setupNetworkHandlers(ipcMain);
   setupQwenControlHandlers(
@@ -612,7 +650,13 @@ function createWindow() {
       attachQwenActivityListeners(proc);
     },
     getServerMode,
-    setServerMode
+    (mode) => {
+      setServerMode(mode);
+      if (mode) startInbox();
+      else stopInbox();
+    },
+    startInbox,
+    stopInbox
   );
 
   // Setup IPC handlers
@@ -623,6 +667,18 @@ function createWindow() {
   setupRecordingHandlers(ipcMain);
   setupFileUtilsHandlers(ipcMain);
   setupYouTubeHandlers(ipcMain);
+  setupRemoteUploadHandlers(ipcMain, {
+    inboxPort: 7557,
+    sendToRenderer: (channel, payload) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(channel, payload);
+        }
+      } catch {
+        // ignore
+      }
+    },
+  });
 
   // Load the app
   if (process.env.NODE_ENV === 'development') {

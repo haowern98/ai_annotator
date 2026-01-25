@@ -704,6 +704,33 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       return;
     }
 
+    // If we're in client remote mode, send the full video to the remote server for processing.
+    try {
+      const saved = localStorage.getItem('qwen_remote_config');
+      const cfg = saved ? JSON.parse(saved) : null;
+      if (cfg?.mode === 'client' && cfg.remoteUrl) {
+        const api = window.electronAPI as any;
+        if (!api?.sendVideoToRemoteServer) {
+          throw new Error('Electron API sendVideoToRemoteServer not available');
+        }
+
+        addLog('Uploading full video to remote server...', LogLevel.INFO);
+        const res = await api.sendVideoToRemoteServer(String(cfg.remoteUrl), source.value.path, source.value.name);
+        if (!res?.success) {
+          throw new Error(res?.error || 'Remote upload failed');
+        }
+
+        addLog('Upload complete. The remote server will process and save it to its recordings.', LogLevel.SUCCESS);
+        setIsUploadModalOpen(false);
+        return;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addLog(`Remote upload error: ${message}`, LogLevel.ERROR);
+      setError(message);
+      return;
+    }
+
     try {
       const api = window.electronAPI as any;
       if (!api?.ingestVideoToRecordings) {

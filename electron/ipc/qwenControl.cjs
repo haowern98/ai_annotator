@@ -10,8 +10,20 @@ const { spawn } = require('child_process');
  * @param {Function} setQwenProcess - Set the main qwenProcess in main.cjs
  * @param {Function} getServerMode - Get server mode status
  * @param {Function} setServerMode - Set server mode status
+ * @param {Function} startInbox - Start remote inbox server (optional)
+ * @param {Function} stopInbox - Stop remote inbox server (optional)
  */
-function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeout, getQwenProcess, setQwenProcess, getServerMode, setServerMode) {
+function setupQwenControlHandlers(
+  ipcMain,
+  getVenvPythonPath,
+  fetchJsonWithTimeout,
+  getQwenProcess,
+  setQwenProcess,
+  getServerMode,
+  setServerMode,
+  startInbox,
+  stopInbox
+) {
   // Get current server mode
   ipcMain.handle('qwen:get-server-mode', async () => {
     return { success: true, isServerMode: getServerMode() };
@@ -69,6 +81,7 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
           if (json?.status === 'healthy') {
             console.log('[Qwen] Remote mode ready');
             setServerMode(true);
+            try { await startInbox?.(); } catch {}
             return { success: true };
           }
         } catch {
@@ -136,6 +149,7 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
           if (json?.status === 'healthy') {
             console.log('[Qwen] Local mode ready');
             setServerMode(false);
+            try { await stopInbox?.(); } catch {}
             return { success: true };
           }
         } catch {
@@ -160,6 +174,7 @@ function setupQwenControlHandlers(ipcMain, getVenvPythonPath, fetchJsonWithTimeo
         existingProcess.kill();
         setQwenProcess(null);
         setServerMode(false);
+        try { await stopInbox?.(); } catch {}
         await new Promise(resolve => setTimeout(resolve, 1000));
         return { success: true };
       }

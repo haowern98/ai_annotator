@@ -456,7 +456,7 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                     fontFamily: 'monospace'
                   }}
                 >
-                  7556 (TCP)
+                  7556 (Qwen API) · 7557 (Video Inbox)
                 </div>
               </div>
             </div>
@@ -478,7 +478,7 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                       Port Forwarding Required
                     </div>
                     <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.5' }}>
-                      You must configure your router to forward TCP port 7556 to this computer's local IP ({localIP}).
+                      You must configure your router to forward TCP ports 7556 and 7557 to this computer's local IP ({localIP}).
                     </div>
                     <button
                       style={{

@@ -310,7 +310,7 @@ export class UploadQueueManager {
     }
 
     // Check if video was cancelled
-    if (video.status === 'cancelled') {
+    if (video.cancelRequested) {
       throw new Error('Video cancelled by user');
     }
 
@@ -334,7 +334,7 @@ export class UploadQueueManager {
     }
 
     // Check if video was cancelled
-    if (video.status === 'cancelled') {
+    if (video.cancelRequested) {
       throw new Error('Video cancelled by user');
     }
 
@@ -376,7 +376,7 @@ export class UploadQueueManager {
     }
 
     // Check if video was cancelled
-    if (video.status === 'cancelled') {
+    if (video.cancelRequested) {
       throw new Error('Video cancelled by user');
     }
 
@@ -393,7 +393,7 @@ export class UploadQueueManager {
       transcriptPath,
       (window, totalWindows) => {
         // Check if cancelled during VLM processing
-        if (video.status === 'cancelled') {
+        if (video.cancelRequested) {
           throw new Error('Video cancelled by user');
         }
         video.progress.phase = `Analyzing with VLM (${window}/${totalWindows})`;

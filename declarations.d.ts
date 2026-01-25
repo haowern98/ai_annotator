@@ -66,11 +66,14 @@ interface ElectronAPI {
   // Recording API
   initRecording: () => Promise<{success: boolean; path?: string; error?: string}>;
   saveRecording: (videoData: ArrayBuffer | string | null, metadata: any) => Promise<any>;
+  saveRecordingExisting: (videoPath: string, metadata: any) => Promise<any>;
   listRecordings: () => Promise<any>;
   deleteRecording: (videoFilename: string) => Promise<any>;
   getRecordingMetadata: (videoFilename: string) => Promise<any>;
   getRecordingVideo: (videoFilename: string) => Promise<{success: boolean; data?: string; mimeType?: string; error?: string}>;
   getRecordingVideoPath: (videoFilename: string) => Promise<{success: boolean; path?: string; mimeType?: string; error?: string}>;
+  pickVideoFile: () => Promise<{success: boolean; canceled?: boolean; path?: string; name?: string; size?: number; error?: string}>;
+  ingestVideoToRecordings: (sourcePath: string) => Promise<{success: boolean; videoPath?: string; filename?: string; videoFilename?: string; fileSize?: number; error?: string}>;
 
   // File + video utils (Upload Queue / batch processing)
   getUserDataPath: () => Promise<string>;
@@ -78,10 +81,21 @@ interface ElectronAPI {
   readBinary: (filePath: string) => Promise<string>;
   writeFile: (filePath: string, content: string) => Promise<boolean>;
   readFile: (filePath: string) => Promise<string>;
+  copyFile: (srcPath: string, dstPath: string) => Promise<boolean>;
+  renameFile: (srcPath: string, dstPath: string) => Promise<boolean>;
   deleteFile: (filePath: string) => Promise<boolean>;
   extractAudioFromVideo: (videoPath: string) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
   extractWavSegment: (wavPath: string, startSeconds: number, durationSeconds: number) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
   convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
+
+  // Remote full-video upload (client/server inbox)
+  getInboxStatus: () => Promise<{success: boolean; status?: any; error?: string}>;
+  onInboxActivity: (callback: (activity: any) => void) => void;
+  onInboxFileReceived: (callback: (payload: any) => void) => void;
+  sendVideoToRemoteServer: (serverUrl: string, filePath: string, displayName?: string) => Promise<{success: boolean; error?: string}>;
+  onRemoteUploadProgress: (callback: (payload: any) => void) => void;
+  onRemoteUploadComplete: (callback: (payload: any) => void) => void;
+  onRemoteUploadError: (callback: (payload: any) => void) => void;
 
   // YouTube downloader (runs python yt_dlp in .venv)
   downloadYouTube: (
