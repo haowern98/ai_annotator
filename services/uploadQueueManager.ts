@@ -13,6 +13,7 @@ export type VideoInput = File | { path: string; size: number };
 
 export type VideoStatus =
   | 'pending'
+  | 'uploading'
   | 'downloading'
   | 'extracting'
   | 'transcribing'
@@ -141,6 +142,83 @@ export class UploadQueueManager {
     }
 
     return videoId;
+  }
+
+  /**
+   * Add a remote-upload placeholder item (client mode).
+   * This tracks upload progress to the remote server but does not run local processing.
+   */
+  public addRemoteUpload(displayName: string, size?: number): string {
+    const fileName = String(displayName || 'video');
+    const fileSize = Number(size || 0);
+    const videoId = `remote_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    const queuedVideo: QueuedVideo = {
+      id: videoId,
+      file: { path: '', size: fileSize },
+      fileName,
+      fileSize,
+      status: 'uploading',
+      progress: {
+        phase: 'Uploading to remote server',
+        percentage: 0,
+        currentStep: 1,
+        totalSteps: 1,
+      },
+      startTime: Date.now(),
+    };
+
+    this.queue.push(queuedVideo);
+    this.notifyQueueUpdate();
+    return videoId;
+  }
+
+  public updateRemoteUpload(
+    videoId: string,
+    progressPercent: number,
+    sentBytes?: number,
+    totalBytes?: number
+  ): void {
+    const video = this.queue.find((v) => v.id === videoId);
+    if (!video) return;
+    if (video.status !== 'uploading') return;
+
+    const pct = Number(progressPercent || 0);
+    video.progress.percentage = Math.max(0, Math.min(100, pct));
+    if (typeof totalBytes === 'number' && Number.isFinite(totalBytes) && totalBytes > 0) {
+      video.fileSize = totalBytes;
+    }
+    if (typeof sentBytes === 'number' && typeof totalBytes === 'number' && totalBytes > 0) {
+      // Keep a bit more detail without changing UI structure.
+      video.progress.phase = `Uploading to remote server (${Math.max(0, Math.min(100, Math.round((sentBytes / totalBytes) * 100)))}%)`;
+    } else {
+      video.progress.phase = 'Uploading to remote server';
+    }
+    this.notifyQueueUpdate();
+  }
+
+  public completeRemoteUpload(videoId: string): void {
+    const video = this.queue.find((v) => v.id === videoId);
+    if (!video) return;
+    if (video.status !== 'uploading') return;
+
+    video.status = 'complete';
+    video.progress.percentage = 100;
+    video.progress.phase = 'Upload complete (server processing)';
+    video.endTime = Date.now();
+    this.notifyQueueUpdate();
+    this.callbacks.onVideoComplete?.(video);
+  }
+
+  public failRemoteUpload(videoId: string, error: string): void {
+    const video = this.queue.find((v) => v.id === videoId);
+    if (!video) return;
+
+    video.status = 'error';
+    video.error = String(error || 'Remote upload failed');
+    video.endTime = Date.now();
+    this.notifyQueueUpdate();
+    this.callbacks.onVideoError?.(video, video.error);
   }
 
   /**

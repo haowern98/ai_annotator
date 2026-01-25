@@ -51,6 +51,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   // Remote processing modal state
   const [isRemoteModalOpen, setIsRemoteModalOpen] = React.useState(false);
   const [isUploadProgressOpen, setIsUploadProgressOpen] = React.useState(false);
+  const remoteUploadIdRef = React.useRef<string | null>(null);
 
   // Session manager and media refs
   const sessionManagerRef = React.useRef<LectureParakeetSessionManager | null>(null);
@@ -123,6 +124,33 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       }
     };
   }, [addLog]);
+
+  // Track remote full-video upload progress (client mode).
+  React.useEffect(() => {
+    const api = window.electronAPI as any;
+    if (!api?.onRemoteUploadProgress) return;
+
+    const handleProgress = (payload: any) => {
+      const id = remoteUploadIdRef.current;
+      if (!id) return;
+      uploadQueueRef.current?.updateRemoteUpload(
+        id,
+        Number(payload?.progressPercent || 0),
+        Number(payload?.sentBytes || 0),
+        Number(payload?.totalBytes || 0)
+      );
+    };
+
+    api.onRemoteUploadProgress(handleProgress);
+
+    return () => {
+      try {
+        api.removeRemoteUploadListeners?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, [uploadQueueRef]);
 
   // Save session metadata without recording
   const saveSessionMetadata = React.useCallback(async (collectedTranscripts?: any[], collectedSummaries?: any[]) => {
@@ -714,18 +742,41 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           throw new Error('Electron API sendVideoToRemoteServer not available');
         }
 
+        const remoteQueueId = uploadQueueRef.current.addRemoteUpload(
+          source.value.name || 'video',
+          source.value.size
+        );
+        remoteUploadIdRef.current = remoteQueueId;
+        setIsUploadModalOpen(false);
+        setIsUploadProgressOpen(true);
+
         addLog('Uploading full video to remote server...', LogLevel.INFO);
-        const res = await api.sendVideoToRemoteServer(String(cfg.remoteUrl), source.value.path, source.value.name);
+        const res = await api.sendVideoToRemoteServer(
+          String(cfg.remoteUrl),
+          source.value.path,
+          source.value.name
+        );
         if (!res?.success) {
+          uploadQueueRef.current.failRemoteUpload(remoteQueueId, res?.error || 'Remote upload failed');
+          remoteUploadIdRef.current = null;
           throw new Error(res?.error || 'Remote upload failed');
         }
 
+        uploadQueueRef.current.completeRemoteUpload(remoteQueueId);
+        remoteUploadIdRef.current = null;
         addLog('Upload complete. The remote server will process and save it to its recordings.', LogLevel.SUCCESS);
-        setIsUploadModalOpen(false);
         return;
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (remoteUploadIdRef.current && uploadQueueRef.current) {
+        try {
+          uploadQueueRef.current.failRemoteUpload(remoteUploadIdRef.current, message);
+        } catch {
+          // ignore
+        }
+        remoteUploadIdRef.current = null;
+      }
       addLog(`Remote upload error: ${message}`, LogLevel.ERROR);
       setError(message);
       return;

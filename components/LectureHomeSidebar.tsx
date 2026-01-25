@@ -4,6 +4,7 @@ import {
   WifiOff, 
   Plug2, 
   X, 
+  Upload,
   FileVideo, 
   Film, 
   Mic, 
@@ -207,6 +208,8 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
 
   const getPhaseIcon = (phase: string) => {
     switch (phase) {
+      case 'uploading':
+        return <Upload className="w-4 h-4 text-[#8a8a8a]" />;
       case 'extracting':
         return <Film className="w-4 h-4 text-[#8a8a8a]" />;
       case 'transcribing':
@@ -228,6 +231,8 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
 
   const getPhaseText = (phase: string) => {
     switch (phase) {
+      case 'uploading':
+        return 'Uploading to remote server';
       case 'extracting':
         return 'Extracting frames';
       case 'transcribing':
@@ -281,6 +286,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
     total: uploadQueue.length,
     pending: uploadQueue.filter((v) => v.status === 'pending').length,
     processing: uploadQueue.filter((v) =>
+      v.status === 'uploading' ||
       v.status === 'downloading' ||
       v.status === 'extracting' ||
       v.status === 'transcribing' ||
@@ -401,7 +407,8 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2 flex-1 min-w-0">
-                      {video.status === 'downloading' ||
+                      {video.status === 'uploading' ||
+                      video.status === 'downloading' ||
                       video.status === 'analyzing' ||
                       video.status === 'extracting' ||
                       video.status === 'transcribing' ||
@@ -441,7 +448,8 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
                     )}
                   </div>
 
-                  {(video.status === 'downloading' ||
+                  {(video.status === 'uploading' ||
+                    video.status === 'downloading' ||
                     video.status === 'extracting' ||
                     video.status === 'transcribing' ||
                     video.status === 'analyzing' ||

@@ -63,8 +63,9 @@ let parakeetProcess = null;
 let qwenProcess = null;
 
 function getRecordingsDirFallback() {
-  // Keep in sync with electron/ipc/recording.cjs default.
-  return path.join(__dirname, '..', '..', '.recordings');
+  // In dev, keep recordings in the repo root under `.recordings`.
+  // `__dirname` here is `<repo>/electron`, so go up one level.
+  return path.join(__dirname, '..', '.recordings');
 }
 
 // Track Qwen server activity (remote "server mode" UX).
