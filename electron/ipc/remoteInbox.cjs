@@ -46,6 +46,10 @@ function setupRemoteInboxHandlers(ipcMain, options) {
     defaultPort = 7557,
   } = options || {};
 
+  // Job tracking for remote uploads. Keyed by jobId (provided by client).
+  // Used by clients to poll status and fetch final metadata JSON.
+  const jobs = new Map();
+
   const state = {
     running: false,
     port: defaultPort,
@@ -110,6 +114,46 @@ function setupRemoteInboxHandlers(ipcMain, options) {
           return;
         }
 
+        // Client polling: get status
+        if (method === 'GET' && url.startsWith('/inbox/status/')) {
+          const jobId = decodeURIComponent(url.slice('/inbox/status/'.length)).trim();
+          const job = jobs.get(jobId);
+          if (!job) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Job not found' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, jobId, status: job }));
+          return;
+        }
+
+        // Client polling: fetch final metadata JSON
+        if (method === 'GET' && url.startsWith('/inbox/result/')) {
+          const jobId = decodeURIComponent(url.slice('/inbox/result/'.length)).trim();
+          const job = jobs.get(jobId);
+          if (!job) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Job not found' }));
+            return;
+          }
+          if (job.state !== 'complete' || !job.metadataPath) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Result not ready', state: job.state }));
+            return;
+          }
+          try {
+            const json = await fsp.readFile(String(job.metadataPath), 'utf8');
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(json);
+            return;
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+            return;
+          }
+        }
+
         if (!((method === 'PUT' || method === 'POST') && url.startsWith('/inbox/upload'))) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           res.end('Not found');
@@ -117,6 +161,10 @@ function setupRemoteInboxHandlers(ipcMain, options) {
         }
 
         const clientIp = parseClientIp(req);
+        const jobIdHeader = req.headers['x-job-id'];
+        const jobId = String(Array.isArray(jobIdHeader) ? jobIdHeader[0] : jobIdHeader || '').trim()
+          || `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
         const originalName = sanitizeFilename(req.headers['x-filename'] || 'remote_upload.mp4');
         const ext = safeExtFromName(originalName);
         const rand = Math.random().toString(36).slice(2, 7);
@@ -135,6 +183,20 @@ function setupRemoteInboxHandlers(ipcMain, options) {
           totalBytes: total,
           savedPath: targetPath,
           lastError: null,
+        });
+
+        jobs.set(jobId, {
+          state: 'uploading',
+          phase: 'Uploading to server',
+          progressPercent: 0,
+          clientIp,
+          fileName: originalName,
+          receivedBytes: 0,
+          totalBytes: total,
+          savedVideoPath: targetPath,
+          metadataPath: null,
+          error: null,
+          updatedAt: Date.now(),
         });
 
         const out = fs.createWriteStream(targetPath);
@@ -158,6 +220,13 @@ function setupRemoteInboxHandlers(ipcMain, options) {
             active: false,
             lastError: err ? String(err.message || err) : 'Upload aborted',
           });
+          const job = jobs.get(jobId);
+          if (job) {
+            job.state = 'error';
+            job.error = err ? String(err.message || err) : 'Upload aborted';
+            job.updatedAt = Date.now();
+            jobs.set(jobId, job);
+          }
         };
 
         req.on('aborted', () => abort(new Error('Client aborted upload')));
@@ -171,6 +240,13 @@ function setupRemoteInboxHandlers(ipcMain, options) {
             receivedBytes: received,
             progressPercent: pct,
           });
+          const job = jobs.get(jobId);
+          if (job) {
+            job.receivedBytes = received;
+            job.progressPercent = pct;
+            job.updatedAt = Date.now();
+            jobs.set(jobId, job);
+          }
         });
 
         req.pipe(out);
@@ -189,6 +265,7 @@ function setupRemoteInboxHandlers(ipcMain, options) {
 
             try {
               sendToRenderer?.('inbox:file-received', {
+                jobId,
                 videoPath: targetPath,
                 fileName: originalName,
                 fileSize: st.size,
@@ -198,8 +275,22 @@ function setupRemoteInboxHandlers(ipcMain, options) {
               // ignore
             }
 
+            const job = jobs.get(jobId) || {};
+            jobs.set(jobId, {
+              ...job,
+              state: 'processing',
+              phase: 'Queued for processing',
+              progressPercent: Math.max(0, Math.min(100, Number(job.progressPercent || 100))),
+              receivedBytes: st.size,
+              totalBytes: total,
+              clientIp,
+              fileName: originalName,
+              savedVideoPath: targetPath,
+              updatedAt: Date.now(),
+            });
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, videoPath: targetPath, size: st.size }));
+            res.end(JSON.stringify({ success: true, jobId, videoPath: targetPath, size: st.size }));
           } catch (e) {
             await abort(e);
             res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -271,8 +362,48 @@ function setupRemoteInboxHandlers(ipcMain, options) {
     return { success: true, status: { ...state } };
   });
 
+  // Renderer (server PC) updates job status while processing.
+  ipcMain.handle('inbox:update-job', async (_event, jobIdRaw, partial) => {
+    const jobId = String(jobIdRaw || '').trim();
+    if (!jobId) return { success: false, error: 'Missing jobId' };
+    const current = jobs.get(jobId) || { state: 'processing' };
+    const next = { ...current, ...(partial || {}), updatedAt: Date.now() };
+    jobs.set(jobId, next);
+    return { success: true };
+  });
+
+  ipcMain.handle('inbox:complete-job', async (_event, jobIdRaw, metadataPathRaw) => {
+    const jobId = String(jobIdRaw || '').trim();
+    const metadataPath = String(metadataPathRaw || '').trim();
+    if (!jobId) return { success: false, error: 'Missing jobId' };
+    if (!metadataPath) return { success: false, error: 'Missing metadataPath' };
+    const current = jobs.get(jobId) || {};
+    jobs.set(jobId, {
+      ...current,
+      state: 'complete',
+      phase: 'Complete',
+      progressPercent: 100,
+      metadataPath,
+      error: null,
+      updatedAt: Date.now(),
+    });
+    return { success: true };
+  });
+
+  ipcMain.handle('inbox:error-job', async (_event, jobIdRaw, errorRaw) => {
+    const jobId = String(jobIdRaw || '').trim();
+    if (!jobId) return { success: false, error: 'Missing jobId' };
+    const current = jobs.get(jobId) || {};
+    jobs.set(jobId, {
+      ...current,
+      state: 'error',
+      error: String(errorRaw || 'Error'),
+      updatedAt: Date.now(),
+    });
+    return { success: true };
+  });
+
   return { start, stop, state };
 }
 
 module.exports = { setupRemoteInboxHandlers };
-

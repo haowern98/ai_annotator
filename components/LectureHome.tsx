@@ -52,6 +52,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const [isRemoteModalOpen, setIsRemoteModalOpen] = React.useState(false);
   const [isUploadProgressOpen, setIsUploadProgressOpen] = React.useState(false);
   const remoteUploadIdRef = React.useRef<string | null>(null);
+  const remoteJobIdRef = React.useRef<string | null>(null);
+  const remoteClientVideoPathRef = React.useRef<string | null>(null);
 
   // Session manager and media refs
   const sessionManagerRef = React.useRef<LectureParakeetSessionManager | null>(null);
@@ -133,9 +135,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     const handleProgress = (payload: any) => {
       const id = remoteUploadIdRef.current;
       if (!id) return;
+      const rawPct = Number(payload?.progressPercent || 0);
+      // Scale upload into the first ~33% of the overall progress bar.
+      const scaledPct = Math.max(0, Math.min(33, (rawPct / 100) * 33));
       uploadQueueRef.current?.updateRemoteUpload(
         id,
-        Number(payload?.progressPercent || 0),
+        scaledPct,
         Number(payload?.sentBytes || 0),
         Number(payload?.totalBytes || 0)
       );
@@ -708,15 +713,146 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       | { type: 'file'; value: { path: string; name: string; size: number } }
   ) => {
     if (source.type === 'youtube') {
-      if (!uploadQueueRef.current) {
-        addLog('Upload queue not ready', LogLevel.ERROR);
-        setError('Upload queue not ready yet. Try again in a moment.');
-        return;
-      }
-
       const url = String(source.value || '').trim();
       if (!url) {
         setError('Please enter a YouTube URL');
+        return;
+      }
+
+      // If we're in client remote mode, download locally (into recordings) then upload to the remote server.
+      try {
+        const saved = localStorage.getItem('qwen_remote_config');
+        const cfg = saved ? JSON.parse(saved) : null;
+        if (cfg?.mode === 'client' && cfg.remoteUrl) {
+          if (!uploadQueueRef.current) {
+            addLog('Upload queue not ready', LogLevel.ERROR);
+            setError('Upload queue not ready yet. Try again in a moment.');
+            return;
+          }
+
+          const api = window.electronAPI as any;
+          if (!api?.downloadYouTube || !api?.sendVideoToRemoteServer || !api?.initRecording) {
+            throw new Error('Electron API remote upload not available');
+          }
+
+          const now = new Date();
+          const y = now.getFullYear();
+          const m = String(now.getMonth() + 1).padStart(2, '0');
+          const d = String(now.getDate()).padStart(2, '0');
+          const hh = String(now.getHours()).padStart(2, '0');
+          const mm = String(now.getMinutes()).padStart(2, '0');
+          const ss = String(now.getSeconds()).padStart(2, '0');
+          const rand = Math.random().toString(36).slice(2, 7);
+
+          const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const baseFilename = `lecture_${y}${m}${d}_${hh}${mm}${ss}_remote_${rand}`;
+
+          const remoteQueueId = uploadQueueRef.current.addRemoteUpload(jobId, 0);
+          remoteUploadIdRef.current = remoteQueueId;
+          remoteJobIdRef.current = jobId;
+          setIsUploadModalOpen(false);
+          setIsUploadProgressOpen(true);
+
+          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Downloading YouTube', 0);
+          addLog('Downloading YouTube into recordings...', LogLevel.INFO);
+
+          const ytRes = await api.downloadYouTube(url, (p: any) => {
+            if (p?.type === 'progress' && p.phase === 'downloading' && typeof p.percent === 'number') {
+              // Map YouTube download into 0-15%
+              const pct = Math.max(0, Math.min(15, (p.percent / 100) * 15));
+              uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading YouTube', pct);
+            }
+          }, { outputBase: baseFilename });
+
+          if (!ytRes?.success || !ytRes.file_path) {
+            throw new Error(ytRes?.error || 'YouTube download failed');
+          }
+
+          const clientVideoPath = String(ytRes.file_path);
+          remoteClientVideoPathRef.current = clientVideoPath;
+          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Downloading YouTube', 15, Number(ytRes.size || 0));
+
+          addLog('Uploading full video to remote server...', LogLevel.INFO);
+          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Uploading to remote server', 15);
+
+          const res = await api.sendVideoToRemoteServer(
+            String(cfg.remoteUrl),
+            clientVideoPath,
+            { displayName: String(ytRes.file_name || `${baseFilename}.mp4`), jobId }
+          );
+          if (!res?.success) {
+            uploadQueueRef.current.failRemoteUpload(remoteQueueId, res?.error || 'Remote upload failed');
+            remoteUploadIdRef.current = null;
+            remoteJobIdRef.current = null;
+            throw new Error(res?.error || 'Remote upload failed');
+          }
+
+          const effectiveJobId = String(res?.jobId || jobId);
+          remoteJobIdRef.current = effectiveJobId;
+
+          // Poll server status and fetch final metadata JSON when ready.
+          const poll = async () => {
+            while (true) {
+              await new Promise((r) => setTimeout(r, 2500));
+              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
+              if (!statusRes?.success) {
+                throw new Error(statusRes?.error || 'Failed to fetch remote status');
+              }
+              const st = statusRes?.data?.status;
+              if (st?.state === 'error') {
+                throw new Error(st?.error || 'Remote processing failed');
+              }
+              if (st?.state === 'complete') {
+                uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading results', 95);
+                const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId);
+                if (!metaRes?.success || !metaRes.data) {
+                  throw new Error(metaRes?.error || 'Failed to download results');
+                }
+                const meta = metaRes.data;
+
+                // Save metadata locally and rewrite videoPath/videoFilename via saveRecordingExisting.
+                delete (meta as any).wordTimestampsFile;
+                const saveRes = await api.saveRecordingExisting(clientVideoPath, meta);
+                if (!saveRes?.success) {
+                  throw new Error(saveRes?.error || 'Failed to save results to recordings');
+                }
+
+                uploadQueueRef.current?.completeRemoteUpload(remoteQueueId, 'Complete');
+                remoteUploadIdRef.current = null;
+                remoteJobIdRef.current = null;
+                addLog('Remote processing complete. Results saved to your recordings.', LogLevel.SUCCESS);
+                return;
+              }
+
+              // Map server processing into ~33-95%.
+              const serverPct = Number(st?.progressPercent || 0);
+              const mappedPct = Math.max(33, Math.min(95, 33 + (serverPct / 100) * 62));
+              const phase = String(st?.phase || 'Processing on remote server');
+              uploadQueueRef.current?.setRemoteProgress(remoteQueueId, phase, mappedPct);
+            }
+          };
+
+          poll().catch((err: any) => {
+            const message = err instanceof Error ? err.message : String(err);
+            uploadQueueRef.current?.failRemoteUpload(remoteQueueId, message);
+            remoteUploadIdRef.current = null;
+            remoteJobIdRef.current = null;
+            addLog(`Remote job error: ${message}`, LogLevel.ERROR);
+          });
+
+          return;
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        addLog(`Remote YouTube upload error: ${message}`, LogLevel.ERROR);
+        setError(message);
+        return;
+      }
+
+      // Local mode: keep existing behavior (download then process locally).
+      if (!uploadQueueRef.current) {
+        addLog('Upload queue not ready', LogLevel.ERROR);
+        setError('Upload queue not ready yet. Try again in a moment.');
         return;
       }
 
@@ -742,29 +878,107 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           throw new Error('Electron API sendVideoToRemoteServer not available');
         }
 
-        const remoteQueueId = uploadQueueRef.current.addRemoteUpload(
-          source.value.name || 'video',
-          source.value.size
-        );
+        if (!api?.initRecording || !api?.copyFile) {
+          throw new Error('Electron API file ingest not available');
+        }
+
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = String(now.getMonth() + 1).padStart(2, '0');
+        const d = String(now.getDate()).padStart(2, '0');
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        const ss = String(now.getSeconds()).padStart(2, '0');
+        const rand = Math.random().toString(36).slice(2, 7);
+        const extMatch = String(source.value.name || source.value.path || '').toLowerCase().match(/\.[a-z0-9]{1,6}$/);
+        const ext = extMatch ? extMatch[0] : '.mp4';
+        const baseFilename = `lecture_${y}${m}${d}_${hh}${mm}${ss}_remote_${rand}`;
+        const clientFileName = `${baseFilename}${ext}`;
+
+        const init = await api.initRecording();
+        if (!init?.success || !init.path) {
+          throw new Error(init?.error || 'Failed to init recordings directory');
+        }
+        const clientVideoPath = `${String(init.path).replace(/[\\/]+$/, '')}/${clientFileName}`.replace(/\\/g, '/');
+        // Copy into recordings first (same idea as local mode), then upload that file.
+        const copyRes = await api.copyFile(source.value.path, clientVideoPath);
+        if (!copyRes?.success) {
+          throw new Error(copyRes?.error || 'Failed to copy into recordings');
+        }
+        remoteClientVideoPathRef.current = clientVideoPath;
+
+        const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const remoteQueueId = uploadQueueRef.current.addRemoteUpload(jobId, source.value.size);
         remoteUploadIdRef.current = remoteQueueId;
+        remoteJobIdRef.current = jobId;
         setIsUploadModalOpen(false);
         setIsUploadProgressOpen(true);
 
+        uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Uploading to remote server', 0);
         addLog('Uploading full video to remote server...', LogLevel.INFO);
         const res = await api.sendVideoToRemoteServer(
           String(cfg.remoteUrl),
-          source.value.path,
-          source.value.name
+          clientVideoPath,
+          { displayName: clientFileName, jobId }
         );
         if (!res?.success) {
           uploadQueueRef.current.failRemoteUpload(remoteQueueId, res?.error || 'Remote upload failed');
           remoteUploadIdRef.current = null;
+          remoteJobIdRef.current = null;
           throw new Error(res?.error || 'Remote upload failed');
         }
 
-        uploadQueueRef.current.completeRemoteUpload(remoteQueueId);
-        remoteUploadIdRef.current = null;
-        addLog('Upload complete. The remote server will process and save it to its recordings.', LogLevel.SUCCESS);
+        const effectiveJobId = String(res?.jobId || jobId);
+        remoteJobIdRef.current = effectiveJobId;
+        uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Processing on remote server', 33);
+        addLog('Upload complete. Waiting for remote processing...', LogLevel.SUCCESS);
+
+        const poll = async () => {
+          while (true) {
+            await new Promise((r) => setTimeout(r, 2500));
+            const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
+            if (!statusRes?.success) {
+              throw new Error(statusRes?.error || 'Failed to fetch remote status');
+            }
+            const st = statusRes?.data?.status;
+            if (st?.state === 'error') {
+              throw new Error(st?.error || 'Remote processing failed');
+            }
+            if (st?.state === 'complete') {
+              uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading results', 95);
+              const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId);
+              if (!metaRes?.success || !metaRes.data) {
+                throw new Error(metaRes?.error || 'Failed to download results');
+              }
+              const meta = metaRes.data;
+
+              delete (meta as any).wordTimestampsFile;
+              const saveRes = await api.saveRecordingExisting(clientVideoPath, meta);
+              if (!saveRes?.success) {
+                throw new Error(saveRes?.error || 'Failed to save results to recordings');
+              }
+
+              uploadQueueRef.current?.completeRemoteUpload(remoteQueueId, 'Complete');
+              remoteUploadIdRef.current = null;
+              remoteJobIdRef.current = null;
+              addLog('Remote processing complete. Results saved to your recordings.', LogLevel.SUCCESS);
+              return;
+            }
+
+            const serverPct = Number(st?.progressPercent || 0);
+            const mappedPct = Math.max(33, Math.min(95, 33 + (serverPct / 100) * 62));
+            const phase = String(st?.phase || 'Processing on remote server');
+            uploadQueueRef.current?.setRemoteProgress(remoteQueueId, phase, mappedPct);
+          }
+        };
+
+        poll().catch((err: any) => {
+          const message = err instanceof Error ? err.message : String(err);
+          uploadQueueRef.current?.failRemoteUpload(remoteQueueId, message);
+          remoteUploadIdRef.current = null;
+          remoteJobIdRef.current = null;
+          addLog(`Remote job error: ${message}`, LogLevel.ERROR);
+        });
         return;
       }
     } catch (err) {
@@ -776,6 +990,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           // ignore
         }
         remoteUploadIdRef.current = null;
+        remoteJobIdRef.current = null;
       }
       addLog(`Remote upload error: ${message}`, LogLevel.ERROR);
       setError(message);

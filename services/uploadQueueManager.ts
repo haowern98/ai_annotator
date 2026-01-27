@@ -29,6 +29,11 @@ export interface QueuedVideo {
   fileName: string;
   fileSize: number;
   status: VideoStatus;
+  // If set, this queued item corresponds to a remote upload job (server mode),
+  // and progress/completion will be reported via the inbox job APIs.
+  remoteJobId?: string;
+  // Cancellation flag (used during long-running phases)
+  cancelRequested?: boolean;
   progress: {
     phase: string;
     percentage: number;
@@ -43,6 +48,9 @@ export interface QueuedVideo {
   error?: string;
   startTime?: number;
   endTime?: number;
+  // Saved recording paths (after completion)
+  recordingMetadataPath?: string;
+  recordingVideoPath?: string;
 }
 
 export interface UploadQueueCallbacks {
@@ -60,6 +68,7 @@ export class UploadQueueManager {
   private qwenClient: QwenHttpClient;
   private liveSessionCheck: () => boolean;
   private currentVideoId: string | null = null;
+  private remoteReportCache: Map<string, { phase: string; pct: number; at: number }> = new Map();
 
   constructor(
     parakeetTranscriber: ParakeetBatchTranscriber,
@@ -145,6 +154,24 @@ export class UploadQueueManager {
   }
 
   /**
+   * Add a local filesystem video path to queue with an associated remote job id.
+   * Used on the server machine when receiving a remote upload.
+   */
+  public addVideoPathRemoteJob(
+    filePath: string,
+    displayName: string | undefined,
+    size: number | undefined,
+    jobId: string
+  ): string {
+    const id = this.addVideoPath(filePath, displayName, size);
+    const video = this.queue.find((v) => v.id === id);
+    if (video) {
+      video.remoteJobId = String(jobId || '').trim() || undefined;
+    }
+    return id;
+  }
+
+  /**
    * Add a remote-upload placeholder item (client mode).
    * This tracks upload progress to the remote server but does not run local processing.
    */
@@ -197,14 +224,32 @@ export class UploadQueueManager {
     this.notifyQueueUpdate();
   }
 
-  public completeRemoteUpload(videoId: string): void {
+  public setRemoteProgress(videoId: string, phase: string, percentage?: number, fileSize?: number): void {
+    const video = this.queue.find((v) => v.id === videoId);
+    if (!video) return;
+    if (video.status === 'error' || video.status === 'cancelled' || video.status === 'complete') return;
+
+    video.status = 'uploading';
+    video.progress.phase = String(phase || 'Working…');
+    if (percentage !== undefined) {
+      const pct = Number(percentage || 0);
+      video.progress.percentage = Math.max(0, Math.min(100, pct));
+    }
+    if (fileSize !== undefined) {
+      const sz = Number(fileSize || 0);
+      if (Number.isFinite(sz) && sz > 0) video.fileSize = sz;
+    }
+    this.notifyQueueUpdate();
+  }
+
+  public completeRemoteUpload(videoId: string, finalPhase?: string): void {
     const video = this.queue.find((v) => v.id === videoId);
     if (!video) return;
     if (video.status !== 'uploading') return;
 
     video.status = 'complete';
     video.progress.percentage = 100;
-    video.progress.phase = 'Upload complete (server processing)';
+    video.progress.phase = String(finalPhase || 'Upload complete (server processing)');
     video.endTime = Date.now();
     this.notifyQueueUpdate();
     this.callbacks.onVideoComplete?.(video);
@@ -365,6 +410,15 @@ export class UploadQueueManager {
       nextVideo.status = 'error';
       nextVideo.error = errorMsg;
       this.log(`Error processing ${nextVideo.fileName}: ${errorMsg}`, LogLevel.ERROR);
+      try {
+        const jobId = String(nextVideo.remoteJobId || '').trim();
+        if (jobId) {
+          (window.electronAPI as any)?.errorInboxJob?.(jobId, errorMsg);
+        }
+      } catch {
+        // ignore
+      }
+      this.reportRemoteJob(nextVideo);
       this.callbacks.onVideoError?.(nextVideo, errorMsg);
     }
 
@@ -381,6 +435,7 @@ export class UploadQueueManager {
    */
   private async processVideo(video: QueuedVideo): Promise<void> {
     video.startTime = Date.now();
+    this.reportRemoteJob(video);
 
     // Check live session before each phase
     if (this.liveSessionCheck()) {
@@ -398,10 +453,12 @@ export class UploadQueueManager {
     video.progress.phase = 'Extracting frames';
     video.progress.currentStep = 1;
     this.notifyQueueUpdate();
+    this.reportRemoteJob(video);
 
     const frames = await extractFramesAt1FPS(video.file, (progress: ExtractionProgress) => {
       video.progress.percentage = Math.floor((progress.percentage / 3) * 100) / 100; // 0-33%
       this.notifyQueueUpdate();
+      this.reportRemoteJob(video);
     });
 
     this.log(`Extracted ${frames.length} frames from ${video.fileName}`, LogLevel.SUCCESS);
@@ -423,6 +480,7 @@ export class UploadQueueManager {
     video.progress.currentStep = 2;
     video.progress.percentage = 33;
     this.notifyQueueUpdate();
+    this.reportRemoteJob(video);
 
     // Get userData path via Electron API
     let userDataPath: string;
@@ -443,6 +501,7 @@ export class UploadQueueManager {
         const percentage = 33 + Math.min(33, (transcriptCount / Math.max(estimatedTotal, 1)) * 33);
         video.progress.percentage = Math.floor(percentage * 100) / 100;
         this.notifyQueueUpdate();
+        this.reportRemoteJob(video);
       }
     );
 
@@ -465,6 +524,7 @@ export class UploadQueueManager {
     video.progress.currentStep = 3;
     video.progress.percentage = 66;
     this.notifyQueueUpdate();
+    this.reportRemoteJob(video);
 
     const batches = await this.qwenClient.analyzeUploadedVideoWindows(
       frames,
@@ -478,6 +538,7 @@ export class UploadQueueManager {
         const percentage = 66 + ((window / totalWindows) * 34);
         video.progress.percentage = Math.floor(percentage * 100) / 100;
         this.notifyQueueUpdate();
+        this.reportRemoteJob(video);
       }
     );
 
@@ -489,6 +550,7 @@ export class UploadQueueManager {
     video.progress.phase = 'Saving (converting to WebM)';
     video.progress.percentage = Math.max(video.progress.percentage, 90);
     this.notifyQueueUpdate();
+    this.reportRemoteJob(video);
 
     video.endTime = Date.now();
     video.result = { frames, transcriptPath, batches };
@@ -499,6 +561,8 @@ export class UploadQueueManager {
     video.progress.percentage = 100;
     video.progress.phase = 'Complete';
     this.notifyQueueUpdate();
+    this.reportRemoteJob(video);
+    await this.completeRemoteJobIfNeeded(video);
     this.callbacks.onVideoComplete?.(video);
   }
 
@@ -645,6 +709,8 @@ export class UploadQueueManager {
         : await window.electronAPI.saveRecording(videoBytes, metadata);
 
       if (result.success) {
+        video.recordingMetadataPath = result.metadataPath;
+        video.recordingVideoPath = result.videoPath || existingVideoPath || undefined;
         this.log(`Saved to recordings: ${result.filename}`, LogLevel.SUCCESS);
 
         // Persist word-level timestamps next to the recording metadata (if available).
@@ -702,6 +768,47 @@ export class UploadQueueManager {
    */
   private notifyQueueUpdate(): void {
     this.callbacks.onQueueUpdate?.(this.getQueue());
+  }
+
+  private reportRemoteJob(video: QueuedVideo): void {
+    const jobId = String(video.remoteJobId || '').trim();
+    if (!jobId) return;
+
+    const phase = String(video.progress?.phase || video.status);
+    const pct = Number(video.progress?.percentage || 0);
+    const now = Date.now();
+    const prev = this.remoteReportCache.get(video.id);
+    const phaseChanged = !prev || prev.phase !== phase;
+    const pctChanged = !prev || Math.abs(prev.pct - pct) >= 1;
+    const timeElapsed = !prev || now - prev.at >= 2000;
+    if (!(phaseChanged || pctChanged || timeElapsed)) return;
+    this.remoteReportCache.set(video.id, { phase, pct, at: now });
+
+    try {
+      const api = window.electronAPI as any;
+      api?.updateInboxJob?.(jobId, {
+        state: video.status === 'error' ? 'error' : video.status === 'complete' ? 'complete' : 'processing',
+        phase,
+        progressPercent: pct,
+        error: video.error || null,
+        updatedAt: Date.now(),
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  private async completeRemoteJobIfNeeded(video: QueuedVideo): Promise<void> {
+    const jobId = String(video.remoteJobId || '').trim();
+    if (!jobId) return;
+    const metadataPath = String(video.recordingMetadataPath || '').trim();
+    if (!metadataPath) return;
+    try {
+      const api = window.electronAPI as any;
+      await api?.completeInboxJob?.(jobId, metadataPath);
+    } catch {
+      // ignore
+    }
   }
 
   /**

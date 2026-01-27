@@ -196,6 +196,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getInboxStatus: async () => {
     return await ipcRenderer.invoke('inbox:status');
   },
+  updateInboxJob: async (jobId, partial) => {
+    return await ipcRenderer.invoke('inbox:update-job', jobId, partial);
+  },
+  completeInboxJob: async (jobId, metadataPath) => {
+    return await ipcRenderer.invoke('inbox:complete-job', jobId, metadataPath);
+  },
+  errorInboxJob: async (jobId, error) => {
+    return await ipcRenderer.invoke('inbox:error-job', jobId, error);
+  },
   onInboxActivity: (callback) => {
     ipcRenderer.on('inbox:activity', (event, activity) => callback(activity));
   },
@@ -209,6 +218,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   sendVideoToRemoteServer: async (serverUrl, filePath, displayName) => {
     return await ipcRenderer.invoke('remoteUpload:sendFile', serverUrl, filePath, displayName);
+  },
+  getRemoteJobStatus: async (serverUrl, jobId) => {
+    return await ipcRenderer.invoke('remoteUpload:getStatus', serverUrl, jobId);
+  },
+  getRemoteJobResult: async (serverUrl, jobId) => {
+    return await ipcRenderer.invoke('remoteUpload:getResult', serverUrl, jobId);
   },
   onRemoteUploadProgress: (callback) => {
     ipcRenderer.on('remoteUpload:progress', (event, payload) => callback(payload));
@@ -436,7 +451,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // YouTube downloader (Python yt_dlp in .venv)
-  downloadYouTube: async (url, onProgress) => {
+  downloadYouTube: async (url, onProgress, options) => {
     const id = `yt_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const channel = 'youtube:download-progress';
     const handler = (_event, data) => {
@@ -449,7 +464,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
     ipcRenderer.on(channel, handler);
     try {
-      return await ipcRenderer.invoke('youtube:download', { url, id });
+      return await ipcRenderer.invoke('youtube:download', { url, id, ...(options || {}) });
     } finally {
       ipcRenderer.removeListener(channel, handler);
     }

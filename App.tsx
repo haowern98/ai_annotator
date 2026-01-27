@@ -173,7 +173,19 @@ export default function App() {
         if (!videoPath) return;
         const fileName = String(payload?.fileName || 'remote_upload');
         const fileSize = Number(payload?.fileSize || 0);
-        uploadQueueRef.current?.addVideoPath(videoPath, fileName, fileSize);
+        const jobId = String(payload?.jobId || '').trim();
+        if (jobId && (window.electronAPI as any)?.updateInboxJob) {
+          (window.electronAPI as any).updateInboxJob(jobId, {
+            state: 'processing',
+            phase: 'Queued for processing',
+            progressPercent: 0,
+          });
+        }
+        if (jobId && uploadQueueRef.current?.addVideoPathRemoteJob) {
+          uploadQueueRef.current.addVideoPathRemoteJob(videoPath, fileName, fileSize, jobId);
+        } else {
+          uploadQueueRef.current?.addVideoPath(videoPath, fileName, fileSize);
+        }
       } catch (e) {
         console.warn('[Upload Queue] Failed to enqueue inbox file:', e);
       }

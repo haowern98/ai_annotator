@@ -45,7 +45,8 @@ function setupYouTubeHandlers(ipcMain) {
       // ignore
     }
 
-    const outputBase = `${generateFilename()}_youtube_${Math.random().toString(36).slice(2, 7)}`;
+    const forcedBase = String(payload?.outputBase || '').trim();
+    const outputBase = forcedBase || `${generateFilename()}_youtube_${Math.random().toString(36).slice(2, 7)}`;
     const pythonCmd = getVenvPythonPath();
     const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'download_youtube.py');
 
