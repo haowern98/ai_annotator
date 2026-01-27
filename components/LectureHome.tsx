@@ -878,8 +878,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           throw new Error('Electron API sendVideoToRemoteServer not available');
         }
 
-        if (!api?.initRecording || !api?.copyFile) {
-          throw new Error('Electron API file ingest not available');
+        if (!api?.ingestVideoToRecordingsAs) {
+          throw new Error('Electron API ingestVideoToRecordingsAs not available');
         }
 
         const now = new Date();
@@ -890,21 +890,14 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         const mm = String(now.getMinutes()).padStart(2, '0');
         const ss = String(now.getSeconds()).padStart(2, '0');
         const rand = Math.random().toString(36).slice(2, 7);
-        const extMatch = String(source.value.name || source.value.path || '').toLowerCase().match(/\.[a-z0-9]{1,6}$/);
-        const ext = extMatch ? extMatch[0] : '.mp4';
         const baseFilename = `lecture_${y}${m}${d}_${hh}${mm}${ss}_remote_${rand}`;
-        const clientFileName = `${baseFilename}${ext}`;
 
-        const init = await api.initRecording();
-        if (!init?.success || !init.path) {
-          throw new Error(init?.error || 'Failed to init recordings directory');
+        const ingest = await api.ingestVideoToRecordingsAs(source.value.path, baseFilename);
+        if (!ingest?.success || !ingest.videoPath || !ingest.videoFilename) {
+          throw new Error(ingest?.error || 'Failed to copy into recordings');
         }
-        const clientVideoPath = `${String(init.path).replace(/[\\/]+$/, '')}/${clientFileName}`.replace(/\\/g, '/');
-        // Copy into recordings first (same idea as local mode), then upload that file.
-        const copyRes = await api.copyFile(source.value.path, clientVideoPath);
-        if (!copyRes?.success) {
-          throw new Error(copyRes?.error || 'Failed to copy into recordings');
-        }
+        const clientVideoPath = String(ingest.videoPath);
+        const clientFileName = String(ingest.videoFilename);
         remoteClientVideoPathRef.current = clientVideoPath;
 
         const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

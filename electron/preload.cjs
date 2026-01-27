@@ -372,6 +372,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('recording:ingestVideo', sourcePath);
   },
 
+  // Copy a local video file into recordings with a forced base filename (no extension).
+  ingestVideoToRecordingsAs: async (sourcePath, baseFilename) => {
+    return await ipcRenderer.invoke('recording:ingestVideoAs', sourcePath, baseFilename);
+  },
+
   // Save metadata for an already-present video file (no in-memory video transfer)
   saveRecordingExisting: async (videoPath, metadata) => {
     return await ipcRenderer.invoke('recording:saveExisting', videoPath, metadata);

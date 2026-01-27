@@ -34,6 +34,13 @@ function generateFilename() {
   return `lecture_${year}${month}${day}_${hours}${minutes}${seconds}`;
 }
 
+function sanitizeBaseFilename(name) {
+  const raw = String(name || '').trim();
+  const base = raw.split(/[\\/]/).pop() || '';
+  const safe = base.replace(/[^\w.\- ]+/g, '').trim().slice(0, 160);
+  return safe || generateFilename();
+}
+
 function setupRecordingHandlers(ipcMain) {
   // Initialize and return recordings directory path
   ipcMain.handle('recording:init', async () => {
@@ -345,6 +352,50 @@ function setupRecordingHandlers(ipcMain) {
       };
     } catch (err) {
       console.error('[Recording] Failed to ingest video:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Copy an existing local video file into the recordings directory with a forced base filename.
+  // Used for remote client mode so the client keeps a local copy with the final lecture_* name.
+  ipcMain.handle('recording:ingestVideoAs', async (event, sourcePath, baseFilenameRaw) => {
+    try {
+      const src = String(sourcePath || '').trim();
+      if (!src) return { success: false, error: 'Missing sourcePath' };
+
+      const dir = await initRecordingsDir();
+      const st = await fs.stat(src);
+      if (!st.isFile()) return { success: false, error: 'Source is not a file' };
+
+      const baseFilename = sanitizeBaseFilename(baseFilenameRaw);
+      const ext = (path.extname(src) || '').toLowerCase() || '.mp4';
+
+      let videoFilename = `${baseFilename}${ext}`;
+      let videoPath = path.join(dir, videoFilename);
+
+      // Ensure uniqueness (avoid collisions).
+      for (let i = 0; i < 200; i++) {
+        try {
+          await fs.access(videoPath);
+          videoFilename = `${baseFilename}_${i + 1}${ext}`;
+          videoPath = path.join(dir, videoFilename);
+        } catch {
+          break;
+        }
+      }
+
+      await fs.copyFile(src, videoPath);
+      const st2 = await fs.stat(videoPath);
+
+      return {
+        success: true,
+        videoPath,
+        filename: videoFilename.replace(/\.(webm|mp4|mkv|mov|m4v|avi)$/i, ''),
+        videoFilename,
+        fileSize: st2.size,
+      };
+    } catch (err) {
+      console.error('[Recording] Failed to ingest video (as):', err);
       return { success: false, error: err.message };
     }
   });
