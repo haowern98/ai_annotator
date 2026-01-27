@@ -164,7 +164,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
               outline: 'none',
               fontSize: '13px',
               color: '#cccccc',
-              width: isMaximized ? '400px' : '200px',
+              width: '400px',
               transition: 'width 0.2s ease'
             }}
           />

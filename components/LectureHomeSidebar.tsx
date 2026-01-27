@@ -301,7 +301,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
   const isServerMode = remoteConfig?.mode === 'server';
 
   return (
-    <div className="w-[400px] bg-[#1a1a1a] border-l border-[#3a3a3a] flex flex-col overflow-y-auto p-4 space-y-4 rounded-r-lg">
+    <div className="w-[400px] bg-[#1a1a1a] flex flex-col overflow-y-auto p-4 space-y-4 rounded-r-lg">
       {/* Connection Status Card */}
       <div className="bg-[#242424] rounded-lg border border-[#333333] p-5">
         <div className="flex items-center gap-2 mb-3">
