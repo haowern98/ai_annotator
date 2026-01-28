@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Play, Pause, Download, BookOpen, Calendar, Clock, FileText, BarChart3 } from 'lucide-react';
+import { Play, Pause, Download, BookOpen, Calendar, Clock, FileText, BarChart3, Film } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -305,10 +305,20 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
   const [activeTranscriptIndex, setActiveTranscriptIndex] = useState<number>(-1);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoDurationMs, setVideoDurationMs] = useState(0);
+  const [summaryTab, setSummaryTab] = useState<'topics' | 'short'>('topics');
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isSeekingRef = useRef<boolean>(false);
+
+  const { topicSummaries, shortSummaries } = useMemo(() => {
+    const summaries = lectureData?.summaries || [];
+    const isTopic = (s: SummaryEntry) => String(s?.windowLabel || '').trim().toLowerCase().startsWith('topics:');
+    return {
+      topicSummaries: summaries.filter(isTopic),
+      shortSummaries: summaries.filter((s) => !isTopic(s)),
+    };
+  }, [lectureData?.summaries]);
 
   // Load lecture data from IPC
   useEffect(() => {
@@ -967,7 +977,7 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
             gap: '10px',
             flex: 1,
             overflow: 'hidden'
-          }}>
+           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <BarChart3 size={18} color="#8a8a8a" />
               <span style={{ fontSize: '14px', fontWeight: 600, color: '#ffffff' }}>
@@ -977,11 +987,57 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
                 ({lectureData.summaries.length} summaries)
               </span>
             </div>
+
+            {/* Summary Tabs */}
+            <div style={{
+              display: 'flex',
+              gap: '8px',
+              paddingBottom: '2px'
+            }}>
+              <button
+                onClick={() => setSummaryTab('topics')}
+                style={{
+                  padding: '6px 10px',
+                  backgroundColor: summaryTab === 'topics' ? '#1a1a1a' : 'transparent',
+                  border: `1px solid ${summaryTab === 'topics' ? '#0E72ED' : '#333333'}`,
+                  borderRadius: '8px',
+                  color: summaryTab === 'topics' ? '#0E72ED' : '#8a8a8a',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <BarChart3 size={14} color={summaryTab === 'topics' ? '#0E72ED' : '#8a8a8a'} />
+                3-Minute Topics ({topicSummaries.length})
+              </button>
+              <button
+                onClick={() => setSummaryTab('short')}
+                style={{
+                  padding: '6px 10px',
+                  backgroundColor: summaryTab === 'short' ? '#1a1a1a' : 'transparent',
+                  border: `1px solid ${summaryTab === 'short' ? '#0E72ED' : '#333333'}`,
+                  borderRadius: '8px',
+                  color: summaryTab === 'short' ? '#0E72ED' : '#8a8a8a',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <Film size={14} color={summaryTab === 'short' ? '#0E72ED' : '#8a8a8a'} />
+                Short (5-frame) ({shortSummaries.length})
+              </button>
+            </div>
             <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
-              {lectureData.summaries.length > 0 ? (
-                lectureData.summaries.map((summary, idx) => (
+              {(summaryTab === 'topics' ? topicSummaries : shortSummaries).length > 0 ? (
+                (summaryTab === 'topics' ? topicSummaries : shortSummaries).map((summary, idx) => (
                   <div
-                    key={idx}
+                    key={`${summaryTab}-${idx}`}
                     style={{
                       backgroundColor: '#1a1a1a',
                       border: '1px solid #333333',

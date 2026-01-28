@@ -218,6 +218,36 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     }
   };
 
+  const handleCloseClientConnection = async () => {
+    // Match server-mode "Close Connection": switch back to local mode and ensure local Qwen is running,
+    // without forcing a full renderer reload.
+    if (!window.electronAPI?.startQwenLocal) {
+      console.error('Electron API not available');
+      return;
+    }
+
+    setIsStarting(true);
+
+    try {
+      const result = await window.electronAPI.startQwenLocal();
+
+      if (result.success) {
+        saveRemoteConfig({ mode: 'local' });
+        setConnectionStatus('idle');
+        setLatency(null);
+        onClose();
+      } else {
+        console.error('Failed to restart local server:', result.error);
+        alert(`Failed to restart local server: ${result.error}`);
+      }
+    } catch (error) {
+      console.error('Local restart error:', error);
+      alert('Failed to restart local server');
+    } finally {
+      setIsStarting(false);
+    }
+  };
+
   const handleSaveAndConnect = () => {
     if (!serverUrl) {
       alert('Please enter a server URL');
@@ -702,8 +732,8 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
           ) : (
             <>
               <button
-                onClick={handleTestConnectionClient}
-                disabled={!serverUrl || connectionStatus === 'testing'}
+                onClick={handleCloseClientConnection}
+                disabled={isStarting}
                 style={{
                   padding: '10px 24px',
                   backgroundColor: '#333333',
@@ -712,15 +742,15 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                   color: '#ffffff',
                   fontSize: '14px',
                   fontWeight: 500,
-                  cursor: (!serverUrl || connectionStatus === 'testing') ? 'not-allowed' : 'pointer',
-                  opacity: (!serverUrl || connectionStatus === 'testing') ? 0.5 : 1,
+                  cursor: isStarting ? 'not-allowed' : 'pointer',
+                  opacity: isStarting ? 0.5 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   gap: '6px'
                 }}
               >
-                <Plug2 size={16} />
-                {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                <X size={16} />
+                {isStarting ? 'Disconnecting...' : 'Close Connection'}
               </button>
               <button
                 onClick={handleSaveAndConnect}
