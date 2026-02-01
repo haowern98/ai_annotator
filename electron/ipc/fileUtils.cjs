@@ -210,6 +210,56 @@ function setupFileUtilsHandlers(ipcMain) {
     return { success: true, outputPath: output, size: st.size };
   });
 
+  // Remux a video in-place to improve seekability/duration metadata without re-encoding.
+  // Primary use: MediaRecorder WebM chunks uploaded from remote overlay mode.
+  ipcMain.handle('video:remuxInPlace', async (_event, videoPathRaw) => {
+    const input = await safeResolve(videoPathRaw);
+    const ext = path.extname(String(input || '')).toLowerCase();
+    if (!ext) throw new Error('Missing file extension');
+
+    const tmpOutPath = path.join(getUserDataPath(), `remux_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
+    const tmpOut = await safeResolve(tmpOutPath);
+
+    try {
+      // -fflags +genpts helps some timestamp edge cases; copy stream to avoid quality loss.
+      await runFfmpeg(['-y', '-fflags', '+genpts', '-i', input, '-map', '0', '-c', 'copy', tmpOut]);
+    } catch (e) {
+      // Some WebM chunks can fail stream-copy; fall back to re-encode to a seekable WebM.
+      if (ext === '.webm') {
+        await runFfmpeg([
+          '-y',
+          '-i',
+          input,
+          '-c:v',
+          'libvpx-vp9',
+          '-crf',
+          '35',
+          '-b:v',
+          '0',
+          '-c:a',
+          'libopus',
+          '-b:a',
+          '64k',
+          tmpOut,
+        ]);
+      } else {
+        throw e;
+      }
+    }
+
+    // Replace original file atomically.
+    try {
+      await fs.rename(tmpOut, input);
+    } catch (e) {
+      // Windows rename across volumes can fail; fall back to copy+unlink.
+      await fs.copyFile(tmpOut, input);
+      await fs.unlink(tmpOut);
+    }
+
+    const st = await fs.stat(input);
+    return { success: true, videoPath: input, fileSize: st.size };
+  });
+
   // Concatenate multiple WebM files into a single WebM using ffmpeg concat demuxer.
   // Requires identical codecs/params across inputs (true for chunks from one MediaRecorder session).
   ipcMain.handle('video:concatWebm', async (_event, inputPathsRaw, outputPathRaw) => {

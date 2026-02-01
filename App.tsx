@@ -167,7 +167,7 @@ export default function App() {
     // In server mode, accept full-video uploads via the Electron main-process inbox.
     // When a file arrives, enqueue it for local processing (same pipeline as local path/YouTube uploads).
     const api = window.electronAPI as any;
-    const handleInboxFile = (payload: any) => {
+    const handleInboxFile = async (payload: any) => {
       try {
         if (payload?.isManifest) return;
         const videoPath = String(payload?.videoPath || '').trim();
@@ -176,6 +176,22 @@ export default function App() {
         const fileSize = Number(payload?.fileSize || 0);
         const jobId = String(payload?.jobId || '').trim();
         const deleteSourceAfterComplete = payload?.recordingEnabled === false;
+
+        // Remote overlay chunks (MediaRecorder WebM) often lack duration metadata for HTML5 seeking.
+        // Remux in-place before enqueueing so the existing frame extraction pipeline can seek reliably.
+        if (
+          typeof fileName === 'string' &&
+          fileName.includes('_overlay_remote_chunk_') &&
+          fileName.toLowerCase().endsWith('.webm') &&
+          api?.remuxVideoInPlace
+        ) {
+          try {
+            console.log('[Upload Queue] Remuxing overlay chunk for seeking:', fileName);
+            await api.remuxVideoInPlace(videoPath);
+          } catch (e) {
+            console.warn('[Upload Queue] Remux overlay chunk failed (continuing):', e);
+          }
+        }
         if (jobId && (window.electronAPI as any)?.updateInboxJob) {
           (window.electronAPI as any).updateInboxJob(jobId, {
             state: 'processing',
