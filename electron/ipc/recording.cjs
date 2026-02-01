@@ -144,6 +144,9 @@ function setupRecordingHandlers(ipcMain) {
         if (!f.endsWith('.json')) return false;
         // Exclude auxiliary files (e.g. word timestamp dumps) that live next to metadata.
         if (f.endsWith('_words.json')) return false;
+        // Exclude remote overlay manifests and per-chunk artifacts.
+        if (f.endsWith('_manifest.json')) return false;
+        if (/_overlay_remote_chunk_\d{4}\.json$/i.test(f)) return false;
         return true;
       });
       

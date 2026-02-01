@@ -76,7 +76,14 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const remoteOverlayConfigRef = React.useRef<{ remoteUrl: string; sessionId: string; baseFilename: string; recordingEnabled: boolean } | null>(null);
   const remoteOverlayChunkIndexRef = React.useRef<number>(1);
   const remoteOverlayChunkStartMsRef = React.useRef<number>(0);
-  const remoteOverlayChunkBlobsRef = React.useRef<Blob[]>([]);
+  const remoteOverlayCanvasStreamRef = React.useRef<MediaStream | null>(null);
+  const remoteOverlayMimeTypeRef = React.useRef<string>('video/webm');
+  const remoteOverlayActiveChunkRecorderRef = React.useRef<{
+    recorder: MediaRecorder;
+    blobs: Blob[];
+    mimeType: string;
+  } | null>(null);
+  const remoteOverlayRotateInProgressRef = React.useRef<boolean>(false);
   const remoteOverlayPendingUploadsRef = React.useRef<
     Array<{
       chunkIndex: number;
@@ -654,7 +661,6 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlayConfigRef.current = { remoteUrl, sessionId, baseFilename, recordingEnabled };
       remoteOverlayChunkIndexRef.current = 1;
       remoteOverlayChunkStartMsRef.current = 0;
-      remoteOverlayChunkBlobsRef.current = [];
       remoteOverlayPendingUploadsRef.current = [];
       remoteOverlayUploadInFlightRef.current = false;
       remoteOverlayCurrentUploadFileNameRef.current = '';
@@ -727,6 +733,81 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       }
 
       // Setup a rolling chunk recorder (always records for upload; "recordingEnabled" only controls final merge + retention).
+      const startChunkRecorder = () => {
+        const s = remoteOverlayCanvasStreamRef.current;
+        if (!s) throw new Error('Missing canvas stream');
+        const mimeType = String(remoteOverlayMimeTypeRef.current || 'video/webm');
+
+        const blobs: Blob[] = [];
+        const recorder = new MediaRecorder(s, {
+          mimeType,
+          videoBitsPerSecond: captureQuality === 'high' ? 8000000 : captureQuality === 'medium' ? 2500000 : 1000000,
+        });
+
+        remoteOverlayActiveChunkRecorderRef.current = { recorder, blobs, mimeType };
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (event) => {
+          if (!remoteOverlayActiveRef.current) return;
+          const active = remoteOverlayActiveChunkRecorderRef.current;
+          if (!active || active.recorder !== recorder) return; // prevent late events from bleeding into the next chunk
+          if (event.data && event.data.size > 0) blobs.push(event.data);
+        };
+
+        recorder.onerror = (event: any) => {
+          addLog(`Recording error: ${event.error?.message || 'Unknown error'}`, LogLevel.ERROR);
+        };
+
+        // Use timeslice so we don't buffer a single 3-minute blob in memory.
+        recorder.start(1000);
+      };
+
+      const stopChunkRecorderAndCollect = async (): Promise<{ blobs: Blob[]; mimeType: string } | null> => {
+        const active = remoteOverlayActiveChunkRecorderRef.current;
+        if (!active) return null;
+        const { recorder, blobs, mimeType } = active;
+
+        const collected = await new Promise<Blob[]>((resolve) => {
+          let resolved = false;
+          const finalize = () => {
+            if (resolved) return;
+            resolved = true;
+            // Detach and mark inactive so late events from this recorder can't bleed into the next chunk.
+            remoteOverlayActiveChunkRecorderRef.current = null;
+            mediaRecorderRef.current = null;
+            try {
+              recorder.ondataavailable = null as any;
+              recorder.onerror = null as any;
+            } catch {
+              // ignore
+            }
+            resolve(blobs.slice());
+          };
+
+          const onStop = () => finalize();
+          try {
+            recorder.addEventListener('stop', onStop, { once: true });
+          } catch {
+            // ignore
+          }
+
+          try {
+            recorder.requestData?.();
+          } catch {
+            // ignore
+          }
+
+          try {
+            if (recorder.state !== 'inactive') recorder.stop();
+            else finalize();
+          } catch {
+            finalize();
+          }
+        });
+
+        return collected && collected.length ? { blobs: collected, mimeType } : null;
+      };
+
       const setupChunkRecorder = async () => {
         if (!videoRef.current) throw new Error('Video element not ready');
 
@@ -775,8 +856,6 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         const supportedMimeTypes = [
           'video/webm;codecs="vp8,opus"',
           'video/webm',
-          'video/mp4;codecs="avc1.4d401e,mp4a.40.2"',
-          'video/mp4',
         ];
         let mimeType = '';
         for (const type of supportedMimeTypes) {
@@ -787,24 +866,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         }
         if (!mimeType) throw new Error('No supported video codec found');
 
-        const recorder = new MediaRecorder(canvasStream, {
-          mimeType,
-          videoBitsPerSecond: captureQuality === 'high' ? 8000000 : captureQuality === 'medium' ? 2500000 : 1000000,
-        });
+        remoteOverlayCanvasStreamRef.current = canvasStream;
+        remoteOverlayMimeTypeRef.current = mimeType;
 
-        recorder.ondataavailable = (event) => {
-          if (!remoteOverlayActiveRef.current) return;
-          if (event.data && event.data.size > 0) {
-            remoteOverlayChunkBlobsRef.current.push(event.data);
-          }
-        };
-
-        recorder.onerror = (event: any) => {
-          addLog(`Recording error: ${event.error?.message || 'Unknown error'}`, LogLevel.ERROR);
-        };
-
-        recorder.start(1000);
-        mediaRecorderRef.current = recorder;
+        startChunkRecorder();
       };
 
       // Create overlay window FIRST
@@ -1043,92 +1108,101 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const finalizeChunk = async (isFinal: boolean) => {
         const cfg = remoteOverlayConfigRef.current;
         if (!cfg) return;
-        const recorder = mediaRecorderRef.current;
+
+        if (remoteOverlayRotateInProgressRef.current) return;
+        remoteOverlayRotateInProgressRef.current = true;
         try {
-          recorder?.requestData?.();
-        } catch {
-          // ignore
-        }
-        await new Promise((r) => setTimeout(r, 50));
-
-        const blobs = remoteOverlayChunkBlobsRef.current;
-        if (!blobs || blobs.length === 0) return;
-        remoteOverlayChunkBlobsRef.current = [];
-
-        const chunkIndex = remoteOverlayChunkIndexRef.current;
-        const chunkStartMs = remoteOverlayChunkStartMsRef.current;
-        const chunkEndMs = Date.now() - sessionStartTimeRef.current;
-        addLog(
-          `[RemoteOverlay] Finalize chunk ${chunkIndex} (${formatTimestamp(chunkStartMs)}-${formatTimestamp(chunkEndMs)}) blobs=${blobs.length}`,
-          LogLevel.INFO
-        );
-
-        remoteOverlayChunkMetaRef.current.set(`${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`, {
-          chunkStartMs,
-          chunkEndMs,
-        });
-
-        const blob = new Blob(blobs, { type: mediaRecorderRef.current?.mimeType || 'video/webm' });
-        const buf = await blob.arrayBuffer();
-
-        const writeRes = await electronAPI.writeRecordingChunk(buf, cfg.baseFilename, chunkIndex, '.webm');
-        if (!writeRes?.success || !writeRes?.videoPath) {
-          throw new Error(writeRes?.error || 'Failed to write chunk');
-        }
-        addLog(
-          `[RemoteOverlay] Wrote chunk file: ${writeRes.videoFilename} (${Math.round(Number(writeRes.fileSize || 0) / 1024 / 1024)}MB)`,
-          LogLevel.SUCCESS
-        );
-
-        const storedFileName = `${cfg.baseFilename}_chunk_${String(chunkIndex).padStart(4, '0')}.webm`;
-        localChunkPaths.push(String(writeRes.videoPath));
-
-        const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
-        remoteOverlayChunkMetaRef.current.set(jobId, { chunkStartMs, chunkEndMs });
-
-        remoteOverlayPendingUploadsRef.current.push({
-          chunkIndex,
-          chunkStartMs,
-          chunkEndMs,
-          localPath: String(writeRes.videoPath),
-          storedFileName,
-          jobId,
-          deleteLocalAfterUpload: !cfg.recordingEnabled,
-        });
-
-        remoteOverlayChunkIndexRef.current += 1;
-        remoteOverlayChunkStartMsRef.current = chunkEndMs;
-
-        void processNextUpload();
-
-        if (isFinal) {
-          // enqueue manifest as last upload
-          const chunks = localChunkPaths.map((p, idx) => ({
-            chunkIndex: idx + 1,
-            storedFileName: `${cfg.baseFilename}_chunk_${String(idx + 1).padStart(4, '0')}.webm`,
-          }));
-          const manifestObj = {
-            sessionId: cfg.sessionId,
-            baseFilename: cfg.baseFilename,
-            recordingEnabled: cfg.recordingEnabled,
-            chunks,
-          };
-          const manifestRes = await electronAPI.writeRecordingManifest(cfg.baseFilename, manifestObj);
-          if (manifestRes?.success && manifestRes?.manifestPath) {
-            const manifestJobId = `${cfg.sessionId}_manifest`;
-            addLog(`[RemoteOverlay] Manifest written: ${manifestRes.manifestFilename}`, LogLevel.INFO);
-            remoteOverlayPendingUploadsRef.current.push({
-              chunkIndex: 0,
-              chunkStartMs: 0,
-              chunkEndMs: 0,
-              localPath: String(manifestRes.manifestPath),
-              storedFileName: `${cfg.baseFilename}_manifest.json`,
-              jobId: manifestJobId,
-              deleteLocalAfterUpload: true,
-              isManifest: true,
-            });
-            void processNextUpload();
+          const collected = await stopChunkRecorderAndCollect();
+          if (!collected || collected.blobs.length === 0) {
+            return;
           }
+
+          const chunkIndex = remoteOverlayChunkIndexRef.current;
+          const chunkStartMs = remoteOverlayChunkStartMsRef.current;
+          const chunkEndMs = Date.now() - sessionStartTimeRef.current;
+          addLog(
+            `[RemoteOverlay] Finalize chunk ${chunkIndex} (${formatTimestamp(chunkStartMs)}-${formatTimestamp(chunkEndMs)}) blobs=${collected.blobs.length}`,
+            LogLevel.INFO
+          );
+
+          remoteOverlayChunkMetaRef.current.set(`${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`, {
+            chunkStartMs,
+            chunkEndMs,
+          });
+
+          const blob = new Blob(collected.blobs, { type: collected.mimeType || 'video/webm' });
+          const buf = await blob.arrayBuffer();
+
+          const writeRes = await electronAPI.writeRecordingChunk(buf, cfg.baseFilename, chunkIndex, '.webm');
+          if (!writeRes?.success || !writeRes?.videoPath) {
+            throw new Error(writeRes?.error || 'Failed to write chunk');
+          }
+          addLog(
+            `[RemoteOverlay] Wrote chunk file: ${writeRes.videoFilename} (${Math.round(Number(writeRes.fileSize || 0) / 1024 / 1024)}MB)`,
+            LogLevel.SUCCESS
+          );
+
+          const storedFileName = `${cfg.baseFilename}_chunk_${String(chunkIndex).padStart(4, '0')}.webm`;
+          localChunkPaths.push(String(writeRes.videoPath));
+
+          const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
+          remoteOverlayChunkMetaRef.current.set(jobId, { chunkStartMs, chunkEndMs });
+
+          remoteOverlayPendingUploadsRef.current.push({
+            chunkIndex,
+            chunkStartMs,
+            chunkEndMs,
+            localPath: String(writeRes.videoPath),
+            storedFileName,
+            jobId,
+            deleteLocalAfterUpload: !cfg.recordingEnabled,
+          });
+
+          remoteOverlayChunkIndexRef.current += 1;
+          remoteOverlayChunkStartMsRef.current = chunkEndMs;
+
+          void processNextUpload();
+
+          // Start the next chunk recorder immediately unless we're stopping.
+          if (!isFinal) {
+            try {
+              startChunkRecorder();
+            } catch (e) {
+              addLog(`[RemoteOverlay] Failed to start next chunk recorder: ${e}`, LogLevel.ERROR);
+            }
+          }
+
+          if (isFinal) {
+            // enqueue manifest as last upload
+            const chunks = localChunkPaths.map((p, idx) => ({
+              chunkIndex: idx + 1,
+              storedFileName: `${cfg.baseFilename}_chunk_${String(idx + 1).padStart(4, '0')}.webm`,
+            }));
+            const manifestObj = {
+              sessionId: cfg.sessionId,
+              baseFilename: cfg.baseFilename,
+              recordingEnabled: cfg.recordingEnabled,
+              chunks,
+            };
+            const manifestRes = await electronAPI.writeRecordingManifest(cfg.baseFilename, manifestObj);
+            if (manifestRes?.success && manifestRes?.manifestPath) {
+              const manifestJobId = `${cfg.sessionId}_manifest`;
+              addLog(`[RemoteOverlay] Manifest written: ${manifestRes.manifestFilename}`, LogLevel.INFO);
+              remoteOverlayPendingUploadsRef.current.push({
+                chunkIndex: 0,
+                chunkStartMs: 0,
+                chunkEndMs: 0,
+                localPath: String(manifestRes.manifestPath),
+                storedFileName: `${cfg.baseFilename}_manifest.json`,
+                jobId: manifestJobId,
+                deleteLocalAfterUpload: true,
+                isManifest: true,
+              });
+              void processNextUpload();
+            }
+          }
+        } finally {
+          remoteOverlayRotateInProgressRef.current = false;
         }
       };
 
@@ -1172,6 +1246,33 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           try {
             const outPath = `${recordingsDir}\\${baseFilename}.webm`;
             await electronAPI.concatWebm(localChunkPaths, outPath);
+            try {
+              const transcripts = remoteOverlayTranscriptsRef.current.map((t) => ({
+                text: t.text || '',
+                timestamp: t.formattedTime || `[${formatTimestamp(Number(t.timestampMs || 0))}]`,
+                timestampMs: Number(t.timestampMs || 0),
+              }));
+              const summaries = remoteOverlaySummariesRef.current.map((s: any) => ({
+                text: String(s?.text || ''),
+                windowLabel: String(s?.windowLabel || ''),
+              }));
+              const meta = {
+                quality: captureQuality,
+                duration: Math.max(0, Date.now() - sessionStartTimeRef.current),
+                transcriptCount: transcripts.length,
+                summaryCount: summaries.length,
+                transcripts,
+                summaries,
+                recordedMimeType: 'video/webm',
+                uploadedFileName: `${baseFilename}.webm`,
+              };
+              const saveRes = await electronAPI.saveRecordingExisting(outPath, meta);
+              if (!saveRes?.success) {
+                addLog(`Client metadata save warning: ${saveRes?.error || 'saveRecordingExisting failed'}`, LogLevel.WARN);
+              }
+            } catch (e) {
+              addLog(`Client metadata save warning: ${e}`, LogLevel.WARN);
+            }
           } catch (e) {
             addLog(`Client merge warning: ${e}`, LogLevel.WARN);
           }
