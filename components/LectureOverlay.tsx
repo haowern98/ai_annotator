@@ -114,6 +114,7 @@ const LectureOverlay: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [elapsedTime, setElapsedTime] = useState('[00:00]');
+  const [remotePhase, setRemotePhase] = useState<string | null>(null);
   
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
@@ -174,6 +175,7 @@ const LectureOverlay: React.FC = () => {
         if (parsed.isRunning !== undefined) setIsRunning(parsed.isRunning);
         if (parsed.isPaused !== undefined) setIsPaused(parsed.isPaused);
         if (parsed.elapsedTime !== undefined) setElapsedTime(parsed.elapsedTime);
+        if (parsed.remotePhase !== undefined) setRemotePhase(parsed.remotePhase ? String(parsed.remotePhase) : null);
         if (parsed.isRecording !== undefined) {
           console.log('[LectureOverlay] Setting isRecording to:', parsed.isRecording);
           setIsRecording(parsed.isRecording);
@@ -435,7 +437,7 @@ const LectureOverlay: React.FC = () => {
         <div className="section-content summary-content" ref={summaryRef}>
           {summaries.length === 0 && !isSummaryGenerating ? (
             <p className="empty-message">
-              Summary disabled in local (Parakeet) mode.
+              {remotePhase ? remotePhase : 'Waiting for first chunk…'}
             </p>
           ) : (
             <>

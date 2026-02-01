@@ -984,6 +984,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         try {
           const api = window.electronAPI as any;
+          try {
+            const chunkLabel = next.isManifest ? 'manifest' : `chunk ${String(next.chunkIndex).padStart(4, '0')}`;
+            api?.updateLectureStatus?.(JSON.stringify({ remotePhase: `Sending ${chunkLabel}…` }));
+          } catch {
+            // ignore
+          }
           addLog(
             `[RemoteOverlay] Upload start: ${next.storedFileName} (jobId=${next.jobId})`,
             LogLevel.INFO
@@ -1004,6 +1010,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             `[RemoteOverlay] Upload complete: ${next.storedFileName} (jobId=${res?.jobId || next.jobId})`,
             LogLevel.SUCCESS
           );
+          try {
+            const chunkLabel = next.isManifest ? 'manifest' : `chunk ${String(next.chunkIndex).padStart(4, '0')}`;
+            api?.updateLectureStatus?.(JSON.stringify({ remotePhase: `Finished sending ${chunkLabel}.` }));
+          } catch {
+            // ignore
+          }
 
           if (next.deleteLocalAfterUpload) {
             try {
