@@ -73,6 +73,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
   // Remote overlay chunk session (client remote mode only)
   const remoteOverlayActiveRef = React.useRef<boolean>(false);
+  const remoteOverlaySessionAliveRef = React.useRef<boolean>(false);
+  const remoteOverlaySessionClosingRef = React.useRef<boolean>(false);
   const remoteOverlayConfigRef = React.useRef<{ remoteUrl: string; sessionId: string; baseFilename: string; recordingEnabled: boolean } | null>(null);
   const remoteOverlayChunkIndexRef = React.useRef<number>(1);
   const remoteOverlayChunkStartMsRef = React.useRef<number>(0);
@@ -94,15 +96,20 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       jobId: string;
       deleteLocalAfterUpload: boolean;
       isManifest?: boolean;
+      remoteQueueId?: string;
+      fileSize?: number;
     }>
   >([]);
   const remoteOverlayUploadInFlightRef = React.useRef<boolean>(false);
   const remoteOverlayCurrentUploadFileNameRef = React.useRef<string>('');
+  const remoteOverlayCurrentUploadQueueIdRef = React.useRef<string>('');
   const remoteOverlayTimersRef = React.useRef<{ rotate?: number; elapsed?: number } | null>(null);
   const remoteOverlayChunkMetaRef = React.useRef<Map<string, { chunkStartMs: number; chunkEndMs: number }>>(new Map());
   const remoteOverlayTranscriptsRef = React.useRef<Array<TranscriptEntry & { formattedTime?: string }>>([]);
   const remoteOverlaySummariesRef = React.useRef<Array<any>>([]);
   const remoteOverlayStopFnRef = React.useRef<(() => void) | null>(null);
+  const remoteOverlayChunkQueueIdRef = React.useRef<Map<string, string>>(new Map());
+  const remoteOverlayPendingResultJobIdsRef = React.useRef<Set<string>>(new Set());
 
   const formatTimestamp = React.useCallback((ms: number): string => {
     const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -202,7 +209,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
     const handleProgress = (payload: any) => {
       // Remote overlay chunk uploader (one-at-a-time).
-      if (remoteOverlayActiveRef.current) {
+      if (remoteOverlaySessionAliveRef.current) {
         const expected = remoteOverlayCurrentUploadFileNameRef.current;
         const fileName = String(payload?.fileName || '');
         if (expected && fileName === expected) {
@@ -213,6 +220,18 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               JSON.stringify({
                 remotePhase: `Uploading ${expected} (${pct}%)`,
               })
+            );
+          }
+
+          const queueId = remoteOverlayCurrentUploadQueueIdRef.current;
+          if (queueId) {
+            // Scale upload into the first ~33% of the overall bar.
+            const scaledPct = Math.max(0, Math.min(33, (pct / 100) * 33));
+            uploadQueueRef.current?.updateRemoteUpload(
+              queueId,
+              scaledPct,
+              Number(payload?.sentBytes || 0),
+              Number(payload?.totalBytes || 0)
             );
           }
         }
@@ -658,15 +677,20 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const sessionId = `overlay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       remoteOverlayActiveRef.current = true;
+      remoteOverlaySessionAliveRef.current = true;
+      remoteOverlaySessionClosingRef.current = false;
       remoteOverlayConfigRef.current = { remoteUrl, sessionId, baseFilename, recordingEnabled };
       remoteOverlayChunkIndexRef.current = 1;
       remoteOverlayChunkStartMsRef.current = 0;
       remoteOverlayPendingUploadsRef.current = [];
       remoteOverlayUploadInFlightRef.current = false;
       remoteOverlayCurrentUploadFileNameRef.current = '';
+      remoteOverlayCurrentUploadQueueIdRef.current = '';
       remoteOverlayChunkMetaRef.current = new Map();
       remoteOverlayTranscriptsRef.current = [];
       remoteOverlaySummariesRef.current = [];
+      remoteOverlayChunkQueueIdRef.current = new Map();
+      remoteOverlayPendingResultJobIdsRef.current = new Set();
 
       const localChunkPaths: string[] = [];
       let stopping = false;
@@ -956,6 +980,74 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         }
       };
 
+      const tryFinalizeClientSave = async () => {
+        const cfg = remoteOverlayConfigRef.current;
+        if (!cfg) return;
+        if (!remoteOverlaySessionClosingRef.current) return;
+        if (remoteOverlayUploadInFlightRef.current) return;
+        if (remoteOverlayPendingUploadsRef.current.length > 0) return;
+        if (remoteOverlayPendingResultJobIdsRef.current.size > 0) return;
+
+        // Session is fully done (all chunks uploaded + results fetched).
+        remoteOverlaySessionAliveRef.current = false;
+
+        try {
+          const transcripts = remoteOverlayTranscriptsRef.current.map((t) => ({
+            text: t.text || '',
+            timestamp: t.formattedTime || `[${formatTimestamp(Number(t.timestampMs || 0))}]`,
+            timestampMs: Number(t.timestampMs || 0),
+          }));
+          const summaries = remoteOverlaySummariesRef.current.map((s: any) => ({
+            text: String(s?.text || ''),
+            windowLabel: String(s?.windowLabel || ''),
+          }));
+
+          const duration = Math.max(0, Date.now() - sessionStartTimeRef.current);
+          const outBase = cfg.baseFilename;
+
+          if (cfg.recordingEnabled) {
+            // Merge local chunks and save recording + metadata with the final lecture_* name.
+            const outPath = `${recordingsDir}\\${outBase}.webm`;
+            await electronAPI.concatWebm(localChunkPaths, outPath);
+            const meta = {
+              quality: captureQuality,
+              duration,
+              transcriptCount: transcripts.length,
+              summaryCount: summaries.length,
+              transcripts,
+              summaries,
+              recordedMimeType: 'video/webm',
+              uploadedFileName: `${outBase}.webm`,
+            };
+            const saveRes = await electronAPI.saveRecordingExisting(outPath, meta);
+            if (!saveRes?.success) throw new Error(saveRes?.error || 'Failed to save merged overlay recording');
+          } else {
+            // Metadata-only save with deterministic filename.
+            const metadataPath = `${recordingsDir}\\${outBase}.json`;
+            const meta = {
+              quality: null,
+              duration,
+              transcriptCount: transcripts.length,
+              summaryCount: summaries.length,
+              transcripts,
+              summaries,
+              uploadedFileName: `${outBase}.webm`,
+              recordedMimeType: 'video/webm',
+              videoFilename: `${outBase}.mp4`,
+              videoPath: '',
+              savedAt: new Date().toISOString(),
+              fileSize: 0,
+            };
+            await electronAPI.writeFile(metadataPath, JSON.stringify(meta, null, 2));
+          }
+          addLog('[RemoteOverlay] Session saved to recordings', LogLevel.SUCCESS);
+        } catch (e) {
+          addLog(`[RemoteOverlay] Failed to save session: ${e}`, LogLevel.ERROR);
+        } finally {
+          remoteOverlayConfigRef.current = null;
+        }
+      };
+
       const pollAndApplyResult = async (jobId: string) => {
         const cfg = remoteOverlayConfigRef.current;
         if (!cfg) return;
@@ -964,76 +1056,95 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         if (!meta) return;
 
         addLog(`[RemoteOverlay] Poll start: jobId=${jobId}`, LogLevel.INFO);
-        while (remoteOverlayActiveRef.current) {
-          const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
-          if (!st?.success) {
-            addLog(`[RemoteOverlay] Poll status failed: jobId=${jobId}`, LogLevel.WARN);
-            await new Promise((r) => setTimeout(r, 1000));
-            continue;
+        remoteOverlayPendingResultJobIdsRef.current.add(jobId);
+        try {
+          while (remoteOverlaySessionAliveRef.current) {
+            const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
+            if (!st?.success) {
+              addLog(`[RemoteOverlay] Poll status failed: jobId=${jobId}`, LogLevel.WARN);
+              await new Promise((r) => setTimeout(r, 1000));
+              continue;
+            }
+            const state = st?.data?.status?.state;
+            const phase = st?.data?.status?.phase;
+            const pct = Number(st?.data?.status?.progressPercent || 0);
+            addLog(`[RemoteOverlay] Poll: jobId=${jobId} state=${state} phase=${phase} pct=${pct}`, LogLevel.INFO);
+
+            const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
+            if (queueId) {
+              // Map server processing into ~33-95%.
+              const mappedPct = Math.max(33, Math.min(95, 33 + (pct / 100) * 62));
+              uploadQueueRef.current?.setRemoteProgress(queueId, String(phase || 'Processing on remote server'), mappedPct);
+            }
+
+            if (state === 'error') {
+              const err = st?.data?.status?.error || 'Remote processing failed';
+              addLog(`Remote chunk error: ${err}`, LogLevel.ERROR);
+              if (queueId) uploadQueueRef.current?.failRemoteUpload(queueId, String(err));
+              return;
+            }
+            if (state === 'complete') break;
+            await new Promise((r) => setTimeout(r, 1500));
           }
-          const state = st?.data?.status?.state;
-          const phase = st?.data?.status?.phase;
-          const pct = st?.data?.status?.progressPercent;
-          addLog(`[RemoteOverlay] Poll: jobId=${jobId} state=${state} phase=${phase} pct=${pct}`, LogLevel.INFO);
-          if (state === 'error') {
-            const err = st?.data?.status?.error || 'Remote processing failed';
-            addLog(`Remote chunk error: ${err}`, LogLevel.ERROR);
-            return;
+
+          const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
+          if (queueId) uploadQueueRef.current?.setRemoteProgress(queueId, 'Downloading results', 95);
+
+          const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
+          if (!res?.success || !res?.data) return;
+          addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
+          const serverMeta = res.data;
+
+          const offsetMs = meta.chunkStartMs;
+          const transcripts = Array.isArray(serverMeta.transcripts) ? serverMeta.transcripts : [];
+          const summaries = Array.isArray(serverMeta.summaries) ? serverMeta.summaries : [];
+
+          for (let i = 0; i < transcripts.length; i++) {
+            const t = transcripts[i] || {};
+            const ts = Number(t.timestampMs ?? 0);
+            const text = String(t.text || '').trim();
+            if (!text) continue;
+            const timestampMs = offsetMs + Math.max(0, ts);
+            remoteOverlayTranscriptsRef.current.push({
+              id: `t_${jobId}_${i}`,
+              text,
+              timestampMs,
+              isFinal: true,
+              formattedTime: `[${formatTimestamp(timestampMs)}]`,
+            });
           }
-          if (state === 'complete') break;
-          await new Promise((r) => setTimeout(r, 1500));
+
+          for (let i = 0; i < summaries.length; i++) {
+            const s = summaries[i] || {};
+            const text = String(s.text || '').trim();
+            if (!text) continue;
+            const label = String(s.windowLabel || '');
+            const range = extractRangeFromLabel(label);
+            const startMs = offsetMs + (range ? range.startSec * 1000 : meta.chunkStartMs);
+            const endMs = offsetMs + (range ? range.endSec * 1000 : meta.chunkEndMs);
+            remoteOverlaySummariesRef.current.push({
+              id: `s_${jobId}_${i}`,
+              text,
+              timestampMs: startMs,
+              windowStart: startMs / 1000,
+              windowEnd: endMs / 1000,
+              windowLabel: formatRangeLabel(label, startMs, endMs),
+            });
+          }
+
+          // Sort for stable display
+          remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
+          remoteOverlaySummariesRef.current.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+          pushOverlayUpdates();
+          addLog(
+            `[RemoteOverlay] Overlay updated: transcripts=${remoteOverlayTranscriptsRef.current.length} summaries=${remoteOverlaySummariesRef.current.length}`,
+            LogLevel.INFO
+          );
+          if (queueId) uploadQueueRef.current?.completeRemoteUpload(queueId, 'Complete');
+        } finally {
+          remoteOverlayPendingResultJobIdsRef.current.delete(jobId);
+          void tryFinalizeClientSave();
         }
-
-        const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
-        if (!res?.success || !res?.data) return;
-        addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
-        const serverMeta = res.data;
-
-        const offsetMs = meta.chunkStartMs;
-        const transcripts = Array.isArray(serverMeta.transcripts) ? serverMeta.transcripts : [];
-        const summaries = Array.isArray(serverMeta.summaries) ? serverMeta.summaries : [];
-
-        for (let i = 0; i < transcripts.length; i++) {
-          const t = transcripts[i] || {};
-          const ts = Number(t.timestampMs ?? 0);
-          const text = String(t.text || '').trim();
-          if (!text) continue;
-          const timestampMs = offsetMs + Math.max(0, ts);
-          remoteOverlayTranscriptsRef.current.push({
-            id: `t_${jobId}_${i}`,
-            text,
-            timestampMs,
-            isFinal: true,
-            formattedTime: `[${formatTimestamp(timestampMs)}]`,
-          });
-        }
-
-        for (let i = 0; i < summaries.length; i++) {
-          const s = summaries[i] || {};
-          const text = String(s.text || '').trim();
-          if (!text) continue;
-          const label = String(s.windowLabel || '');
-          const range = extractRangeFromLabel(label);
-          const startMs = offsetMs + (range ? range.startSec * 1000 : meta.chunkStartMs);
-          const endMs = offsetMs + (range ? range.endSec * 1000 : meta.chunkEndMs);
-          remoteOverlaySummariesRef.current.push({
-            id: `s_${jobId}_${i}`,
-            text,
-            timestampMs: startMs,
-            windowStart: startMs / 1000,
-            windowEnd: endMs / 1000,
-            windowLabel: formatRangeLabel(label, startMs, endMs),
-          });
-        }
-
-        // Sort for stable display
-        remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
-        remoteOverlaySummariesRef.current.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
-        pushOverlayUpdates();
-        addLog(
-          `[RemoteOverlay] Overlay updated: transcripts=${remoteOverlayTranscriptsRef.current.length} summaries=${remoteOverlaySummariesRef.current.length}`,
-          LogLevel.INFO
-        );
       };
 
       const processNextUpload = async (): Promise<void> => {
@@ -1042,10 +1153,14 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         if (!cfg) return;
 
         const next = remoteOverlayPendingUploadsRef.current.shift();
-        if (!next) return;
+        if (!next) {
+          void tryFinalizeClientSave();
+          return;
+        }
 
         remoteOverlayUploadInFlightRef.current = true;
         remoteOverlayCurrentUploadFileNameRef.current = next.storedFileName;
+        remoteOverlayCurrentUploadQueueIdRef.current = next.remoteQueueId || '';
 
         try {
           const api = window.electronAPI as any;
@@ -1054,6 +1169,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             api?.updateLectureStatus?.(JSON.stringify({ remotePhase: `Sending ${chunkLabel}…` }));
           } catch {
             // ignore
+          }
+          if (next.remoteQueueId && !next.isManifest) {
+            uploadQueueRef.current?.setRemoteProgress(next.remoteQueueId, 'Uploading to remote server', 0, next.fileSize);
           }
           addLog(
             `[RemoteOverlay] Upload start: ${next.storedFileName} (jobId=${next.jobId})`,
@@ -1092,15 +1210,22 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           }
 
           if (!next.isManifest) {
+            if (next.remoteQueueId) {
+              uploadQueueRef.current?.setRemoteProgress(next.remoteQueueId, 'Processing on remote server', 33);
+            }
             void pollAndApplyResult(next.jobId);
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           addLog(`Remote overlay upload error: ${msg}`, LogLevel.ERROR);
           setError(msg);
+          if (next?.remoteQueueId) {
+            uploadQueueRef.current?.failRemoteUpload(next.remoteQueueId, msg);
+          }
         } finally {
           remoteOverlayUploadInFlightRef.current = false;
           remoteOverlayCurrentUploadFileNameRef.current = '';
+          remoteOverlayCurrentUploadQueueIdRef.current = '';
           void processNextUpload();
         }
       };
@@ -1148,6 +1273,16 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
           remoteOverlayChunkMetaRef.current.set(jobId, { chunkStartMs, chunkEndMs });
 
+          let remoteQueueId = '';
+          try {
+            remoteQueueId = uploadQueueRef.current?.addRemoteUpload(storedFileName, Number(writeRes.fileSize || 0)) || '';
+          } catch {
+            remoteQueueId = '';
+          }
+          if (remoteQueueId) {
+            remoteOverlayChunkQueueIdRef.current.set(jobId, remoteQueueId);
+          }
+
           remoteOverlayPendingUploadsRef.current.push({
             chunkIndex,
             chunkStartMs,
@@ -1156,6 +1291,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             storedFileName,
             jobId,
             deleteLocalAfterUpload: !cfg.recordingEnabled,
+            remoteQueueId,
+            fileSize: Number(writeRes.fileSize || 0),
           });
 
           remoteOverlayChunkIndexRef.current += 1;
@@ -1197,6 +1334,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 jobId: manifestJobId,
                 deleteLocalAfterUpload: true,
                 isManifest: true,
+                remoteQueueId: '',
+                fileSize: 0,
               });
               void processNextUpload();
             }
@@ -1209,12 +1348,23 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const stopSession = async () => {
         if (stopping) return;
         stopping = true;
+        remoteOverlaySessionClosingRef.current = true;
 
         // Stop timers
         const timers = remoteOverlayTimersRef.current;
         if (timers?.rotate) window.clearInterval(timers.rotate);
         if (timers?.elapsed) window.clearInterval(timers.elapsed);
         remoteOverlayTimersRef.current = null;
+
+        // Close overlay window immediately (background processing continues).
+        if (electronAPI?.closeLectureOverlay && overlayCreatedRef.current) {
+          try {
+            await electronAPI.closeLectureOverlay();
+            overlayCreatedRef.current = false;
+          } catch {
+            // ignore
+          }
+        }
 
         // Flush + finalize last chunk
         try {
@@ -1241,54 +1391,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         remoteOverlayActiveRef.current = false;
 
-        // If recording is enabled, merge local chunks into a final webm.
-        if (recordingEnabled) {
-          try {
-            const outPath = `${recordingsDir}\\${baseFilename}.webm`;
-            await electronAPI.concatWebm(localChunkPaths, outPath);
-            try {
-              const transcripts = remoteOverlayTranscriptsRef.current.map((t) => ({
-                text: t.text || '',
-                timestamp: t.formattedTime || `[${formatTimestamp(Number(t.timestampMs || 0))}]`,
-                timestampMs: Number(t.timestampMs || 0),
-              }));
-              const summaries = remoteOverlaySummariesRef.current.map((s: any) => ({
-                text: String(s?.text || ''),
-                windowLabel: String(s?.windowLabel || ''),
-              }));
-              const meta = {
-                quality: captureQuality,
-                duration: Math.max(0, Date.now() - sessionStartTimeRef.current),
-                transcriptCount: transcripts.length,
-                summaryCount: summaries.length,
-                transcripts,
-                summaries,
-                recordedMimeType: 'video/webm',
-                uploadedFileName: `${baseFilename}.webm`,
-              };
-              const saveRes = await electronAPI.saveRecordingExisting(outPath, meta);
-              if (!saveRes?.success) {
-                addLog(`Client metadata save warning: ${saveRes?.error || 'saveRecordingExisting failed'}`, LogLevel.WARN);
-              }
-            } catch (e) {
-              addLog(`Client metadata save warning: ${e}`, LogLevel.WARN);
-            }
-          } catch (e) {
-            addLog(`Client merge warning: ${e}`, LogLevel.WARN);
-          }
-        }
-
-        // Close overlay window
-        if (electronAPI?.closeLectureOverlay && overlayCreatedRef.current) {
-          try {
-            await electronAPI.closeLectureOverlay();
-            overlayCreatedRef.current = false;
-          } catch {
-            // ignore
-          }
-        }
-
         setIsRunning(false);
+        void tryFinalizeClientSave();
       };
 
       // Install stop handler for overlay control events
