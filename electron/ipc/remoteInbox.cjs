@@ -222,6 +222,32 @@ function setupRemoteInboxHandlers(ipcMain, options) {
           }
         }
 
+        // Client polling: fetch transcript JSON (available after transcription, before VLM completes)
+        if (method === 'GET' && url.startsWith('/inbox/transcript/')) {
+          const jobId = decodeURIComponent(url.slice('/inbox/transcript/'.length)).trim();
+          const job = jobs.get(jobId);
+          if (!job) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Job not found' }));
+            return;
+          }
+          if (!job.transcriptReady || !job.transcriptPath) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Transcript not ready', state: job.state }));
+            return;
+          }
+          try {
+            const json = await fsp.readFile(String(job.transcriptPath), 'utf8');
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(json);
+            return;
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+            return;
+          }
+        }
+
         if (!((method === 'PUT' || method === 'POST') && url.startsWith('/inbox/upload'))) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           res.end('Not found');

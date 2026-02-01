@@ -209,6 +209,19 @@ function setupRemoteUploadHandlers(ipcMain, options) {
     if (!res.ok) return { success: false, error: `Result failed (${res.statusCode})`, detail: res.body };
     return { success: true, data: res.json };
   });
+
+  ipcMain.handle('remoteUpload:getTranscript', async (_event, serverUrlRaw, jobIdRaw) => {
+    const serverUrl = normalizeServerUrl(serverUrlRaw);
+    const jobId = String(jobIdRaw || '').trim();
+    if (!serverUrl) return { success: false, error: 'Missing serverUrl' };
+    if (!jobId) return { success: false, error: 'Missing jobId' };
+
+    const base = deriveInboxBase(serverUrl, inboxPort);
+    const url = new URL(`/inbox/transcript/${encodeURIComponent(jobId)}`, base);
+    const res = await httpGetJson(url);
+    if (!res.ok) return { success: false, error: `Transcript failed (${res.statusCode})`, detail: res.body };
+    return { success: true, data: res.json };
+  });
 }
 
 module.exports = { setupRemoteUploadHandlers };

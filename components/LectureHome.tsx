@@ -110,6 +110,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const remoteOverlayStopFnRef = React.useRef<(() => void) | null>(null);
   const remoteOverlayChunkQueueIdRef = React.useRef<Map<string, string>>(new Map());
   const remoteOverlayPendingResultJobIdsRef = React.useRef<Set<string>>(new Set());
+  const remoteOverlayAppliedTranscriptJobIdsRef = React.useRef<Set<string>>(new Set());
 
   const formatTimestamp = React.useCallback((ms: number): string => {
     const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -691,6 +692,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlaySummariesRef.current = [];
       remoteOverlayChunkQueueIdRef.current = new Map();
       remoteOverlayPendingResultJobIdsRef.current = new Set();
+      remoteOverlayAppliedTranscriptJobIdsRef.current = new Set();
 
       const localChunkPaths: string[] = [];
       let stopping = false;
@@ -1077,6 +1079,42 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               uploadQueueRef.current?.setRemoteProgress(queueId, String(phase || 'Processing on remote server'), mappedPct);
             }
 
+            // If transcript is ready, fetch and apply immediately (even if VLM is still running).
+            const transcriptReady = Boolean(st?.data?.status?.transcriptReady);
+            if (
+              transcriptReady &&
+              !remoteOverlayAppliedTranscriptJobIdsRef.current.has(jobId) &&
+              typeof api.getRemoteJobTranscript === 'function'
+            ) {
+              try {
+                const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId);
+                if (tr?.success && tr?.data) {
+                  const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
+                  const offsetMs = meta.chunkStartMs;
+                  for (let i = 0; i < raw.length; i++) {
+                    const t = raw[i] || {};
+                    const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
+                    const text = String(t.text || t.segment || '').trim();
+                    if (!text) continue;
+                    const timestampMs = offsetMs + Math.max(0, startSec * 1000);
+                    remoteOverlayTranscriptsRef.current.push({
+                      id: `t_${jobId}_early_${i}`,
+                      text,
+                      timestampMs,
+                      isFinal: true,
+                      formattedTime: `[${formatTimestamp(timestampMs)}]`,
+                    });
+                  }
+                  remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
+                  pushOverlayUpdates();
+                  remoteOverlayAppliedTranscriptJobIdsRef.current.add(jobId);
+                  addLog(`[RemoteOverlay] Transcript applied early: jobId=${jobId}`, LogLevel.INFO);
+                }
+              } catch (e) {
+                addLog(`[RemoteOverlay] Transcript fetch failed: ${e}`, LogLevel.WARN);
+              }
+            }
+
             if (state === 'error') {
               const err = st?.data?.status?.error || 'Remote processing failed';
               addLog(`Remote chunk error: ${err}`, LogLevel.ERROR);
@@ -1099,19 +1137,23 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const transcripts = Array.isArray(serverMeta.transcripts) ? serverMeta.transcripts : [];
           const summaries = Array.isArray(serverMeta.summaries) ? serverMeta.summaries : [];
 
-          for (let i = 0; i < transcripts.length; i++) {
-            const t = transcripts[i] || {};
-            const ts = Number(t.timestampMs ?? 0);
-            const text = String(t.text || '').trim();
-            if (!text) continue;
-            const timestampMs = offsetMs + Math.max(0, ts);
-            remoteOverlayTranscriptsRef.current.push({
-              id: `t_${jobId}_${i}`,
-              text,
-              timestampMs,
-              isFinal: true,
-              formattedTime: `[${formatTimestamp(timestampMs)}]`,
-            });
+          // Avoid duplicating transcripts if they were already applied from /inbox/transcript.
+          if (!remoteOverlayAppliedTranscriptJobIdsRef.current.has(jobId)) {
+            for (let i = 0; i < transcripts.length; i++) {
+              const t = transcripts[i] || {};
+              const ts = Number(t.timestampMs ?? 0);
+              const text = String(t.text || '').trim();
+              if (!text) continue;
+              const timestampMs = offsetMs + Math.max(0, ts);
+              remoteOverlayTranscriptsRef.current.push({
+                id: `t_${jobId}_${i}`,
+                text,
+                timestampMs,
+                isFinal: true,
+                formattedTime: `[${formatTimestamp(timestampMs)}]`,
+              });
+            }
+            remoteOverlayAppliedTranscriptJobIdsRef.current.add(jobId);
           }
 
           for (let i = 0; i < summaries.length; i++) {

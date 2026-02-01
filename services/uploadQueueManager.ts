@@ -511,6 +511,20 @@ export class UploadQueueManager {
 
     this.log(`Transcription complete: ${video.fileName}`, LogLevel.SUCCESS);
 
+    // If this is a remote inbox job, publish transcript availability immediately
+    // so the client can display transcripts while VLM is still processing.
+    if (video.remoteJobId) {
+      try {
+        const api = window.electronAPI as any;
+        api?.updateInboxJob?.(String(video.remoteJobId), {
+          transcriptReady: true,
+          transcriptPath,
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     // Check again
     if (this.liveSessionCheck()) {
       throw new Error('Cancelled: Live session started');

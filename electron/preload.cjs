@@ -225,6 +225,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRemoteJobResult: async (serverUrl, jobId) => {
     return await ipcRenderer.invoke('remoteUpload:getResult', serverUrl, jobId);
   },
+  getRemoteJobTranscript: async (serverUrl, jobId) => {
+    return await ipcRenderer.invoke('remoteUpload:getTranscript', serverUrl, jobId);
+  },
   onRemoteUploadProgress: (callback) => {
     ipcRenderer.on('remoteUpload:progress', (event, payload) => callback(payload));
   },

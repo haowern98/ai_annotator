@@ -93,6 +93,9 @@ interface ElectronAPI {
   onInboxActivity: (callback: (activity: any) => void) => void;
   onInboxFileReceived: (callback: (payload: any) => void) => void;
   sendVideoToRemoteServer: (serverUrl: string, filePath: string, displayName?: string) => Promise<{success: boolean; error?: string}>;
+  getRemoteJobStatus: (serverUrl: string, jobId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  getRemoteJobResult: (serverUrl: string, jobId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  getRemoteJobTranscript: (serverUrl: string, jobId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
   onRemoteUploadProgress: (callback: (payload: any) => void) => void;
   onRemoteUploadComplete: (callback: (payload: any) => void) => void;
   onRemoteUploadError: (callback: (payload: any) => void) => void;
