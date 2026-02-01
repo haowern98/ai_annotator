@@ -898,13 +898,18 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         const meta = remoteOverlayChunkMetaRef.current.get(jobId);
         if (!meta) return;
 
+        addLog(`[RemoteOverlay] Poll start: jobId=${jobId}`, LogLevel.INFO);
         while (remoteOverlayActiveRef.current) {
           const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
           if (!st?.success) {
+            addLog(`[RemoteOverlay] Poll status failed: jobId=${jobId}`, LogLevel.WARN);
             await new Promise((r) => setTimeout(r, 1000));
             continue;
           }
           const state = st?.data?.status?.state;
+          const phase = st?.data?.status?.phase;
+          const pct = st?.data?.status?.progressPercent;
+          addLog(`[RemoteOverlay] Poll: jobId=${jobId} state=${state} phase=${phase} pct=${pct}`, LogLevel.INFO);
           if (state === 'error') {
             const err = st?.data?.status?.error || 'Remote processing failed';
             addLog(`Remote chunk error: ${err}`, LogLevel.ERROR);
@@ -916,6 +921,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
         if (!res?.success || !res?.data) return;
+        addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
         const serverMeta = res.data;
 
         const offsetMs = meta.chunkStartMs;
@@ -959,6 +965,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
         remoteOverlaySummariesRef.current.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
         pushOverlayUpdates();
+        addLog(
+          `[RemoteOverlay] Overlay updated: transcripts=${remoteOverlayTranscriptsRef.current.length} summaries=${remoteOverlaySummariesRef.current.length}`,
+          LogLevel.INFO
+        );
       };
 
       const processNextUpload = async (): Promise<void> => {
@@ -974,6 +984,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         try {
           const api = window.electronAPI as any;
+          addLog(
+            `[RemoteOverlay] Upload start: ${next.storedFileName} (jobId=${next.jobId})`,
+            LogLevel.INFO
+          );
           const res = await api.sendVideoToRemoteServer(cfg.remoteUrl, next.localPath, {
             displayName: next.storedFileName,
             jobId: next.jobId,
@@ -986,10 +1000,15 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           if (!res?.success) {
             throw new Error(res?.error || 'Remote upload failed');
           }
+          addLog(
+            `[RemoteOverlay] Upload complete: ${next.storedFileName} (jobId=${res?.jobId || next.jobId})`,
+            LogLevel.SUCCESS
+          );
 
           if (next.deleteLocalAfterUpload) {
             try {
               await api.deleteFile(next.localPath);
+              addLog(`[RemoteOverlay] Deleted local chunk: ${next.storedFileName}`, LogLevel.INFO);
             } catch {
               // ignore
             }
@@ -1027,6 +1046,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         const chunkIndex = remoteOverlayChunkIndexRef.current;
         const chunkStartMs = remoteOverlayChunkStartMsRef.current;
         const chunkEndMs = Date.now() - sessionStartTimeRef.current;
+        addLog(
+          `[RemoteOverlay] Finalize chunk ${chunkIndex} (${formatTimestamp(chunkStartMs)}-${formatTimestamp(chunkEndMs)}) blobs=${blobs.length}`,
+          LogLevel.INFO
+        );
 
         remoteOverlayChunkMetaRef.current.set(`${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`, {
           chunkStartMs,
@@ -1040,6 +1063,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         if (!writeRes?.success || !writeRes?.videoPath) {
           throw new Error(writeRes?.error || 'Failed to write chunk');
         }
+        addLog(
+          `[RemoteOverlay] Wrote chunk file: ${writeRes.videoFilename} (${Math.round(Number(writeRes.fileSize || 0) / 1024 / 1024)}MB)`,
+          LogLevel.SUCCESS
+        );
 
         const storedFileName = `${cfg.baseFilename}_chunk_${String(chunkIndex).padStart(4, '0')}.webm`;
         localChunkPaths.push(String(writeRes.videoPath));
@@ -1077,6 +1104,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const manifestRes = await electronAPI.writeRecordingManifest(cfg.baseFilename, manifestObj);
           if (manifestRes?.success && manifestRes?.manifestPath) {
             const manifestJobId = `${cfg.sessionId}_manifest`;
+            addLog(`[RemoteOverlay] Manifest written: ${manifestRes.manifestFilename}`, LogLevel.INFO);
             remoteOverlayPendingUploadsRef.current.push({
               chunkIndex: 0,
               chunkStartMs: 0,

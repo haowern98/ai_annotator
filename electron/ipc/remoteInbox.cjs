@@ -269,6 +269,21 @@ function setupRemoteInboxHandlers(ipcMain, options) {
         }
 
         const targetPath = path.join(recordingsDir, storedFileName);
+        try {
+          console.log('[RemoteInbox] Upload start', {
+            clientIp,
+            jobId,
+            sessionId,
+            overlayBase,
+            chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+            isManifest: isManifestUpload,
+            recordingEnabled,
+            originalName,
+            storedFileName,
+          });
+        } catch {
+          // ignore
+        }
 
         const total = Number(req.headers['content-length'] || 0) || 0;
 
@@ -411,6 +426,7 @@ function setupRemoteInboxHandlers(ipcMain, options) {
                   const raw = await fsp.readFile(targetPath, 'utf8');
                   const manifest = JSON.parse(raw);
                   const enabled = Boolean(manifest && manifest.recordingEnabled);
+                  console.log('[RemoteInbox] Manifest received', { overlayBase, enabled });
                   if (!enabled) return;
 
                   const base = sanitizeBaseFilename(manifest.baseFilename || overlayBase);
@@ -445,9 +461,12 @@ function setupRemoteInboxHandlers(ipcMain, options) {
 
                   const outPath = path.join(recordingsDir, `${base}.webm`);
                   setState({ lastError: null, fileName: `${base}.webm` });
+                  console.log('[RemoteInbox] Merging chunks', { base, outPath, count: inputPaths.length });
                   await concatWebmFiles(recordingsDir, inputPaths, outPath);
+                  console.log('[RemoteInbox] Merge complete', { outPath });
                 } catch (e) {
                   setState({ lastError: String(e.message || e) });
+                  console.error('[RemoteInbox] Merge failed', e);
                 }
               });
             }
