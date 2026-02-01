@@ -169,11 +169,13 @@ export default function App() {
     const api = window.electronAPI as any;
     const handleInboxFile = (payload: any) => {
       try {
+        if (payload?.isManifest) return;
         const videoPath = String(payload?.videoPath || '').trim();
         if (!videoPath) return;
-        const fileName = String(payload?.fileName || 'remote_upload');
+        const fileName = String(payload?.storedFileName || payload?.fileName || 'remote_upload');
         const fileSize = Number(payload?.fileSize || 0);
         const jobId = String(payload?.jobId || '').trim();
+        const deleteSourceAfterComplete = payload?.recordingEnabled === false;
         if (jobId && (window.electronAPI as any)?.updateInboxJob) {
           (window.electronAPI as any).updateInboxJob(jobId, {
             state: 'processing',
@@ -182,7 +184,9 @@ export default function App() {
           });
         }
         if (jobId && uploadQueueRef.current?.addVideoPathRemoteJob) {
-          uploadQueueRef.current.addVideoPathRemoteJob(videoPath, fileName, fileSize, jobId);
+          uploadQueueRef.current.addVideoPathRemoteJob(videoPath, fileName, fileSize, jobId, {
+            deleteSourceAfterComplete,
+          });
         } else {
           uploadQueueRef.current?.addVideoPath(videoPath, fileName, fileSize);
         }

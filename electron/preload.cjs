@@ -377,6 +377,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('recording:ingestVideoAs', sourcePath, baseFilename);
   },
 
+  // Write a deterministic chunk file into recordings (remote overlay).
+  writeRecordingChunk: async (videoData, baseFilename, chunkIndex, ext) => {
+    return await ipcRenderer.invoke('recording:writeChunk', videoData, baseFilename, chunkIndex, ext);
+  },
+
+  // Write a manifest file into recordings (remote overlay).
+  writeRecordingManifest: async (baseFilename, manifest) => {
+    return await ipcRenderer.invoke('recording:writeManifest', baseFilename, manifest);
+  },
+
   // Save metadata for an already-present video file (no in-memory video transfer)
   saveRecordingExisting: async (videoPath, metadata) => {
     return await ipcRenderer.invoke('recording:saveExisting', videoPath, metadata);
@@ -453,6 +463,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   convertVideoToWebM: async (videoPath) => {
     return await ipcRenderer.invoke('video:convertVideoToWebM', videoPath);
+  },
+
+  concatWebm: async (inputPaths, outputPath) => {
+    return await ipcRenderer.invoke('video:concatWebm', inputPaths, outputPath);
   },
 
   // YouTube downloader (Python yt_dlp in .venv)

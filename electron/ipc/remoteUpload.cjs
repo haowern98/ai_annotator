@@ -65,9 +65,19 @@ function setupRemoteUploadHandlers(ipcMain, options) {
 
     let displayName = '';
     let jobId = '';
+    let sessionId = '';
+    let overlayBase = '';
+    let chunkIndex = '';
+    let isManifest = false;
+    let recordingEnabled = '';
     if (displayNameRaw && typeof displayNameRaw === 'object') {
       displayName = String(displayNameRaw.displayName || '').trim();
       jobId = String(displayNameRaw.jobId || '').trim();
+      sessionId = String(displayNameRaw.sessionId || '').trim();
+      overlayBase = String(displayNameRaw.overlayBase || '').trim();
+      chunkIndex = String(displayNameRaw.chunkIndex ?? '').trim();
+      isManifest = Boolean(displayNameRaw.isManifest);
+      recordingEnabled = String(displayNameRaw.recordingEnabled ?? '').trim();
     } else {
       displayName = String(displayNameRaw || '').trim();
     }
@@ -99,6 +109,11 @@ function setupRemoteUploadHandlers(ipcMain, options) {
             'Content-Type': 'application/octet-stream',
             'X-Filename': fileName,
             ...(jobId ? { 'X-Job-Id': jobId } : {}),
+            ...(sessionId ? { 'X-Session-Id': sessionId } : {}),
+            ...(overlayBase ? { 'X-Overlay-Base': overlayBase } : {}),
+            ...(chunkIndex ? { 'X-Chunk-Index': chunkIndex } : {}),
+            ...(isManifest ? { 'X-Is-Manifest': '1' } : {}),
+            ...(recordingEnabled ? { 'X-Recording-Enabled': recordingEnabled } : {}),
           },
         },
         (res) => {

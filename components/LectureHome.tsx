@@ -71,6 +71,47 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const recordingQualityRef = React.useRef<RecordingQuality | null>(null);
   const stopProcessedRef = React.useRef<boolean>(false);
 
+  // Remote overlay chunk session (client remote mode only)
+  const remoteOverlayActiveRef = React.useRef<boolean>(false);
+  const remoteOverlayConfigRef = React.useRef<{ remoteUrl: string; sessionId: string; baseFilename: string; recordingEnabled: boolean } | null>(null);
+  const remoteOverlayChunkIndexRef = React.useRef<number>(1);
+  const remoteOverlayChunkStartMsRef = React.useRef<number>(0);
+  const remoteOverlayChunkBlobsRef = React.useRef<Blob[]>([]);
+  const remoteOverlayPendingUploadsRef = React.useRef<
+    Array<{
+      chunkIndex: number;
+      chunkStartMs: number;
+      chunkEndMs: number;
+      localPath: string;
+      storedFileName: string;
+      jobId: string;
+      deleteLocalAfterUpload: boolean;
+      isManifest?: boolean;
+    }>
+  >([]);
+  const remoteOverlayUploadInFlightRef = React.useRef<boolean>(false);
+  const remoteOverlayCurrentUploadFileNameRef = React.useRef<string>('');
+  const remoteOverlayTimersRef = React.useRef<{ rotate?: number; elapsed?: number } | null>(null);
+  const remoteOverlayChunkMetaRef = React.useRef<Map<string, { chunkStartMs: number; chunkEndMs: number }>>(new Map());
+  const remoteOverlayTranscriptsRef = React.useRef<Array<TranscriptEntry & { formattedTime?: string }>>([]);
+  const remoteOverlaySummariesRef = React.useRef<Array<any>>([]);
+  const remoteOverlayStopFnRef = React.useRef<(() => void) | null>(null);
+
+  const formatTimestamp = React.useCallback((ms: number): string => {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }, []);
+
+  const stopRemoteOverlaySession = React.useCallback(() => {
+    try {
+      remoteOverlayStopFnRef.current?.();
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const addLog = React.useCallback((message: string, level: LogLevel = LogLevel.INFO) => {
     const timestamp = new Date().toLocaleTimeString();
     const prefix = `[${timestamp}]`;
@@ -100,11 +141,31 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       addLog(`[LectureHome] Received control command: ${command}`, LogLevel.INFO);
       
       if (command === 'stop') {
-        handleStopFromOverlay();
+        if (remoteOverlayActiveRef.current) {
+          stopRemoteOverlaySession();
+        } else {
+          handleStopFromOverlay();
+        }
       } else if (command === 'pause') {
-        sessionManagerRef.current?.pause();
+        if (remoteOverlayActiveRef.current) {
+          try {
+            mediaRecorderRef.current?.pause();
+          } catch {
+            // ignore
+          }
+        } else {
+          sessionManagerRef.current?.pause();
+        }
       } else if (command === 'resume') {
-        sessionManagerRef.current?.resume();
+        if (remoteOverlayActiveRef.current) {
+          try {
+            mediaRecorderRef.current?.resume();
+          } catch {
+            // ignore
+          }
+        } else {
+          sessionManagerRef.current?.resume();
+        }
       } else if (command === 'generate-summary') {
         sessionManagerRef.current?.generateSummary();
       }
@@ -133,6 +194,23 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     if (!api?.onRemoteUploadProgress) return;
 
     const handleProgress = (payload: any) => {
+      // Remote overlay chunk uploader (one-at-a-time).
+      if (remoteOverlayActiveRef.current) {
+        const expected = remoteOverlayCurrentUploadFileNameRef.current;
+        const fileName = String(payload?.fileName || '');
+        if (expected && fileName === expected) {
+          const pct = Math.max(0, Math.min(100, Number(payload?.progressPercent || 0)));
+          const electronAPI = window.electronAPI as any;
+          if (electronAPI?.updateLectureStatus) {
+            electronAPI.updateLectureStatus(
+              JSON.stringify({
+                remotePhase: `Uploading ${expected} (${pct}%)`,
+              })
+            );
+          }
+        }
+      }
+
       const id = remoteUploadIdRef.current;
       if (!id) return;
       const rawPct = Number(payload?.progressPercent || 0);
@@ -509,6 +587,30 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     const electronAPI = window.electronAPI as any;
 
     try {
+      // Remote overlay session only (requires remote client mode).
+      let remoteCfg: any = null;
+      try {
+        const saved = localStorage.getItem('qwen_remote_config');
+        remoteCfg = saved ? JSON.parse(saved) : null;
+      } catch {
+        remoteCfg = null;
+      }
+
+      if (!(remoteCfg?.mode === 'client' && remoteCfg?.remoteUrl)) {
+        const msg = 'Remote Overlay is only available in Remote Processing Client Mode (connected).';
+        addLog(msg, LogLevel.WARN);
+        setError(msg);
+        return;
+      }
+
+      const remoteUrl = String(remoteCfg.remoteUrl || '').trim();
+      if (!remoteUrl) {
+        const msg = 'Missing remote server URL.';
+        addLog(msg, LogLevel.ERROR);
+        setError(msg);
+        return;
+      }
+
       // Step 1: Show recording confirmation modal
       const quality = await new Promise<RecordingQuality | null | 'cancelled'>((resolve) => {
         setIsConfirmModalOpen(true);
@@ -523,13 +625,45 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       }
 
       // Store quality in both state AND local variable
-      const recordingQuality = quality; // Local variable to use throughout this function
+      const recordingEnabled = quality !== null;
+      const captureQuality: RecordingQuality = (quality || 'medium') as RecordingQuality;
       setSelectedQuality(quality);
       if (quality === null) {
         addLog('Proceeding without recording', LogLevel.INFO);
       } else {
         addLog(`Selected recording quality: ${quality}`, LogLevel.SUCCESS);
       }
+
+      const initRes = await electronAPI?.initRecording?.();
+      if (!initRes?.success || !initRes?.path) {
+        throw new Error(initRes?.error || 'Failed to initialize recordings directory');
+      }
+      const recordingsDir = String(initRes.path);
+
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const d = String(now.getDate()).padStart(2, '0');
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      const baseFilename = `lecture_${y}${m}${d}_${hh}${mm}${ss}_overlay_remote`;
+      const sessionId = `overlay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      remoteOverlayActiveRef.current = true;
+      remoteOverlayConfigRef.current = { remoteUrl, sessionId, baseFilename, recordingEnabled };
+      remoteOverlayChunkIndexRef.current = 1;
+      remoteOverlayChunkStartMsRef.current = 0;
+      remoteOverlayChunkBlobsRef.current = [];
+      remoteOverlayPendingUploadsRef.current = [];
+      remoteOverlayUploadInFlightRef.current = false;
+      remoteOverlayCurrentUploadFileNameRef.current = '';
+      remoteOverlayChunkMetaRef.current = new Map();
+      remoteOverlayTranscriptsRef.current = [];
+      remoteOverlaySummariesRef.current = [];
+
+      const localChunkPaths: string[] = [];
+      let stopping = false;
 
       // Step 2: Get screen sources
       let sources: any[] = [];
@@ -574,6 +708,16 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         },
       });
 
+      // System audio required for remote overlay mode.
+      if (!stream.getAudioTracks || stream.getAudioTracks().length === 0) {
+        try {
+          stream.getTracks().forEach((t) => t.stop());
+        } catch {
+          // ignore
+        }
+        throw new Error('System audio capture not available for this source. Select a different window/screen.');
+      }
+
       mediaStreamRef.current = stream;
 
       // Setup video element
@@ -582,10 +726,86 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         await videoRef.current.play();
       }
 
-      // Setup recording if quality was selected (but don't start yet)
-      if (recordingQuality !== null && videoRef.current) {
-        await setupRecording(videoRef.current, recordingQuality);
-      }
+      // Setup a rolling chunk recorder (always records for upload; "recordingEnabled" only controls final merge + retention).
+      const setupChunkRecorder = async () => {
+        if (!videoRef.current) throw new Error('Video element not ready');
+
+        const originalWidth = videoRef.current.videoWidth || 1920;
+        const originalHeight = videoRef.current.videoHeight || 1080;
+        let targetWidth = originalWidth;
+        let targetHeight = originalHeight;
+
+        if (captureQuality === 'medium') {
+          const maxWidth = 1280;
+          if (originalWidth > maxWidth) {
+            const scale = maxWidth / originalWidth;
+            targetWidth = maxWidth;
+            targetHeight = Math.round(originalHeight * scale);
+          }
+        } else if (captureQuality === 'low') {
+          const maxWidth = 480;
+          if (originalWidth > maxWidth) {
+            const scale = maxWidth / originalWidth;
+            targetWidth = maxWidth;
+            targetHeight = Math.round(originalHeight * scale);
+          }
+        }
+
+        const recordingCanvas = document.createElement('canvas');
+        recordingCanvas.width = targetWidth;
+        recordingCanvas.height = targetHeight;
+        recordingCanvas.style.display = 'none';
+        recordingCanvasRef.current = recordingCanvas;
+
+        const ctx = recordingCanvas.getContext('2d');
+        if (!ctx) throw new Error('Failed to get canvas 2D context');
+
+        const drawFrame = () => {
+          if (recordingCanvasRef.current && videoRef.current && videoRef.current.readyState >= 2) {
+            ctx.drawImage(videoRef.current, 0, 0, targetWidth, targetHeight);
+          }
+          animationFrameRef.current = requestAnimationFrame(drawFrame);
+        };
+        drawFrame();
+
+        const canvasStream = recordingCanvas.captureStream(30);
+        const audioTracks = stream.getAudioTracks();
+        audioTracks.forEach((track) => canvasStream.addTrack(track));
+
+        const supportedMimeTypes = [
+          'video/webm;codecs="vp8,opus"',
+          'video/webm',
+          'video/mp4;codecs="avc1.4d401e,mp4a.40.2"',
+          'video/mp4',
+        ];
+        let mimeType = '';
+        for (const type of supportedMimeTypes) {
+          if (MediaRecorder.isTypeSupported(type)) {
+            mimeType = type;
+            break;
+          }
+        }
+        if (!mimeType) throw new Error('No supported video codec found');
+
+        const recorder = new MediaRecorder(canvasStream, {
+          mimeType,
+          videoBitsPerSecond: captureQuality === 'high' ? 8000000 : captureQuality === 'medium' ? 2500000 : 1000000,
+        });
+
+        recorder.ondataavailable = (event) => {
+          if (!remoteOverlayActiveRef.current) return;
+          if (event.data && event.data.size > 0) {
+            remoteOverlayChunkBlobsRef.current.push(event.data);
+          }
+        };
+
+        recorder.onerror = (event: any) => {
+          addLog(`Recording error: ${event.error?.message || 'Unknown error'}`, LogLevel.ERROR);
+        };
+
+        recorder.start(1000);
+        mediaRecorderRef.current = recorder;
+      };
 
       // Create overlay window FIRST
       if (electronAPI?.createLectureOverlay && !overlayCreatedRef.current) {
@@ -604,84 +824,352 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       await new Promise(resolve => setTimeout(resolve, 500));
       
       // Store quality in ref for later use when saving
-      recordingQualityRef.current = recordingQuality;
+      recordingQualityRef.current = quality;
       
-      if (recordingQuality !== null && electronAPI?.updateLectureStatus) {
-        addLog(`Sending recording status to overlay: quality=${recordingQuality}`, LogLevel.INFO);
-        const statusResult = await electronAPI.updateLectureStatus(JSON.stringify({
-          isConnected: false,
-          isRunning: false,
-          isPaused: false,
-          isRecording: true,
-          recordingQuality: recordingQuality,
-          elapsedTime: '[00:00]'
-        }));
-        addLog(`Recording status sent to overlay: ${JSON.stringify(statusResult)}`, LogLevel.INFO);
-      } else {
-        addLog(`NOT sending recording status: recordingQuality=${recordingQuality}, hasUpdateAPI=${!!electronAPI?.updateLectureStatus}`, LogLevel.WARN);
+      if (electronAPI?.updateLectureStatus) {
+        await electronAPI.updateLectureStatus(
+          JSON.stringify({
+            isConnected: true,
+            isRunning: true,
+            isPaused: false,
+            isRecording: recordingEnabled,
+            recordingQuality: captureQuality,
+            elapsedTime: '[00:00]',
+            remotePhase: 'Recording (chunked)',
+          })
+        );
       }
 
       // Set session start time (for both recording and non-recording sessions)
       sessionStartTimeRef.current = Date.now();
       stopProcessedRef.current = false;  // Reset stop flag for new session
 
-      // Start the session
-      await sessionManagerRef.current?.start(
-        {
-          onTranscriptUpdate: (transcripts: TranscriptEntry[], current: string | null) => {
-            // Format transcripts with timestamps
-            const formatted = transcripts.map(t => ({
-              ...t,
-              formattedTime: sessionManagerRef.current?.formatTimestamp(t.timestampMs) ?? '[00:00]'
-            }));
+      const parseTimeToSeconds = (s: string): number | null => {
+        const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+        if (!m) return null;
+        const a = Number(m[1]);
+        const b = Number(m[2]);
+        const c = m[3] ? Number(m[3]) : null;
+        if (!Number.isFinite(a) || !Number.isFinite(b) || (c !== null && !Number.isFinite(c))) return null;
+        if (c === null) return a * 60 + b;
+        return a * 3600 + b * 60 + c;
+      };
 
-            // Send to overlay
-            if (electronAPI?.updateLectureTranscript) {
-              electronAPI.updateLectureTranscript(JSON.stringify({
-                transcripts: formatted,
-                current
-              }));
-            }
-          },
-          onSummaryUpdate: (summaries: SummaryEntry[], isGenerating: boolean) => {
-            // Summaries already have windowLabel from dual-session manager
-            // Send to overlay
-            if (electronAPI?.updateLectureSummary) {
-              electronAPI.updateLectureSummary(JSON.stringify({
-                summaries,
-                isGenerating
-              }));
-            }
-          },
-          onError: (errorMsg: string) => {
-            addLog(`Session error: ${errorMsg}`, LogLevel.ERROR);
-            setError(errorMsg);
-          },
-          onConnectionChange: async (transcriptConnected: boolean, summaryConnected: boolean) => {
-            const connected = transcriptConnected || summaryConnected;
-            addLog(`Connection: Transcript=${transcriptConnected}, Summary=${summaryConnected}`, connected ? LogLevel.SUCCESS : LogLevel.WARN);
-            setIsRunning(connected);
+      const extractRangeFromLabel = (label: string): { startSec: number; endSec: number } | null => {
+        const matches = String(label || '').match(/(\d{1,2}:\d{2}(?::\d{2})?)/g);
+        if (!matches || matches.length < 2) return null;
+        const a = parseTimeToSeconds(matches[0]);
+        const b = parseTimeToSeconds(matches[1]);
+        if (a === null || b === null) return null;
+        return { startSec: a, endSec: b };
+      };
 
-            // Send status to overlay
-            if (electronAPI?.updateLectureStatus) {
-              const statusResult = await electronAPI.updateLectureStatus(JSON.stringify({
-                isConnected: connected,
-                isRunning: connected,
-                isPaused: false,
-                isRecording: recordingQuality !== null,
-                recordingQuality: recordingQuality,
-                elapsedTime: sessionManagerRef.current?.formatTimestamp(
-                  sessionManagerRef.current?.getElapsedTime() ?? 0
-                ) ?? '[00:00]'
-              }));
-              addLog(`Status update result: ${JSON.stringify(statusResult)}`, LogLevel.INFO);
+      const formatRangeLabel = (orig: string, startMs: number, endMs: number): string => {
+        const start = formatTimestamp(startMs);
+        const end = formatTimestamp(endMs);
+        if (String(orig || '').startsWith('Topics:')) return `Topics: ${start}-${end}`;
+        if (/\[.*\]/.test(String(orig || ''))) return `[${start}]-[${end}]`;
+        return `${start}-${end}`;
+      };
+
+      const pushOverlayUpdates = () => {
+        if (electronAPI?.updateLectureTranscript) {
+          electronAPI.updateLectureTranscript(
+            JSON.stringify({
+              transcripts: remoteOverlayTranscriptsRef.current,
+              current: null,
+            })
+          );
+        }
+        if (electronAPI?.updateLectureSummary) {
+          electronAPI.updateLectureSummary(
+            JSON.stringify({
+              summaries: remoteOverlaySummariesRef.current,
+              isGenerating: false,
+            })
+          );
+        }
+      };
+
+      const pollAndApplyResult = async (jobId: string) => {
+        const cfg = remoteOverlayConfigRef.current;
+        if (!cfg) return;
+        const api = window.electronAPI as any;
+        const meta = remoteOverlayChunkMetaRef.current.get(jobId);
+        if (!meta) return;
+
+        while (remoteOverlayActiveRef.current) {
+          const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
+          if (!st?.success) {
+            await new Promise((r) => setTimeout(r, 1000));
+            continue;
+          }
+          const state = st?.data?.status?.state;
+          if (state === 'error') {
+            const err = st?.data?.status?.error || 'Remote processing failed';
+            addLog(`Remote chunk error: ${err}`, LogLevel.ERROR);
+            return;
+          }
+          if (state === 'complete') break;
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+
+        const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
+        if (!res?.success || !res?.data) return;
+        const serverMeta = res.data;
+
+        const offsetMs = meta.chunkStartMs;
+        const transcripts = Array.isArray(serverMeta.transcripts) ? serverMeta.transcripts : [];
+        const summaries = Array.isArray(serverMeta.summaries) ? serverMeta.summaries : [];
+
+        for (let i = 0; i < transcripts.length; i++) {
+          const t = transcripts[i] || {};
+          const ts = Number(t.timestampMs ?? 0);
+          const text = String(t.text || '').trim();
+          if (!text) continue;
+          const timestampMs = offsetMs + Math.max(0, ts);
+          remoteOverlayTranscriptsRef.current.push({
+            id: `t_${jobId}_${i}`,
+            text,
+            timestampMs,
+            isFinal: true,
+            formattedTime: `[${formatTimestamp(timestampMs)}]`,
+          });
+        }
+
+        for (let i = 0; i < summaries.length; i++) {
+          const s = summaries[i] || {};
+          const text = String(s.text || '').trim();
+          if (!text) continue;
+          const label = String(s.windowLabel || '');
+          const range = extractRangeFromLabel(label);
+          const startMs = offsetMs + (range ? range.startSec * 1000 : meta.chunkStartMs);
+          const endMs = offsetMs + (range ? range.endSec * 1000 : meta.chunkEndMs);
+          remoteOverlaySummariesRef.current.push({
+            id: `s_${jobId}_${i}`,
+            text,
+            timestampMs: startMs,
+            windowStart: startMs / 1000,
+            windowEnd: endMs / 1000,
+            windowLabel: formatRangeLabel(label, startMs, endMs),
+          });
+        }
+
+        // Sort for stable display
+        remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
+        remoteOverlaySummariesRef.current.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+        pushOverlayUpdates();
+      };
+
+      const processNextUpload = async (): Promise<void> => {
+        if (remoteOverlayUploadInFlightRef.current) return;
+        const cfg = remoteOverlayConfigRef.current;
+        if (!cfg) return;
+
+        const next = remoteOverlayPendingUploadsRef.current.shift();
+        if (!next) return;
+
+        remoteOverlayUploadInFlightRef.current = true;
+        remoteOverlayCurrentUploadFileNameRef.current = next.storedFileName;
+
+        try {
+          const api = window.electronAPI as any;
+          const res = await api.sendVideoToRemoteServer(cfg.remoteUrl, next.localPath, {
+            displayName: next.storedFileName,
+            jobId: next.jobId,
+            sessionId: cfg.sessionId,
+            overlayBase: cfg.baseFilename,
+            chunkIndex: next.isManifest ? '' : String(next.chunkIndex),
+            isManifest: Boolean(next.isManifest),
+            recordingEnabled: String(cfg.recordingEnabled),
+          });
+          if (!res?.success) {
+            throw new Error(res?.error || 'Remote upload failed');
+          }
+
+          if (next.deleteLocalAfterUpload) {
+            try {
+              await api.deleteFile(next.localPath);
+            } catch {
+              // ignore
             }
-          },
-        },
-        stream,
-        videoRef.current!,
-        canvasRef.current!
-      );
+          }
+
+          if (!next.isManifest) {
+            void pollAndApplyResult(next.jobId);
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          addLog(`Remote overlay upload error: ${msg}`, LogLevel.ERROR);
+          setError(msg);
+        } finally {
+          remoteOverlayUploadInFlightRef.current = false;
+          remoteOverlayCurrentUploadFileNameRef.current = '';
+          void processNextUpload();
+        }
+      };
+
+      const finalizeChunk = async (isFinal: boolean) => {
+        const cfg = remoteOverlayConfigRef.current;
+        if (!cfg) return;
+        const recorder = mediaRecorderRef.current;
+        try {
+          recorder?.requestData?.();
+        } catch {
+          // ignore
+        }
+        await new Promise((r) => setTimeout(r, 50));
+
+        const blobs = remoteOverlayChunkBlobsRef.current;
+        if (!blobs || blobs.length === 0) return;
+        remoteOverlayChunkBlobsRef.current = [];
+
+        const chunkIndex = remoteOverlayChunkIndexRef.current;
+        const chunkStartMs = remoteOverlayChunkStartMsRef.current;
+        const chunkEndMs = Date.now() - sessionStartTimeRef.current;
+
+        remoteOverlayChunkMetaRef.current.set(`${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`, {
+          chunkStartMs,
+          chunkEndMs,
+        });
+
+        const blob = new Blob(blobs, { type: mediaRecorderRef.current?.mimeType || 'video/webm' });
+        const buf = await blob.arrayBuffer();
+
+        const writeRes = await electronAPI.writeRecordingChunk(buf, cfg.baseFilename, chunkIndex, '.webm');
+        if (!writeRes?.success || !writeRes?.videoPath) {
+          throw new Error(writeRes?.error || 'Failed to write chunk');
+        }
+
+        const storedFileName = `${cfg.baseFilename}_chunk_${String(chunkIndex).padStart(4, '0')}.webm`;
+        localChunkPaths.push(String(writeRes.videoPath));
+
+        const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
+        remoteOverlayChunkMetaRef.current.set(jobId, { chunkStartMs, chunkEndMs });
+
+        remoteOverlayPendingUploadsRef.current.push({
+          chunkIndex,
+          chunkStartMs,
+          chunkEndMs,
+          localPath: String(writeRes.videoPath),
+          storedFileName,
+          jobId,
+          deleteLocalAfterUpload: !cfg.recordingEnabled,
+        });
+
+        remoteOverlayChunkIndexRef.current += 1;
+        remoteOverlayChunkStartMsRef.current = chunkEndMs;
+
+        void processNextUpload();
+
+        if (isFinal) {
+          // enqueue manifest as last upload
+          const chunks = localChunkPaths.map((p, idx) => ({
+            chunkIndex: idx + 1,
+            storedFileName: `${cfg.baseFilename}_chunk_${String(idx + 1).padStart(4, '0')}.webm`,
+          }));
+          const manifestObj = {
+            sessionId: cfg.sessionId,
+            baseFilename: cfg.baseFilename,
+            recordingEnabled: cfg.recordingEnabled,
+            chunks,
+          };
+          const manifestRes = await electronAPI.writeRecordingManifest(cfg.baseFilename, manifestObj);
+          if (manifestRes?.success && manifestRes?.manifestPath) {
+            const manifestJobId = `${cfg.sessionId}_manifest`;
+            remoteOverlayPendingUploadsRef.current.push({
+              chunkIndex: 0,
+              chunkStartMs: 0,
+              chunkEndMs: 0,
+              localPath: String(manifestRes.manifestPath),
+              storedFileName: `${cfg.baseFilename}_manifest.json`,
+              jobId: manifestJobId,
+              deleteLocalAfterUpload: true,
+              isManifest: true,
+            });
+            void processNextUpload();
+          }
+        }
+      };
+
+      const stopSession = async () => {
+        if (stopping) return;
+        stopping = true;
+
+        // Stop timers
+        const timers = remoteOverlayTimersRef.current;
+        if (timers?.rotate) window.clearInterval(timers.rotate);
+        if (timers?.elapsed) window.clearInterval(timers.elapsed);
+        remoteOverlayTimersRef.current = null;
+
+        // Flush + finalize last chunk
+        try {
+          await finalizeChunk(true);
+        } catch (e) {
+          addLog(`Finalize chunk error: ${e}`, LogLevel.ERROR);
+        }
+
+        // Stop recorder + stream
+        try {
+          mediaRecorderRef.current?.stop();
+        } catch {
+          // ignore
+        }
+
+        if (mediaStreamRef.current) {
+          try {
+            mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+          } catch {
+            // ignore
+          }
+          mediaStreamRef.current = null;
+        }
+
+        remoteOverlayActiveRef.current = false;
+
+        // If recording is enabled, merge local chunks into a final webm.
+        if (recordingEnabled) {
+          try {
+            const outPath = `${recordingsDir}\\${baseFilename}.webm`;
+            await electronAPI.concatWebm(localChunkPaths, outPath);
+          } catch (e) {
+            addLog(`Client merge warning: ${e}`, LogLevel.WARN);
+          }
+        }
+
+        // Close overlay window
+        if (electronAPI?.closeLectureOverlay && overlayCreatedRef.current) {
+          try {
+            await electronAPI.closeLectureOverlay();
+            overlayCreatedRef.current = false;
+          } catch {
+            // ignore
+          }
+        }
+
+        setIsRunning(false);
+      };
+
+      // Install stop handler for overlay control events
+      remoteOverlayStopFnRef.current = () => {
+        void stopSession();
+      };
+
+      // Start chunk recorder + timers
+      await setupChunkRecorder();
+      remoteOverlayTimersRef.current = remoteOverlayTimersRef.current || {};
+      remoteOverlayTimersRef.current.rotate = window.setInterval(() => {
+        void finalizeChunk(false);
+      }, 180000);
+      remoteOverlayTimersRef.current.elapsed = window.setInterval(() => {
+        if (!electronAPI?.updateLectureStatus) return;
+        const elapsed = Date.now() - sessionStartTimeRef.current;
+        electronAPI.updateLectureStatus(
+          JSON.stringify({
+            elapsedTime: `[${formatTimestamp(elapsed)}]`,
+          })
+        );
+      }, 1000);
 
       setIsRunning(true);
       onSessionStart?.();
@@ -691,6 +1179,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const message = err instanceof Error ? err.message : 'Unknown error';
       addLog(`Failed to start lecture session: ${message}`, LogLevel.ERROR);
       setError(message);
+      remoteOverlayActiveRef.current = false;
+      remoteOverlayConfigRef.current = null;
     }
   };
 

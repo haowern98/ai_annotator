@@ -433,6 +433,55 @@ function setupRecordingHandlers(ipcMain) {
     }
   });
 
+  // Write a raw video chunk into the recordings directory with a deterministic name.
+  // Used by remote overlay mode to persist 3-minute transport chunks without saving metadata.
+  ipcMain.handle('recording:writeChunk', async (_event, videoData, baseFilenameRaw, chunkIndexRaw, extRaw) => {
+    try {
+      const dir = await initRecordingsDir();
+      const baseFilename = sanitizeBaseFilename(baseFilenameRaw);
+      const chunkIndex = Number(chunkIndexRaw);
+      if (!Number.isFinite(chunkIndex) || chunkIndex <= 0) {
+        return { success: false, error: 'Invalid chunkIndex' };
+      }
+
+      const ext = String(extRaw || '.webm').toLowerCase().trim();
+      const safeExt = /^\.[a-z0-9]{1,6}$/.test(ext) ? ext : '.webm';
+      const padded = String(chunkIndex).padStart(4, '0');
+      const videoFilename = `${baseFilename}_chunk_${padded}${safeExt}`;
+      const videoPath = path.join(dir, videoFilename);
+
+      let buf;
+      if (videoData instanceof ArrayBuffer) {
+        buf = Buffer.from(videoData);
+      } else if (Buffer.isBuffer(videoData)) {
+        buf = videoData;
+      } else {
+        return { success: false, error: 'Invalid videoData (expected ArrayBuffer)' };
+      }
+
+      await fs.writeFile(videoPath, buf);
+      return { success: true, videoPath, videoFilename, fileSize: buf.length };
+    } catch (err) {
+      console.error('[Recording] Failed to write chunk:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Write a manifest JSON file into recordings.
+  ipcMain.handle('recording:writeManifest', async (_event, baseFilenameRaw, manifest) => {
+    try {
+      const dir = await initRecordingsDir();
+      const baseFilename = sanitizeBaseFilename(baseFilenameRaw);
+      const manifestFilename = `${baseFilename}_manifest.json`;
+      const manifestPath = path.join(dir, manifestFilename);
+      await fs.writeFile(manifestPath, JSON.stringify(manifest || {}, null, 2), 'utf8');
+      return { success: true, manifestPath, manifestFilename };
+    } catch (err) {
+      console.error('[Recording] Failed to write manifest:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
   // Get video file path for streaming playback via the custom `video://` protocol.
   // This avoids loading large recordings into renderer memory.
   ipcMain.handle('recording:getVideoPath', async (event, videoFilename) => {

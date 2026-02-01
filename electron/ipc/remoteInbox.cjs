@@ -2,6 +2,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
+const { spawn } = require('child_process');
 
 function generateFilename() {
   const now = new Date();
@@ -21,6 +22,13 @@ function sanitizeFilename(name) {
   return safe || 'video';
 }
 
+function sanitizeBaseFilename(name) {
+  const raw = String(name || '').trim();
+  const base = raw.split(/[\\/]/).pop() || '';
+  const safe = base.replace(/[^\w.\- ]+/g, '').trim().slice(0, 180);
+  return safe || generateFilename();
+}
+
 function safeExtFromName(name) {
   const n = String(name || '').toLowerCase().trim();
   const ext = path.extname(n);
@@ -37,6 +45,66 @@ function parseClientIp(req) {
   const fromSocket = req.socket?.remoteAddress || '';
   const ip = fromHeader || fromSocket || '';
   return ip.replace(/^::ffff:/, '');
+}
+
+function findFfmpegExe() {
+  const fromEnv = process.env.FFMPEG_EXE || process.env.VIDEOCONTEXT_FFMPEG_EXE;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+
+  const shim = path.join(__dirname, '..', '..', 'qwen_worker', '.ffmpeg_shim', 'ffmpeg.exe');
+  if (fs.existsSync(shim)) return shim;
+
+  try {
+    const { spawnSync } = require('child_process');
+    const res = spawnSync('where', ['ffmpeg'], { encoding: 'utf8' });
+    if (res.status === 0) {
+      const first = String(res.stdout || '').split(/\r?\n/).find(Boolean);
+      if (first && fs.existsSync(first.trim())) return first.trim();
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+async function runFfmpeg(args) {
+  const ffmpegExe = findFfmpegExe();
+  if (!ffmpegExe) throw new Error('ffmpeg not found');
+
+  return await new Promise((resolve, reject) => {
+    const child = spawn(ffmpegExe, args, { windowsHide: true });
+    let stderr = '';
+
+    child.stderr.on('data', (buf) => {
+      stderr = (stderr + String(buf)).slice(-4000);
+    });
+
+    child.on('error', (err) => reject(err));
+    child.on('close', (code) => {
+      if (code === 0) return resolve({ ok: true });
+      reject(new Error(stderr || `ffmpeg exited with code ${code}`));
+    });
+  });
+}
+
+async function concatWebmFiles(recordingsDir, inputPaths, outputPath) {
+  if (!Array.isArray(inputPaths) || inputPaths.length === 0) throw new Error('Missing inputPaths');
+  const out = String(outputPath || '').trim();
+  if (!out) throw new Error('Missing outputPath');
+
+  const listPath = path.join(recordingsDir, `concat_${Date.now()}_${Math.random().toString(36).slice(2)}.txt`);
+  const lines = inputPaths.map((p) => `file '${String(p).replace(/'/g, "'\\''")}'`).join('\n') + '\n';
+  await fsp.writeFile(listPath, lines, 'utf8');
+  try {
+    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', out]);
+  } finally {
+    try {
+      await fsp.unlink(listPath);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 function setupRemoteInboxHandlers(ipcMain, options) {
@@ -165,13 +233,42 @@ function setupRemoteInboxHandlers(ipcMain, options) {
         const jobId = String(Array.isArray(jobIdHeader) ? jobIdHeader[0] : jobIdHeader || '').trim()
           || `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
+        const sessionIdHeader = req.headers['x-session-id'];
+        const sessionId = String(Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader || '').trim();
+
+        const overlayBaseHeader = req.headers['x-overlay-base'];
+        const overlayBase = sanitizeBaseFilename(Array.isArray(overlayBaseHeader) ? overlayBaseHeader[0] : overlayBaseHeader || '');
+
+        const chunkIndexHeader = req.headers['x-chunk-index'];
+        const chunkIndexRaw = String(Array.isArray(chunkIndexHeader) ? chunkIndexHeader[0] : chunkIndexHeader || '').trim();
+        const chunkIndex = chunkIndexRaw ? Number(chunkIndexRaw) : NaN;
+
+        const isManifestHeader = req.headers['x-is-manifest'];
+        const isManifest = String(Array.isArray(isManifestHeader) ? isManifestHeader[0] : isManifestHeader || '').trim();
+        const isManifestUpload = isManifest === '1' || /^true$/i.test(isManifest);
+
+        const recEnabledHeader = req.headers['x-recording-enabled'];
+        const recEnabledRaw = String(Array.isArray(recEnabledHeader) ? recEnabledHeader[0] : recEnabledHeader || '').trim();
+        const recordingEnabled =
+          recEnabledRaw === '1' || /^true$/i.test(recEnabledRaw) ? true :
+          recEnabledRaw === '0' || /^false$/i.test(recEnabledRaw) ? false :
+          null;
+
         const originalName = sanitizeFilename(req.headers['x-filename'] || 'remote_upload.mp4');
         const ext = safeExtFromName(originalName);
-        const rand = Math.random().toString(36).slice(2, 7);
 
-        const baseFilename = `${generateFilename()}_remote_${rand}`;
-        const videoFilename = `${baseFilename}${ext}`;
-        const targetPath = path.join(recordingsDir, videoFilename);
+        let storedFileName = '';
+        if (isManifestUpload) {
+          storedFileName = `${overlayBase}_manifest.json`;
+        } else if (Number.isFinite(chunkIndex) && chunkIndex > 0) {
+          storedFileName = `${overlayBase}_chunk_${String(chunkIndex).padStart(4, '0')}${ext}`;
+        } else {
+          const rand = Math.random().toString(36).slice(2, 7);
+          const baseFilename = `${generateFilename()}_remote_${rand}`;
+          storedFileName = `${baseFilename}${ext}`;
+        }
+
+        const targetPath = path.join(recordingsDir, storedFileName);
 
         const total = Number(req.headers['content-length'] || 0) || 0;
 
@@ -191,6 +288,12 @@ function setupRemoteInboxHandlers(ipcMain, options) {
           progressPercent: 0,
           clientIp,
           fileName: originalName,
+          storedFileName,
+          sessionId,
+          overlayBase,
+          chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+          recordingEnabled,
+          isManifest: isManifestUpload,
           receivedBytes: 0,
           totalBytes: total,
           savedVideoPath: targetPath,
@@ -268,8 +371,14 @@ function setupRemoteInboxHandlers(ipcMain, options) {
                 jobId,
                 videoPath: targetPath,
                 fileName: originalName,
+                storedFileName,
                 fileSize: st.size,
                 clientIp,
+                sessionId,
+                overlayBase,
+                chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+                recordingEnabled,
+                isManifest: isManifestUpload,
               });
             } catch {
               // ignore
@@ -278,19 +387,73 @@ function setupRemoteInboxHandlers(ipcMain, options) {
             const job = jobs.get(jobId) || {};
             jobs.set(jobId, {
               ...job,
-              state: 'processing',
-              phase: 'Queued for processing',
+              state: isManifestUpload ? 'complete' : 'processing',
+              phase: isManifestUpload ? 'Manifest received' : 'Queued for processing',
               progressPercent: Math.max(0, Math.min(100, Number(job.progressPercent || 100))),
               receivedBytes: st.size,
               totalBytes: total,
               clientIp,
               fileName: originalName,
+              storedFileName,
+              sessionId,
+              overlayBase,
+              chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+              recordingEnabled,
+              isManifest: isManifestUpload,
               savedVideoPath: targetPath,
               updatedAt: Date.now(),
             });
 
+            // Manifest handling: merge chunk videos immediately after all chunks are received.
+            if (isManifestUpload) {
+              setImmediate(async () => {
+                try {
+                  const raw = await fsp.readFile(targetPath, 'utf8');
+                  const manifest = JSON.parse(raw);
+                  const enabled = Boolean(manifest && manifest.recordingEnabled);
+                  if (!enabled) return;
+
+                  const base = sanitizeBaseFilename(manifest.baseFilename || overlayBase);
+                  const chunks = Array.isArray(manifest.chunks) ? manifest.chunks : [];
+                  const ordered = chunks
+                    .map((c) => ({ idx: Number(c.chunkIndex), name: String(c.storedFileName || '') }))
+                    .filter((c) => Number.isFinite(c.idx) && c.idx > 0)
+                    .sort((a, b) => a.idx - b.idx);
+
+                  const inputPaths = ordered.map((c) => path.join(recordingsDir, c.name));
+                  if (inputPaths.length === 0) throw new Error('Manifest has no chunk list');
+
+                  // Ensure all inputs exist (quick wait loop).
+                  const deadline = Date.now() + 5000;
+                  while (Date.now() < deadline) {
+                    let missing = false;
+                    for (const p of inputPaths) {
+                      try {
+                        await fsp.stat(p);
+                      } catch {
+                        missing = true;
+                        break;
+                      }
+                    }
+                    if (!missing) break;
+                    await new Promise((r) => setTimeout(r, 200));
+                  }
+
+                  for (const p of inputPaths) {
+                    await fsp.stat(p);
+                  }
+
+                  const outPath = path.join(recordingsDir, `${base}.webm`);
+                  setState({ lastError: null, fileName: `${base}.webm` });
+                  await concatWebmFiles(recordingsDir, inputPaths, outPath);
+                } catch (e) {
+                  setState({ lastError: String(e.message || e) });
+                }
+              });
+            }
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, jobId, videoPath: targetPath, size: st.size }));
+            res.end(JSON.stringify({ success: true, jobId, videoPath: targetPath, storedFileName, size: st.size }));
           } catch (e) {
             await abort(e);
             res.writeHead(500, { 'Content-Type': 'application/json' });

@@ -209,6 +209,44 @@ function setupFileUtilsHandlers(ipcMain) {
     const st = await fs.stat(output);
     return { success: true, outputPath: output, size: st.size };
   });
+
+  // Concatenate multiple WebM files into a single WebM using ffmpeg concat demuxer.
+  // Requires identical codecs/params across inputs (true for chunks from one MediaRecorder session).
+  ipcMain.handle('video:concatWebm', async (_event, inputPathsRaw, outputPathRaw) => {
+    const inputsRaw = Array.isArray(inputPathsRaw) ? inputPathsRaw : [];
+    if (inputsRaw.length === 0) throw new Error('Missing inputPaths');
+
+    const outputRequested = String(outputPathRaw || '').trim();
+    if (!outputRequested) throw new Error('Missing outputPath');
+
+    const inputs = [];
+    for (const p of inputsRaw) {
+      const resolved = await safeResolve(String(p || '').trim());
+      inputs.push(resolved);
+    }
+    const output = await safeResolve(outputRequested);
+
+    // Create concat list file in userData (always writable).
+    const listPath = path.join(getUserDataPath(), `concat_${Date.now()}_${Math.random().toString(36).slice(2)}.txt`);
+    const listResolved = await safeResolve(listPath);
+
+    // ffmpeg concat demuxer expects "file '<path>'" lines.
+    const lines = inputs.map((p) => `file '${String(p).replace(/'/g, "'\\''")}'`).join('\n') + '\n';
+    await fs.writeFile(listResolved, lines, 'utf8');
+
+    try {
+      await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listResolved, '-c', 'copy', output]);
+    } finally {
+      try {
+        await fs.unlink(listResolved);
+      } catch {
+        // ignore
+      }
+    }
+
+    const st = await fs.stat(output);
+    return { success: true, outputPath: output, size: st.size };
+  });
 }
 
 module.exports = { setupFileUtilsHandlers };

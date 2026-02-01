@@ -51,6 +51,8 @@ export interface QueuedVideo {
   // Saved recording paths (after completion)
   recordingMetadataPath?: string;
   recordingVideoPath?: string;
+  // If true, delete the uploaded source video after processing completes (server-side privacy/storage).
+  deleteSourceAfterComplete?: boolean;
 }
 
 export interface UploadQueueCallbacks {
@@ -161,12 +163,14 @@ export class UploadQueueManager {
     filePath: string,
     displayName: string | undefined,
     size: number | undefined,
-    jobId: string
+    jobId: string,
+    options: { deleteSourceAfterComplete?: boolean } = {}
   ): string {
     const id = this.addVideoPath(filePath, displayName, size);
     const video = this.queue.find((v) => v.id === id);
     if (video) {
       video.remoteJobId = String(jobId || '').trim() || undefined;
+      video.deleteSourceAfterComplete = Boolean(options.deleteSourceAfterComplete);
     }
     return id;
   }
@@ -563,6 +567,19 @@ export class UploadQueueManager {
     this.notifyQueueUpdate();
     this.reportRemoteJob(video);
     await this.completeRemoteJobIfNeeded(video);
+
+    // Optional cleanup: delete uploaded source video after processing (server-only flag).
+    if (video.deleteSourceAfterComplete && !(video.file instanceof File)) {
+      const srcPath = String((video.file && video.file.path) || '').trim();
+      if (srcPath) {
+        try {
+          await window.electronAPI.deleteFile(srcPath);
+          this.log(`[Upload Queue] Deleted source video: ${srcPath}`, LogLevel.INFO);
+        } catch (err) {
+          this.log(`[Upload Queue] Failed to delete source video: ${err}`, LogLevel.WARN);
+        }
+      }
+    }
     this.callbacks.onVideoComplete?.(video);
   }
 
