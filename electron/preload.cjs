@@ -475,6 +475,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   remuxVideoInPlace: async (videoPath) => {
     return await ipcRenderer.invoke('video:remuxInPlace', videoPath);
   },
+  getVideoDurationMs: async (videoPath) => {
+    return await ipcRenderer.invoke('video:getDurationMs', videoPath);
+  },
 
   // YouTube downloader (Python yt_dlp in .venv)
   downloadYouTube: async (url, onProgress, options) => {

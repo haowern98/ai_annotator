@@ -57,6 +57,28 @@ function findFfmpegExe() {
   return null;
 }
 
+function findFfprobeExe() {
+  const ffmpegExe = findFfmpegExe();
+  if (ffmpegExe && typeof ffmpegExe === 'string' && /ffmpeg\.exe$/i.test(ffmpegExe)) {
+    const candidate = ffmpegExe.replace(/ffmpeg\.exe$/i, 'ffprobe.exe');
+    if (fsSync.existsSync(candidate)) return candidate;
+  }
+
+  // Try system PATH.
+  try {
+    const { spawnSync } = require('child_process');
+    const res = spawnSync('where', ['ffprobe'], { encoding: 'utf8' });
+    if (res.status === 0) {
+      const first = String(res.stdout || '').split(/\r?\n/).find(Boolean);
+      if (first && fsSync.existsSync(first.trim())) return first.trim();
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
 async function runFfmpeg(args) {
   const ffmpegExe = findFfmpegExe();
   if (!ffmpegExe) {
@@ -77,6 +99,71 @@ async function runFfmpeg(args) {
       reject(new Error(stderr || `ffmpeg exited with code ${code}`));
     });
   });
+}
+
+async function probeDurationMs(videoPath) {
+  const input = String(videoPath || '').trim();
+  if (!input) throw new Error('Missing videoPath');
+
+  const ffprobeExe = findFfprobeExe();
+  if (ffprobeExe) {
+    const seconds = await new Promise((resolve, reject) => {
+      const child = spawn(
+        ffprobeExe,
+        [
+          '-v',
+          'error',
+          '-show_entries',
+          'format=duration',
+          '-of',
+          'default=noprint_wrappers=1:nokey=1',
+          input,
+        ],
+        { windowsHide: true }
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (buf) => {
+        stdout += String(buf || '');
+      });
+      child.stderr.on('data', (buf) => {
+        stderr += String(buf || '');
+      });
+      child.on('error', (err) => reject(err));
+      child.on('close', (code) => {
+        if (code !== 0) return reject(new Error(stderr || `ffprobe exited with code ${code}`));
+        const s = Number(String(stdout || '').trim());
+        if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid duration from ffprobe'));
+        resolve(s);
+      });
+    });
+    return Math.round(seconds * 1000);
+  }
+
+  // Fallback: parse ffmpeg -i stderr ("Duration: HH:MM:SS.xx")
+  const ffmpegExe = findFfmpegExe();
+  if (!ffmpegExe) throw new Error('ffmpeg not found');
+  const ms = await new Promise((resolve, reject) => {
+    const child = spawn(ffmpegExe, ['-hide_banner', '-i', input], { windowsHide: true });
+    let stderr = '';
+    child.stderr.on('data', (buf) => {
+      stderr += String(buf || '');
+      if (stderr.length > 20000) stderr = stderr.slice(-20000);
+    });
+    child.on('error', (err) => reject(err));
+    child.on('close', () => {
+      const m = stderr.match(/Duration:\s*(\d+):(\d{2}):(\d{2})(?:\.(\d+))?/);
+      if (!m) return reject(new Error('Duration not found in ffmpeg output'));
+      const hh = Number(m[1]);
+      const mm = Number(m[2]);
+      const ss = Number(m[3]);
+      const frac = m[4] ? Number(`0.${m[4]}`) : 0;
+      if (![hh, mm, ss].every(Number.isFinite)) return reject(new Error('Invalid Duration parse'));
+      const totalMs = Math.round(((hh * 3600 + mm * 60 + ss) + frac) * 1000);
+      resolve(totalMs);
+    });
+  });
+  return ms;
 }
 
 function setupFileUtilsHandlers(ipcMain) {
@@ -258,6 +345,14 @@ function setupFileUtilsHandlers(ipcMain) {
 
     const st = await fs.stat(input);
     return { success: true, videoPath: input, fileSize: st.size };
+  });
+
+  // Get the duration of a video file in milliseconds (fast header probe).
+  // Used by overlay mode to align transcript timestamps to the recorded media timeline.
+  ipcMain.handle('video:getDurationMs', async (_event, videoPathRaw) => {
+    const input = await safeResolve(videoPathRaw);
+    const ms = await probeDurationMs(input);
+    return { success: true, durationMs: ms };
   });
 
   // Concatenate multiple WebM files into a single WebM using ffmpeg concat demuxer.

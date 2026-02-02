@@ -29,6 +29,8 @@ export interface QueuedVideo {
   fileName: string;
   fileSize: number;
   status: VideoStatus;
+  // Server-side source classification (used for scheduling policies).
+  sourceType?: 'overlay' | 'batch';
   // If set, this queued item corresponds to a remote upload job (server mode),
   // and progress/completion will be reported via the inbox job APIs.
   remoteJobId?: string;
@@ -53,6 +55,11 @@ export interface QueuedVideo {
   recordingVideoPath?: string;
   // If true, delete the uploaded source video after processing completes (server-side privacy/storage).
   deleteSourceAfterComplete?: boolean;
+  // Prefetched transcript path (server-side pipeline optimization).
+  // When set, the main processing pipeline will reuse this transcript and skip transcription.
+  prefetchedTranscriptPath?: string;
+  // Indicates a background prefetch transcription is in progress for this item.
+  prefetchingTranscript?: boolean;
 }
 
 export interface UploadQueueCallbacks {
@@ -71,6 +78,10 @@ export class UploadQueueManager {
   private liveSessionCheck: () => boolean;
   private currentVideoId: string | null = null;
   private remoteReportCache: Map<string, { phase: string; pct: number; at: number }> = new Map();
+  private prefetchInFlight: boolean = false;
+  private prefetchTargetId: string | null = null;
+  private prefetchPromise: Promise<void> | null = null;
+  private cachedUserDataPath: string | null = null;
 
   constructor(
     parakeetTranscriber: ParakeetBatchTranscriber,
@@ -84,6 +95,96 @@ export class UploadQueueManager {
     this.callbacks = callbacks;
   }
 
+  private async getUserDataPathCached(): Promise<string> {
+    if (this.cachedUserDataPath) return this.cachedUserDataPath;
+    if (window.electronAPI && window.electronAPI.getUserDataPath) {
+      this.cachedUserDataPath = await window.electronAPI.getUserDataPath();
+      return this.cachedUserDataPath;
+    }
+    throw new Error('Electron API not available');
+  }
+
+  /**
+   * Prefetch transcription for exactly the next queued item (FIFO) while the current item is in VLM.
+   * This runs only the transcription step and then stops.
+   */
+  private async maybePrefetchNextTranscription(currentVideo: QueuedVideo): Promise<void> {
+    if (this.prefetchInFlight) return;
+    // Only start prefetch once current is in the VLM phase.
+    if (currentVideo.status !== 'analyzing') return;
+
+    // Find the next item in FIFO order that is still pending and not already prefetched.
+    const currentIdx = this.queue.findIndex((v) => v.id === currentVideo.id);
+    if (currentIdx < 0) return;
+    const next = this.queue.slice(currentIdx + 1).find((v) => v.status === 'pending' && !v.prefetchedTranscriptPath && !v.cancelRequested);
+    if (!next) return;
+
+    // Do not prefetch if Parakeet isn't available.
+    if (!this.parakeetTranscriber) return;
+
+    this.prefetchInFlight = true;
+    this.prefetchTargetId = next.id;
+    next.prefetchingTranscript = true;
+    this.log(`[Upload Queue] Prefetch transcription start: ${next.fileName}`, LogLevel.INFO);
+
+    const run = async () => {
+      try {
+        // Surface progress without changing the scheduling status (keep FIFO semantics).
+        next.progress.phase = 'Prefetching transcript';
+        this.notifyQueueUpdate();
+        this.reportRemoteJob(next);
+
+        const userDataPath = await this.getUserDataPathCached();
+        const transcriptPath = `${userDataPath}/upload_transcripts_${next.id}.json`;
+
+        await this.parakeetTranscriber.transcribeVideoToFile(next.file, transcriptPath, (count) => {
+          next.progress.phase = `Prefetching transcript (${count})`;
+          this.notifyQueueUpdate();
+          this.reportRemoteJob(next);
+        });
+
+        next.prefetchedTranscriptPath = transcriptPath;
+        next.prefetchingTranscript = false;
+        next.progress.phase = 'Pending (transcript ready)';
+        this.notifyQueueUpdate();
+        this.reportRemoteJob(next);
+
+        // If this is a remote inbox job (overlay chunk), publish transcript availability immediately.
+        if (next.remoteJobId) {
+          try {
+            const api = window.electronAPI as any;
+            api?.updateInboxJob?.(String(next.remoteJobId), {
+              transcriptReady: true,
+              transcriptPath,
+            });
+          } catch {
+            // ignore
+          }
+        }
+
+        this.log(`[Upload Queue] Prefetch transcription complete: ${next.fileName}`, LogLevel.SUCCESS);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log(`[Upload Queue] Prefetch transcription failed: ${next.fileName} - ${msg}`, LogLevel.WARN);
+        try {
+          next.prefetchingTranscript = false;
+          next.progress.phase = 'Pending';
+          this.notifyQueueUpdate();
+          this.reportRemoteJob(next);
+        } catch {
+          // ignore
+        }
+      } finally {
+        this.prefetchInFlight = false;
+        this.prefetchTargetId = null;
+        this.prefetchPromise = null;
+      }
+    };
+
+    this.prefetchPromise = run();
+    void this.prefetchPromise;
+  }
+
   /**
    * Add video to queue
    */
@@ -95,6 +196,7 @@ export class UploadQueueManager {
       file,
       fileName: file.name,
       fileSize: file.size,
+      sourceType: 'batch',
       status: 'pending',
       progress: {
         phase: 'Pending',
@@ -135,6 +237,7 @@ export class UploadQueueManager {
       file: { path: p, size: fileSize },
       fileName,
       fileSize,
+      sourceType: String(fileName).includes('_overlay_remote_chunk_') ? 'overlay' : 'batch',
       status: 'pending',
       progress: {
         phase: 'Pending',
@@ -487,27 +590,40 @@ export class UploadQueueManager {
     this.reportRemoteJob(video);
 
     // Get userData path via Electron API
-    let userDataPath: string;
-    if (window.electronAPI && window.electronAPI.getUserDataPath) {
-      userDataPath = await window.electronAPI.getUserDataPath();
-    } else {
-      throw new Error('Electron API not available');
-    }
+    const userDataPath = await this.getUserDataPathCached();
 
     const transcriptPath = `${userDataPath}/upload_transcripts_${video.id}.json`;
 
-    await this.parakeetTranscriber.transcribeVideoToFile(
-      video.file,
-      transcriptPath,
-      (transcriptCount) => {
-        // Progress estimation: assume 1 transcript per 3 seconds
-        const estimatedTotal = Math.floor((frames.length / 60) * 20);
-        const percentage = 33 + Math.min(33, (transcriptCount / Math.max(estimatedTotal, 1)) * 33);
-        video.progress.percentage = Math.floor(percentage * 100) / 100;
-        this.notifyQueueUpdate();
-        this.reportRemoteJob(video);
+    // If this video is currently being prefetched, wait for prefetch to finish so we can reuse it.
+    if (!video.prefetchedTranscriptPath && this.prefetchTargetId === video.id && this.prefetchPromise) {
+      try {
+        await this.prefetchPromise;
+      } catch {
+        // ignore
       }
-    );
+    }
+
+    if (video.prefetchedTranscriptPath) {
+      // Reuse prefetched transcript and skip transcription.
+      this.log(`Transcription skipped (prefetched): ${video.fileName}`, LogLevel.INFO);
+      video.progress.phase = 'Transcribing audio (prefetched)';
+      video.progress.percentage = Math.max(video.progress.percentage, 66);
+      this.notifyQueueUpdate();
+      this.reportRemoteJob(video);
+    } else {
+      await this.parakeetTranscriber.transcribeVideoToFile(
+        video.file,
+        transcriptPath,
+        (transcriptCount) => {
+          // Progress estimation: assume 1 transcript per 3 seconds
+          const estimatedTotal = Math.floor((frames.length / 60) * 20);
+          const percentage = 33 + Math.min(33, (transcriptCount / Math.max(estimatedTotal, 1)) * 33);
+          video.progress.percentage = Math.floor(percentage * 100) / 100;
+          this.notifyQueueUpdate();
+          this.reportRemoteJob(video);
+        }
+      );
+    }
 
     this.log(`Transcription complete: ${video.fileName}`, LogLevel.SUCCESS);
 
@@ -518,7 +634,7 @@ export class UploadQueueManager {
         const api = window.electronAPI as any;
         api?.updateInboxJob?.(String(video.remoteJobId), {
           transcriptReady: true,
-          transcriptPath,
+          transcriptPath: video.prefetchedTranscriptPath || transcriptPath,
         });
       } catch {
         // ignore
@@ -543,10 +659,12 @@ export class UploadQueueManager {
     video.progress.percentage = 66;
     this.notifyQueueUpdate();
     this.reportRemoteJob(video);
+    // While VLM runs, prefetch transcription for the next queued item (FIFO).
+    void this.maybePrefetchNextTranscription(video);
 
     const batches = await this.qwenClient.analyzeUploadedVideoWindows(
       frames,
-      transcriptPath,
+      video.prefetchedTranscriptPath || transcriptPath,
       (window, totalWindows) => {
         // Check if cancelled during VLM processing
         if (video.cancelRequested) {

@@ -87,6 +87,7 @@ interface ElectronAPI {
   extractAudioFromVideo: (videoPath: string) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
   extractWavSegment: (wavPath: string, startSeconds: number, durationSeconds: number) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
   convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
+  getVideoDurationMs: (videoPath: string) => Promise<{success: boolean; durationMs?: number; error?: string}>;
 
   // Remote full-video upload (client/server inbox)
   getInboxStatus: () => Promise<{success: boolean; status?: any; error?: string}>;

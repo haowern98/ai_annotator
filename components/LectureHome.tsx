@@ -77,7 +77,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const remoteOverlaySessionClosingRef = React.useRef<boolean>(false);
   const remoteOverlayConfigRef = React.useRef<{ remoteUrl: string; sessionId: string; baseFilename: string; recordingEnabled: boolean } | null>(null);
   const remoteOverlayChunkIndexRef = React.useRef<number>(1);
+  // Wall-clock chunk start (used only for logs/rough ranges; do not use for transcript alignment).
   const remoteOverlayChunkStartMsRef = React.useRef<number>(0);
+  // Cumulative recorded media timeline in milliseconds (used for transcript alignment).
+  const remoteOverlayCumulativeMediaMsRef = React.useRef<number>(0);
   const remoteOverlayCanvasStreamRef = React.useRef<MediaStream | null>(null);
   const remoteOverlayMimeTypeRef = React.useRef<string>('video/webm');
   const remoteOverlayActiveChunkRecorderRef = React.useRef<{
@@ -104,7 +107,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const remoteOverlayCurrentUploadFileNameRef = React.useRef<string>('');
   const remoteOverlayCurrentUploadQueueIdRef = React.useRef<string>('');
   const remoteOverlayTimersRef = React.useRef<{ rotate?: number; elapsed?: number } | null>(null);
-  const remoteOverlayChunkMetaRef = React.useRef<Map<string, { chunkStartMs: number; chunkEndMs: number }>>(new Map());
+  const remoteOverlayChunkMetaRef = React.useRef<Map<string, { offsetMs: number; durationMs: number }>>(new Map());
   const remoteOverlayTranscriptsRef = React.useRef<Array<TranscriptEntry & { formattedTime?: string }>>([]);
   const remoteOverlaySummariesRef = React.useRef<Array<any>>([]);
   const remoteOverlayStopFnRef = React.useRef<(() => void) | null>(null);
@@ -683,6 +686,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlayConfigRef.current = { remoteUrl, sessionId, baseFilename, recordingEnabled };
       remoteOverlayChunkIndexRef.current = 1;
       remoteOverlayChunkStartMsRef.current = 0;
+      remoteOverlayCumulativeMediaMsRef.current = 0;
       remoteOverlayPendingUploadsRef.current = [];
       remoteOverlayUploadInFlightRef.current = false;
       remoteOverlayCurrentUploadFileNameRef.current = '';
@@ -1004,7 +1008,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             windowLabel: String(s?.windowLabel || ''),
           }));
 
-          const duration = Math.max(0, Date.now() - sessionStartTimeRef.current);
+          const duration = Math.max(0, remoteOverlayCumulativeMediaMsRef.current);
           const outBase = cfg.baseFilename;
 
           if (cfg.recordingEnabled) {
@@ -1090,7 +1094,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId);
                 if (tr?.success && tr?.data) {
                   const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
-                  const offsetMs = meta.chunkStartMs;
+                  const offsetMs = meta.offsetMs;
                   for (let i = 0; i < raw.length; i++) {
                     const t = raw[i] || {};
                     const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
@@ -1133,7 +1137,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
           const serverMeta = res.data;
 
-          const offsetMs = meta.chunkStartMs;
+          const offsetMs = meta.offsetMs;
           const transcripts = Array.isArray(serverMeta.transcripts) ? serverMeta.transcripts : [];
           const summaries = Array.isArray(serverMeta.summaries) ? serverMeta.summaries : [];
 
@@ -1162,8 +1166,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             if (!text) continue;
             const label = String(s.windowLabel || '');
             const range = extractRangeFromLabel(label);
-            const startMs = offsetMs + (range ? range.startSec * 1000 : meta.chunkStartMs);
-            const endMs = offsetMs + (range ? range.endSec * 1000 : meta.chunkEndMs);
+            const startMs = offsetMs + (range ? range.startSec * 1000 : 0);
+            const endMs = offsetMs + (range ? range.endSec * 1000 : meta.durationMs);
             remoteOverlaySummariesRef.current.push({
               id: `s_${jobId}_${i}`,
               text,
@@ -1285,17 +1289,13 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           }
 
           const chunkIndex = remoteOverlayChunkIndexRef.current;
-          const chunkStartMs = remoteOverlayChunkStartMsRef.current;
-          const chunkEndMs = Date.now() - sessionStartTimeRef.current;
+          const chunkStartWallMs = remoteOverlayChunkStartMsRef.current;
+          const chunkEndWallMs = Date.now() - sessionStartTimeRef.current;
+          const chunkOffsetMs = remoteOverlayCumulativeMediaMsRef.current;
           addLog(
-            `[RemoteOverlay] Finalize chunk ${chunkIndex} (${formatTimestamp(chunkStartMs)}-${formatTimestamp(chunkEndMs)}) blobs=${collected.blobs.length}`,
+            `[RemoteOverlay] Finalize chunk ${chunkIndex} (${formatTimestamp(chunkStartWallMs)}-${formatTimestamp(chunkEndWallMs)}) blobs=${collected.blobs.length}`,
             LogLevel.INFO
           );
-
-          remoteOverlayChunkMetaRef.current.set(`${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`, {
-            chunkStartMs,
-            chunkEndMs,
-          });
 
           const blob = new Blob(collected.blobs, { type: collected.mimeType || 'video/webm' });
           const buf = await blob.arrayBuffer();
@@ -1313,7 +1313,20 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           localChunkPaths.push(String(writeRes.videoPath));
 
           const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
-          remoteOverlayChunkMetaRef.current.set(jobId, { chunkStartMs, chunkEndMs });
+          // Measure actual media duration for alignment (prevents drift on long overlay recordings).
+          let durationMs = 0;
+          try {
+            const durRes = await electronAPI.getVideoDurationMs?.(String(writeRes.videoPath));
+            const dm = Number(durRes?.durationMs || 0);
+            if (Number.isFinite(dm) && dm > 0) durationMs = dm;
+          } catch {
+            // ignore
+          }
+          if (!durationMs) {
+            durationMs = Math.max(1, Math.round(chunkEndWallMs - chunkStartWallMs));
+          }
+          remoteOverlayChunkMetaRef.current.set(jobId, { offsetMs: chunkOffsetMs, durationMs });
+          remoteOverlayCumulativeMediaMsRef.current = chunkOffsetMs + durationMs;
 
           let remoteQueueId = '';
           try {
@@ -1327,8 +1340,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
           remoteOverlayPendingUploadsRef.current.push({
             chunkIndex,
-            chunkStartMs,
-            chunkEndMs,
+            chunkStartMs: chunkStartWallMs,
+            chunkEndMs: chunkEndWallMs,
             localPath: String(writeRes.videoPath),
             storedFileName,
             jobId,
@@ -1338,7 +1351,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           });
 
           remoteOverlayChunkIndexRef.current += 1;
-          remoteOverlayChunkStartMsRef.current = chunkEndMs;
+          remoteOverlayChunkStartMsRef.current = chunkEndWallMs;
 
           void processNextUpload();
 
