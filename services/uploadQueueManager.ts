@@ -81,6 +81,37 @@ export class UploadQueueManager {
   private prefetchInFlight: boolean = false;
   private prefetchTargetId: string | null = null;
   private prefetchPromise: Promise<void> | null = null;
+  private prefetchLastAttemptAt: number = 0;
+  private prefetchLoopTimer: ReturnType<typeof setInterval> | null = null;
+  private prefetchLoopVideoId: string | null = null;
+
+  private startPrefetchLoop(currentVideo: QueuedVideo) {
+    if (this.prefetchLoopVideoId === currentVideo.id && this.prefetchLoopTimer) return;
+    this.stopPrefetchLoop();
+    this.prefetchLoopVideoId = currentVideo.id;
+    this.prefetchLoopTimer = setInterval(() => {
+      try {
+        if (currentVideo.status !== 'analyzing') {
+          this.stopPrefetchLoop(currentVideo.id);
+          return;
+        }
+        // Periodically retry prefetch so items that arrive mid-analysis are picked up
+        // even if the VLM progress callback is infrequent.
+        void this.maybePrefetchNextTranscription(currentVideo);
+      } catch {
+        // ignore
+      }
+    }, 2000);
+  }
+
+  private stopPrefetchLoop(expectedVideoId?: string) {
+    if (expectedVideoId && this.prefetchLoopVideoId && expectedVideoId !== this.prefetchLoopVideoId) return;
+    if (this.prefetchLoopTimer) {
+      clearInterval(this.prefetchLoopTimer);
+      this.prefetchLoopTimer = null;
+    }
+    this.prefetchLoopVideoId = null;
+  }
   private cachedUserDataPath: string | null = null;
 
   constructor(
@@ -112,6 +143,9 @@ export class UploadQueueManager {
     if (this.prefetchInFlight) return;
     // Only start prefetch once current is in the VLM phase.
     if (currentVideo.status !== 'analyzing') return;
+    const now = Date.now();
+    if (now - this.prefetchLastAttemptAt < 1500) return;
+    this.prefetchLastAttemptAt = now;
 
     // Find the next item in FIFO order that is still pending and not already prefetched.
     const currentIdx = this.queue.findIndex((v) => v.id === currentVideo.id);
@@ -210,6 +244,12 @@ export class UploadQueueManager {
     this.log(`Added to queue: ${file.name}`, LogLevel.INFO);
     this.notifyQueueUpdate();
 
+    // If we're currently analyzing a previous item, try to prefetch transcription for the new "next" item.
+    const current = this.queue.find((v) => v.id === this.currentVideoId);
+    if (current) {
+      void this.maybePrefetchNextTranscription(current);
+    }
+
     // Start processing if not already processing
     if (!this.isProcessing) {
       this.processQueue();
@@ -250,6 +290,12 @@ export class UploadQueueManager {
     this.queue.push(queuedVideo);
     this.log(`Added to queue: ${fileName}`, LogLevel.INFO);
     this.notifyQueueUpdate();
+
+    // If we're currently analyzing a previous item, try to prefetch transcription for the new "next" item.
+    const current = this.queue.find((v) => v.id === this.currentVideoId);
+    if (current) {
+      void this.maybePrefetchNextTranscription(current);
+    }
 
     if (!this.isProcessing) {
       this.processQueue();
@@ -660,23 +706,31 @@ export class UploadQueueManager {
     this.notifyQueueUpdate();
     this.reportRemoteJob(video);
     // While VLM runs, prefetch transcription for the next queued item (FIFO).
+    this.startPrefetchLoop(video);
     void this.maybePrefetchNextTranscription(video);
 
-    const batches = await this.qwenClient.analyzeUploadedVideoWindows(
-      frames,
-      video.prefetchedTranscriptPath || transcriptPath,
-      (window, totalWindows) => {
-        // Check if cancelled during VLM processing
-        if (video.cancelRequested) {
-          throw new Error('Video cancelled by user');
+    let batches: any;
+    try {
+      batches = await this.qwenClient.analyzeUploadedVideoWindows(
+        frames,
+        video.prefetchedTranscriptPath || transcriptPath,
+        (window, totalWindows) => {
+          // Check if cancelled during VLM processing
+          if (video.cancelRequested) {
+            throw new Error('Video cancelled by user');
+          }
+          video.progress.phase = `Analyzing with VLM (${window}/${totalWindows})`;
+          const percentage = 66 + ((window / totalWindows) * 34);
+          video.progress.percentage = Math.floor(percentage * 100) / 100;
+          this.notifyQueueUpdate();
+          this.reportRemoteJob(video);
+          // Retry prefetch during VLM so items that arrive mid-analysis can get transcribed.
+          void this.maybePrefetchNextTranscription(video);
         }
-        video.progress.phase = `Analyzing with VLM (${window}/${totalWindows})`;
-        const percentage = 66 + ((window / totalWindows) * 34);
-        video.progress.percentage = Math.floor(percentage * 100) / 100;
-        this.notifyQueueUpdate();
-        this.reportRemoteJob(video);
-      }
-    );
+      );
+    } finally {
+      this.stopPrefetchLoop(video.id);
+    }
 
     this.log(`Analysis complete: ${video.fileName} (${batches.length} batches)`, LogLevel.SUCCESS);
 
