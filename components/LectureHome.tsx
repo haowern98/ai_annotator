@@ -954,6 +954,24 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         }
       }
 
+      const sendOverlayRecordingStatus = () => {
+        if (!electronAPI?.updateLectureStatus) return;
+        try {
+          const isPaused = mediaRecorderRef.current?.state === 'paused';
+          electronAPI.updateLectureStatus(
+            JSON.stringify({
+              isConnected: true,
+              isRunning: true,
+              isPaused,
+              isRecording: recordingEnabled,
+              recordingQuality: captureQuality,
+            })
+          );
+        } catch {
+          // ignore
+        }
+      };
+
       // Wait for overlay to signal it's ready to receive IPC messages
       // This ensures React has mounted and registered all listeners
       const readyPromise = new Promise((resolve, reject) => {
@@ -966,6 +984,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           if (electronAPI?.removeLectureOverlayReadyListener) {
             electronAPI.removeLectureOverlayReadyListener(handler);
           }
+          // Ensure the overlay receives the recording indicator even if the first status update
+          // was sent before the overlay registered its listeners.
+          sendOverlayRecordingStatus();
           resolve(true);
         };
         
@@ -1001,6 +1022,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           })
         );
       }
+      // Extra safety: if the overlay missed the initial status message, this will correct it as soon as
+      // it is ready and/or on the next tick.
+      sendOverlayRecordingStatus();
 
       // Set session start time (for both recording and non-recording sessions)
       sessionStartTimeRef.current = Date.now();
@@ -1625,9 +1649,15 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlayTimersRef.current.elapsed = window.setInterval(() => {
         if (!electronAPI?.updateLectureStatus) return;
         const elapsed = Date.now() - sessionStartTimeRef.current;
+        const isPaused = mediaRecorderRef.current?.state === 'paused';
         electronAPI.updateLectureStatus(
           JSON.stringify({
             elapsedTime: `[${formatTimestamp(elapsed)}]`,
+            isConnected: true,
+            isRunning: true,
+            isPaused,
+            isRecording: recordingEnabled,
+            recordingQuality: captureQuality,
           })
         );
       }, 1000);
