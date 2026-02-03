@@ -24,6 +24,13 @@ interface LectureHomeProps {
   uploadParakeetRef: React.MutableRefObject<ParakeetBatchTranscriber | null>;
 }
 
+// Remote polling configuration
+const REMOTE_POLL_MAX_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+const REMOTE_POLL_MAX_CONSECUTIVE_FAILURES = 20;
+const REMOTE_POLL_DELAY_MS = 2500; // For YouTube/File uploads
+const REMOTE_OVERLAY_POLL_DELAY_MS = 1500; // For overlay chunks
+const REMOTE_OVERLAY_POLL_FAILURE_DELAY_MS = 1000; // Retry delay on failure
+
 const LectureHome: React.FC<LectureHomeProps> = ({ 
   onSessionStart, 
   onSidebarModeChange,
@@ -75,6 +82,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const remoteOverlayActiveRef = React.useRef<boolean>(false);
   const remoteOverlaySessionAliveRef = React.useRef<boolean>(false);
   const remoteOverlaySessionClosingRef = React.useRef<boolean>(false);
+  const remoteOverlayCurrentSessionIdRef = React.useRef<string | null>(null);
   const remoteOverlayConfigRef = React.useRef<{ remoteUrl: string; sessionId: string; baseFilename: string; recordingEnabled: boolean } | null>(null);
   const remoteOverlayChunkIndexRef = React.useRef<number>(1);
   // Wall-clock chunk start (used only for logs/rough ranges; do not use for transcript alignment).
@@ -114,6 +122,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   const remoteOverlayChunkQueueIdRef = React.useRef<Map<string, string>>(new Map());
   const remoteOverlayPendingResultJobIdsRef = React.useRef<Set<string>>(new Set());
   const remoteOverlayAppliedTranscriptJobIdsRef = React.useRef<Set<string>>(new Set());
+  const remoteOverlayPollAbortControllersRef = React.useRef<Map<string, AbortController>>(new Map());
+  const remoteYouTubePollAbortRef = React.useRef<AbortController | null>(null);
+  const remoteFilePollAbortRef = React.useRef<AbortController | null>(null);
 
   const formatTimestamp = React.useCallback((ms: number): string => {
     const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -683,6 +694,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlayActiveRef.current = true;
       remoteOverlaySessionAliveRef.current = true;
       remoteOverlaySessionClosingRef.current = false;
+      remoteOverlayCurrentSessionIdRef.current = sessionId;
       remoteOverlayConfigRef.current = { remoteUrl, sessionId, baseFilename, recordingEnabled };
       remoteOverlayChunkIndexRef.current = 1;
       remoteOverlayChunkStartMsRef.current = 0;
@@ -697,6 +709,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlayChunkQueueIdRef.current = new Map();
       remoteOverlayPendingResultJobIdsRef.current = new Set();
       remoteOverlayAppliedTranscriptJobIdsRef.current = new Set();
+      remoteOverlayPollAbortControllersRef.current = new Map();
 
       const localChunkPaths: string[] = [];
       let stopping = false;
@@ -1023,6 +1036,18 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         // Session is fully done (all chunks uploaded + results fetched).
         remoteOverlaySessionAliveRef.current = false;
+        remoteOverlayCurrentSessionIdRef.current = null;
+
+        // Abort all pending chunk result polls
+        remoteOverlayPollAbortControllersRef.current.forEach((controller, jobId) => {
+          try {
+            controller.abort();
+            addLog(`[RemoteOverlay] Aborted poll for jobId=${jobId}`, LogLevel.INFO);
+          } catch (e) {
+            // ignore
+          }
+        });
+        remoteOverlayPollAbortControllersRef.current.clear();
 
         try {
           const transcripts = remoteOverlayTranscriptsRef.current.map((t) => ({
@@ -1078,26 +1103,84 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           addLog(`[RemoteOverlay] Failed to save session: ${e}`, LogLevel.ERROR);
         } finally {
           remoteOverlayConfigRef.current = null;
+          remoteOverlayCurrentSessionIdRef.current = null;
         }
       };
 
-      const pollAndApplyResult = async (jobId: string) => {
+      const pollAndApplyResult = async (jobId: string, mySessionId: string) => {
         const cfg = remoteOverlayConfigRef.current;
         if (!cfg) return;
+
+        // Early session validation guard
+        if (remoteOverlayCurrentSessionIdRef.current !== mySessionId) {
+          addLog(`[RemoteOverlay] Poll skipped: session changed (jobId=${jobId})`, LogLevel.INFO);
+          return;
+        }
+
         const api = window.electronAPI as any;
         const meta = remoteOverlayChunkMetaRef.current.get(jobId);
         if (!meta) return;
 
+        // Create AbortController for this poll
+        const abortController = new AbortController();
+        remoteOverlayPollAbortControllersRef.current.set(jobId, abortController);
+
         addLog(`[RemoteOverlay] Poll start: jobId=${jobId}`, LogLevel.INFO);
         remoteOverlayPendingResultJobIdsRef.current.add(jobId);
+
+        const pollStartTime = Date.now();
+        let consecutiveFailures = 0;
+
         try {
-          while (remoteOverlaySessionAliveRef.current) {
+          while (true) {
+            // Check abort signal
+            if (abortController.signal.aborted) {
+              addLog(`[RemoteOverlay] Poll aborted: jobId=${jobId}`, LogLevel.INFO);
+              return;
+            }
+
+            // Check session still alive
+            if (!remoteOverlaySessionAliveRef.current) {
+              addLog(`[RemoteOverlay] Poll stopped: session ended (jobId=${jobId})`, LogLevel.INFO);
+              return;
+            }
+
+            // Check session ID match (handle new session started)
+            if (remoteOverlayCurrentSessionIdRef.current !== mySessionId) {
+              addLog(`[RemoteOverlay] Poll stopped: session changed (jobId=${jobId})`, LogLevel.INFO);
+              return;
+            }
+
+            // Check timeout
+            const elapsed = Date.now() - pollStartTime;
+            if (elapsed > REMOTE_POLL_MAX_DURATION_MS) {
+              const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
+              const errMsg = `Remote processing timed out after ${Math.floor(elapsed / 60000)} minutes`;
+              addLog(`[RemoteOverlay] ${errMsg}: jobId=${jobId}`, LogLevel.ERROR);
+              if (queueId) uploadQueueRef.current?.failRemoteUpload(queueId, errMsg);
+              return;
+            }
+
+            // Check consecutive failures
+            if (consecutiveFailures >= REMOTE_POLL_MAX_CONSECUTIVE_FAILURES) {
+              const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
+              const errMsg = `Remote status check failed ${consecutiveFailures} times consecutively`;
+              addLog(`[RemoteOverlay] ${errMsg}: jobId=${jobId}`, LogLevel.ERROR);
+              if (queueId) uploadQueueRef.current?.failRemoteUpload(queueId, errMsg);
+              return;
+            }
+
+            // Fetch status
             const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
             if (!st?.success) {
-              addLog(`[RemoteOverlay] Poll status failed: jobId=${jobId}`, LogLevel.WARN);
-              await new Promise((r) => setTimeout(r, 1000));
+              consecutiveFailures++;
+              addLog(`[RemoteOverlay] Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES}): jobId=${jobId}`, LogLevel.WARN);
+              await new Promise((r) => setTimeout(r, REMOTE_OVERLAY_POLL_FAILURE_DELAY_MS));
               continue;
             }
+
+            // Reset failure counter on success
+            consecutiveFailures = 0;
             const state = st?.data?.status?.state;
             const phase = st?.data?.status?.phase;
             const pct = Number(st?.data?.status?.progressPercent || 0);
@@ -1153,7 +1236,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               return;
             }
             if (state === 'complete') break;
-            await new Promise((r) => setTimeout(r, 1500));
+            await new Promise((r) => setTimeout(r, REMOTE_OVERLAY_POLL_DELAY_MS));
           }
 
           const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
@@ -1214,7 +1297,13 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             LogLevel.INFO
           );
           if (queueId) uploadQueueRef.current?.completeRemoteUpload(queueId, 'Complete');
+        } catch (e) {
+          const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
+          const errMsg = e instanceof Error ? e.message : String(e);
+          addLog(`[RemoteOverlay] Poll exception: ${errMsg} (jobId=${jobId})`, LogLevel.ERROR);
+          if (queueId) uploadQueueRef.current?.failRemoteUpload(queueId, errMsg);
         } finally {
+          remoteOverlayPollAbortControllersRef.current.delete(jobId);
           remoteOverlayPendingResultJobIdsRef.current.delete(jobId);
           void tryFinalizeClientSave();
         }
@@ -1286,7 +1375,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             if (next.remoteQueueId) {
               uploadQueueRef.current?.setRemoteProgress(next.remoteQueueId, 'Processing on remote server', 33);
             }
-            void pollAndApplyResult(next.jobId);
+            const sessionId = remoteOverlayCurrentSessionIdRef.current;
+            if (sessionId) {
+              void pollAndApplyResult(next.jobId, sessionId);
+            }
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -1431,6 +1523,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         if (stopping) return;
         stopping = true;
         remoteOverlaySessionClosingRef.current = true;
+
+        // Abort all pending polls immediately
+        remoteOverlayPollAbortControllersRef.current.forEach((controller) => {
+          try { controller.abort(); } catch {}
+        });
+        remoteOverlayPollAbortControllersRef.current.clear();
 
         // Stop timers
         const timers = remoteOverlayTimersRef.current;
@@ -1607,14 +1705,45 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const effectiveJobId = String(res?.jobId || jobId);
           remoteJobIdRef.current = effectiveJobId;
 
+          // Create abort controller for this poll
+          const abortController = new AbortController();
+          remoteYouTubePollAbortRef.current = abortController;
+
           // Poll server status and fetch final metadata JSON when ready.
           const poll = async () => {
-            while (true) {
-              await new Promise((r) => setTimeout(r, 2500));
-              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
-              if (!statusRes?.success) {
-                throw new Error(statusRes?.error || 'Failed to fetch remote status');
-              }
+            const pollStartTime = Date.now();
+            let consecutiveFailures = 0;
+
+            try {
+              while (true) {
+                // Check abort
+                if (abortController.signal.aborted) {
+                  addLog('YouTube upload poll aborted', LogLevel.INFO);
+                  return;
+                }
+
+                // Check timeout
+                const elapsed = Date.now() - pollStartTime;
+                if (elapsed > REMOTE_POLL_MAX_DURATION_MS) {
+                  throw new Error(`Remote processing timed out after ${Math.floor(elapsed / 60000)} minutes`);
+                }
+
+                // Check consecutive failures
+                if (consecutiveFailures >= REMOTE_POLL_MAX_CONSECUTIVE_FAILURES) {
+                  throw new Error(`Remote status check failed ${consecutiveFailures} times consecutively`);
+                }
+
+                await new Promise((r) => setTimeout(r, REMOTE_POLL_DELAY_MS));
+
+                const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
+                if (!statusRes?.success) {
+                  consecutiveFailures++;
+                  addLog(`Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES})`, LogLevel.WARN);
+                  continue;
+                }
+
+                // Reset on success
+                consecutiveFailures = 0;
               const st = statusRes?.data?.status;
               if (st?.state === 'error') {
                 throw new Error(st?.error || 'Remote processing failed');
@@ -1637,6 +1766,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 uploadQueueRef.current?.completeRemoteUpload(remoteQueueId, 'Complete');
                 remoteUploadIdRef.current = null;
                 remoteJobIdRef.current = null;
+                remoteYouTubePollAbortRef.current = null;
                 addLog('Remote processing complete. Results saved to your recordings.', LogLevel.SUCCESS);
                 return;
               }
@@ -1646,16 +1776,18 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               const mappedPct = Math.max(33, Math.min(95, 33 + (serverPct / 100) * 62));
               const phase = String(st?.phase || 'Processing on remote server');
               uploadQueueRef.current?.setRemoteProgress(remoteQueueId, phase, mappedPct);
+              }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              uploadQueueRef.current?.failRemoteUpload(remoteQueueId, message);
+              remoteUploadIdRef.current = null;
+              remoteJobIdRef.current = null;
+              remoteYouTubePollAbortRef.current = null;
+              addLog(`Remote job error: ${message}`, LogLevel.ERROR);
             }
           };
 
-          poll().catch((err: any) => {
-            const message = err instanceof Error ? err.message : String(err);
-            uploadQueueRef.current?.failRemoteUpload(remoteQueueId, message);
-            remoteUploadIdRef.current = null;
-            remoteJobIdRef.current = null;
-            addLog(`Remote job error: ${message}`, LogLevel.ERROR);
-          });
+          poll();
 
           return;
         }
@@ -1743,13 +1875,44 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Processing on remote server', 33);
         addLog('Upload complete. Waiting for remote processing...', LogLevel.SUCCESS);
 
+        // Create abort controller for this poll
+        const abortController = new AbortController();
+        remoteFilePollAbortRef.current = abortController;
+
         const poll = async () => {
-          while (true) {
-            await new Promise((r) => setTimeout(r, 2500));
-            const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
-            if (!statusRes?.success) {
-              throw new Error(statusRes?.error || 'Failed to fetch remote status');
-            }
+          const pollStartTime = Date.now();
+          let consecutiveFailures = 0;
+
+          try {
+            while (true) {
+              // Check abort
+              if (abortController.signal.aborted) {
+                addLog('File upload poll aborted', LogLevel.INFO);
+                return;
+              }
+
+              // Check timeout
+              const elapsed = Date.now() - pollStartTime;
+              if (elapsed > REMOTE_POLL_MAX_DURATION_MS) {
+                throw new Error(`Remote processing timed out after ${Math.floor(elapsed / 60000)} minutes`);
+              }
+
+              // Check consecutive failures
+              if (consecutiveFailures >= REMOTE_POLL_MAX_CONSECUTIVE_FAILURES) {
+                throw new Error(`Remote status check failed ${consecutiveFailures} times consecutively`);
+              }
+
+              await new Promise((r) => setTimeout(r, REMOTE_POLL_DELAY_MS));
+
+              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
+              if (!statusRes?.success) {
+                consecutiveFailures++;
+                addLog(`Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES})`, LogLevel.WARN);
+                continue;
+              }
+
+              // Reset on success
+              consecutiveFailures = 0;
             const st = statusRes?.data?.status;
             if (st?.state === 'error') {
               throw new Error(st?.error || 'Remote processing failed');
@@ -1771,6 +1934,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               uploadQueueRef.current?.completeRemoteUpload(remoteQueueId, 'Complete');
               remoteUploadIdRef.current = null;
               remoteJobIdRef.current = null;
+              remoteFilePollAbortRef.current = null;
               addLog('Remote processing complete. Results saved to your recordings.', LogLevel.SUCCESS);
               return;
             }
@@ -1779,16 +1943,18 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             const mappedPct = Math.max(33, Math.min(95, 33 + (serverPct / 100) * 62));
             const phase = String(st?.phase || 'Processing on remote server');
             uploadQueueRef.current?.setRemoteProgress(remoteQueueId, phase, mappedPct);
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            uploadQueueRef.current?.failRemoteUpload(remoteQueueId, message);
+            remoteUploadIdRef.current = null;
+            remoteJobIdRef.current = null;
+            remoteFilePollAbortRef.current = null;
+            addLog(`Remote job error: ${message}`, LogLevel.ERROR);
           }
         };
 
-        poll().catch((err: any) => {
-          const message = err instanceof Error ? err.message : String(err);
-          uploadQueueRef.current?.failRemoteUpload(remoteQueueId, message);
-          remoteUploadIdRef.current = null;
-          remoteJobIdRef.current = null;
-          addLog(`Remote job error: ${message}`, LogLevel.ERROR);
-        });
+        poll();
         return;
       }
     } catch (err) {
