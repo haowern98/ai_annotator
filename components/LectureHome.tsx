@@ -1139,18 +1139,6 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               return;
             }
 
-            // Check session still alive
-            if (!remoteOverlaySessionAliveRef.current) {
-              addLog(`[RemoteOverlay] Poll stopped: session ended (jobId=${jobId})`, LogLevel.INFO);
-              return;
-            }
-
-            // Check session ID match (handle new session started)
-            if (remoteOverlayCurrentSessionIdRef.current !== mySessionId) {
-              addLog(`[RemoteOverlay] Poll stopped: session changed (jobId=${jobId})`, LogLevel.INFO);
-              return;
-            }
-
             // Check timeout
             const elapsed = Date.now() - pollStartTime;
             if (elapsed > REMOTE_POLL_MAX_DURATION_MS) {
@@ -1195,34 +1183,41 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
             // If transcript is ready, fetch and apply immediately (even if VLM is still running).
             const transcriptReady = Boolean(st?.data?.status?.transcriptReady);
+            // Only update active UI (overlays) if this job belongs to the current session.
+            const isSessionActive = remoteOverlayCurrentSessionIdRef.current === mySessionId;
+
             if (
               transcriptReady &&
-              !remoteOverlayAppliedTranscriptJobIdsRef.current.has(jobId) &&
+              // Only check 'has' if session is active (since the Set is reset on new session)
+              (!isSessionActive || !remoteOverlayAppliedTranscriptJobIdsRef.current.has(jobId)) &&
               typeof api.getRemoteJobTranscript === 'function'
             ) {
               try {
                 const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId);
                 if (tr?.success && tr?.data) {
-                  const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
-                  const offsetMs = meta.offsetMs;
-                  for (let i = 0; i < raw.length; i++) {
-                    const t = raw[i] || {};
-                    const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
-                    const text = String(t.text || t.segment || '').trim();
-                    if (!text) continue;
-                    const timestampMs = offsetMs + Math.max(0, startSec * 1000);
-                    remoteOverlayTranscriptsRef.current.push({
-                      id: `t_${jobId}_early_${i}`,
-                      text,
-                      timestampMs,
-                      isFinal: true,
-                      formattedTime: `[${formatTimestamp(timestampMs)}]`,
-                    });
+                  // Only push UI updates if session is active
+                  if (isSessionActive) {
+                    const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
+                    const offsetMs = meta.offsetMs;
+                    for (let i = 0; i < raw.length; i++) {
+                      const t = raw[i] || {};
+                      const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
+                      const text = String(t.text || t.segment || '').trim();
+                      if (!text) continue;
+                      const timestampMs = offsetMs + Math.max(0, startSec * 1000);
+                      remoteOverlayTranscriptsRef.current.push({
+                        id: `t_${jobId}_early_${i}`,
+                        text,
+                        timestampMs,
+                        isFinal: true,
+                        formattedTime: `[${formatTimestamp(timestampMs)}]`,
+                      });
+                    }
+                    remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
+                    pushOverlayUpdates();
+                    remoteOverlayAppliedTranscriptJobIdsRef.current.add(jobId);
                   }
-                  remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
-                  pushOverlayUpdates();
-                  remoteOverlayAppliedTranscriptJobIdsRef.current.add(jobId);
-                  addLog(`[RemoteOverlay] Transcript applied early: jobId=${jobId}`, LogLevel.INFO);
+                  addLog(`[RemoteOverlay] Transcript processed (active=${isSessionActive}): jobId=${jobId}`, LogLevel.INFO);
                 }
               } catch (e) {
                 addLog(`[RemoteOverlay] Transcript fetch failed: ${e}`, LogLevel.WARN);
@@ -1251,51 +1246,59 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const transcripts = Array.isArray(serverMeta.transcripts) ? serverMeta.transcripts : [];
           const summaries = Array.isArray(serverMeta.summaries) ? serverMeta.summaries : [];
 
-          // Avoid duplicating transcripts if they were already applied from /inbox/transcript.
-          if (!remoteOverlayAppliedTranscriptJobIdsRef.current.has(jobId)) {
-            for (let i = 0; i < transcripts.length; i++) {
-              const t = transcripts[i] || {};
-              const ts = Number(t.timestampMs ?? 0);
-              const text = String(t.text || '').trim();
+          // Only apply final results to UI if session is active
+          const isSessionActive = remoteOverlayCurrentSessionIdRef.current === mySessionId;
+
+          if (isSessionActive) {
+            // Avoid duplicating transcripts if they were already applied from /inbox/transcript.
+            if (!remoteOverlayAppliedTranscriptJobIdsRef.current.has(jobId)) {
+              for (let i = 0; i < transcripts.length; i++) {
+                const t = transcripts[i] || {};
+                const ts = Number(t.timestampMs ?? 0);
+                const text = String(t.text || '').trim();
+                if (!text) continue;
+                const timestampMs = offsetMs + Math.max(0, ts);
+                remoteOverlayTranscriptsRef.current.push({
+                  id: `t_${jobId}_${i}`,
+                  text,
+                  timestampMs,
+                  isFinal: true,
+                  formattedTime: `[${formatTimestamp(timestampMs)}]`,
+                });
+              }
+              remoteOverlayAppliedTranscriptJobIdsRef.current.add(jobId);
+            }
+
+            for (let i = 0; i < summaries.length; i++) {
+              const s = summaries[i] || {};
+              const text = String(s.text || '').trim();
               if (!text) continue;
-              const timestampMs = offsetMs + Math.max(0, ts);
-              remoteOverlayTranscriptsRef.current.push({
-                id: `t_${jobId}_${i}`,
+              const label = String(s.windowLabel || '');
+              const range = extractRangeFromLabel(label);
+              const startMs = offsetMs + (range ? range.startSec * 1000 : 0);
+              const endMs = offsetMs + (range ? range.endSec * 1000 : meta.durationMs);
+              remoteOverlaySummariesRef.current.push({
+                id: `s_${jobId}_${i}`,
                 text,
-                timestampMs,
-                isFinal: true,
-                formattedTime: `[${formatTimestamp(timestampMs)}]`,
+                timestampMs: startMs,
+                windowStart: startMs / 1000,
+                windowEnd: endMs / 1000,
+                windowLabel: formatRangeLabel(label, startMs, endMs),
               });
             }
-            remoteOverlayAppliedTranscriptJobIdsRef.current.add(jobId);
+
+            // Sort for stable display
+            remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
+            remoteOverlaySummariesRef.current.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+            pushOverlayUpdates();
+            addLog(
+              `[RemoteOverlay] Overlay updated: transcripts=${remoteOverlayTranscriptsRef.current.length} summaries=${remoteOverlaySummariesRef.current.length}`,
+              LogLevel.INFO
+            );
+          } else {
+             addLog(`[RemoteOverlay] Result processed in background (session changed): jobId=${jobId}`, LogLevel.INFO);
           }
 
-          for (let i = 0; i < summaries.length; i++) {
-            const s = summaries[i] || {};
-            const text = String(s.text || '').trim();
-            if (!text) continue;
-            const label = String(s.windowLabel || '');
-            const range = extractRangeFromLabel(label);
-            const startMs = offsetMs + (range ? range.startSec * 1000 : 0);
-            const endMs = offsetMs + (range ? range.endSec * 1000 : meta.durationMs);
-            remoteOverlaySummariesRef.current.push({
-              id: `s_${jobId}_${i}`,
-              text,
-              timestampMs: startMs,
-              windowStart: startMs / 1000,
-              windowEnd: endMs / 1000,
-              windowLabel: formatRangeLabel(label, startMs, endMs),
-            });
-          }
-
-          // Sort for stable display
-          remoteOverlayTranscriptsRef.current.sort((a, b) => a.timestampMs - b.timestampMs);
-          remoteOverlaySummariesRef.current.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
-          pushOverlayUpdates();
-          addLog(
-            `[RemoteOverlay] Overlay updated: transcripts=${remoteOverlayTranscriptsRef.current.length} summaries=${remoteOverlaySummariesRef.current.length}`,
-            LogLevel.INFO
-          );
           if (queueId) uploadQueueRef.current?.completeRemoteUpload(queueId, 'Complete');
         } catch (e) {
           const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
