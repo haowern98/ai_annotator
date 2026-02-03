@@ -351,6 +351,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // Lecture overlay ready handshake
+  notifyLectureOverlayReady: async () => {
+    return await ipcRenderer.invoke('lecture-overlay:ready');
+  },
+
+  onLectureOverlayReady: (callback) => {
+    ipcRenderer.on('lecture-overlay-ready', callback);
+  },
+
+  removeLectureOverlayReadyListener: (callback) => {
+    if (callback) {
+      ipcRenderer.removeListener('lecture-overlay-ready', callback);
+    } else {
+      ipcRenderer.removeAllListeners('lecture-overlay-ready');
+    }
+  },
+
   // =====================================================
   // RECORDING API
   // =====================================================

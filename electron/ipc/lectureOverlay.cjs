@@ -181,6 +181,22 @@ function setupLectureOverlayHandlers(ipcMain, getMainWindow) {
       return { success: false, error: error.message };
     }
   });
+
+  // Ready signal from lecture overlay (overlay is mounted and listeners registered)
+  ipcMain.handle('lecture-overlay:ready', async (event) => {
+    try {
+      console.log('[LectureOverlay IPC] Overlay ready signal received');
+      // Forward to main window
+      const mainWindow = mainWindowGetter ? mainWindowGetter() : null;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('lecture-overlay-ready');
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('[LectureOverlay IPC] Error handling ready signal:', error);
+      return { success: false, error: error.message };
+    }
+  });
 }
 
 module.exports = { setupLectureOverlayHandlers };

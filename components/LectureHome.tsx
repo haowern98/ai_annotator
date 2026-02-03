@@ -914,9 +914,36 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         }
       }
 
-      // Send initial recording status to overlay (AFTER overlay is created)
-      // Wait a bit for overlay to be fully ready
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for overlay to signal it's ready to receive IPC messages
+      // This ensures React has mounted and registered all listeners
+      const readyPromise = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Overlay ready timeout'));
+        }, 4000); // 4 second timeout for slow systems
+        
+        const handler = () => {
+          clearTimeout(timeout);
+          if (electronAPI?.removeLectureOverlayReadyListener) {
+            electronAPI.removeLectureOverlayReadyListener(handler);
+          }
+          resolve(true);
+        };
+        
+        if (electronAPI?.onLectureOverlayReady) {
+          electronAPI.onLectureOverlayReady(handler);
+        } else {
+          // Fallback if API not available
+          clearTimeout(timeout);
+          resolve(true);
+        }
+      });
+
+      try {
+        await readyPromise;
+        addLog('Lecture overlay ready to receive updates', LogLevel.SUCCESS);
+      } catch (err) {
+        addLog('Overlay ready timeout, proceeding anyway', LogLevel.WARN);
+      }
       
       // Store quality in ref for later use when saving
       recordingQualityRef.current = quality;

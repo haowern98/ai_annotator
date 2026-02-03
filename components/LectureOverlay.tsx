@@ -200,6 +200,15 @@ const LectureOverlay: React.FC = () => {
       electronAPI.onLectureStatusUpdate(handleStatusUpdate);
     }
     
+    // Signal ready to main process after all listeners are registered
+    if (electronAPI?.notifyLectureOverlayReady) {
+      electronAPI.notifyLectureOverlayReady().then(() => {
+        console.log('[LectureOverlay] Ready signal sent to main process');
+      }).catch((err) => {
+        console.error('[LectureOverlay] Failed to send ready signal:', err);
+      });
+    }
+    
     return () => {
       if (electronAPI?.removeLectureTranscriptListener) {
         electronAPI.removeLectureTranscriptListener(handleTranscriptUpdate);
