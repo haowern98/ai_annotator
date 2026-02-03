@@ -866,7 +866,7 @@ export class UploadQueueManager {
         const webmBase64 = await window.electronAPI.readBinary(convertResult.outputPath);
         const bytes = toBytesFromBase64(webmBase64);
         // Make sure we hand an ArrayBuffer (not ArrayBufferLike) across IPC.
-        videoBytes = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        videoBytes = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
         recordedMimeType = 'video/webm';
       }
 
@@ -984,7 +984,11 @@ export class UploadQueueManager {
     const phaseChanged = !prev || prev.phase !== phase;
     const pctChanged = !prev || Math.abs(prev.pct - pct) >= 1;
     const timeElapsed = !prev || now - prev.at >= 2000;
-    if (!(phaseChanged || pctChanged || timeElapsed)) return;
+    
+    // Always report final states (complete/error) regardless of cache/throttle
+    const isFinalState = video.status === 'complete' || video.status === 'error';
+
+    if (!(phaseChanged || pctChanged || timeElapsed || isFinalState)) return;
     this.remoteReportCache.set(video.id, { phase, pct, at: now });
 
     try {
@@ -1004,14 +1008,47 @@ export class UploadQueueManager {
   private async completeRemoteJobIfNeeded(video: QueuedVideo): Promise<void> {
     const jobId = String(video.remoteJobId || '').trim();
     if (!jobId) return;
+
     const metadataPath = String(video.recordingMetadataPath || '').trim();
-    if (!metadataPath) return;
-    try {
-      const api = window.electronAPI as any;
-      await api?.completeInboxJob?.(jobId, metadataPath);
-    } catch {
-      // ignore
+    // Validate path strictly
+    if (!metadataPath || metadataPath.length < 5) {
+      this.log(`[Remote] Job finished but has no valid metadata path: ${video.fileName} (job ${jobId})`, LogLevel.WARN);
+      return;
     }
+
+    const api = window.electronAPI as any;
+    if (!api?.completeInboxJob) {
+      this.log('[Remote] Electron API unavailable for job completion', LogLevel.ERROR);
+      return;
+    }
+
+    const maxRetries = 5;
+    let attempt = 0;
+
+    while (attempt < maxRetries) {
+      attempt++;
+      try {
+        this.log(`[Remote] Marking job ${jobId} complete (attempt ${attempt})...`, LogLevel.INFO);
+        const res = await api.completeInboxJob(jobId, metadataPath);
+        
+        if (res && res.success) {
+          this.log(`[Remote] Job ${jobId} successfully marked complete.`, LogLevel.SUCCESS);
+          return;
+        } else {
+          throw new Error(res?.error || 'Unknown IPC failure');
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log(`[Remote] Failed to complete job ${jobId} (attempt ${attempt}): ${msg}`, LogLevel.WARN);
+        
+        if (attempt < maxRetries) {
+          // Exponential backoff: 1s, 2s, 4s...
+          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+        }
+      }
+    }
+
+    this.log(`[Remote] CRITICAL: Failed to complete job ${jobId} after ${maxRetries} attempts. Client UI may be stuck.`, LogLevel.ERROR);
   }
 
   /**
