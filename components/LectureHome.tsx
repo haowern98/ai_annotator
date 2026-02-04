@@ -1489,15 +1489,28 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
           // Measure actual media duration for alignment (prevents drift on long overlay recordings).
           let durationMs = 0;
-          try {
-            const durRes = await electronAPI.getVideoDurationMs?.(String(writeRes.videoPath));
-            const dm = Number(durRes?.durationMs || 0);
-            if (Number.isFinite(dm) && dm > 0) durationMs = dm;
-          } catch {
-            // ignore
+          const maxRetries = 3;
+          const retryDelayMs = 300;
+          
+          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+              const durRes = await electronAPI.getVideoDurationMs?.(String(writeRes.videoPath));
+              const dm = Number(durRes?.durationMs || 0);
+              if (Number.isFinite(dm) && dm > 0) {
+                durationMs = dm;
+                break; // Success - exit retry loop
+              }
+            } catch (err) {
+              if (attempt < maxRetries) {
+                await new Promise(r => setTimeout(r, retryDelayMs));
+              }
+            }
           }
+          
           if (!durationMs) {
+            // Fallback to wall-clock (may cause timestamp drift over long sessions)
             durationMs = Math.max(1, Math.round(chunkEndWallMs - chunkStartWallMs));
+            addLog(`[RemoteOverlay] WARNING: Using wall-clock duration for chunk ${chunkIndex} (ffprobe failed)`, LogLevel.WARN);
           }
           sessionState.chunkMetaByJobId.set(jobId, { offsetMs: chunkOffsetMs, durationMs });
           sessionState.cumulativeMediaMs = chunkOffsetMs + durationMs;
