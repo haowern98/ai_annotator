@@ -107,37 +107,75 @@ async function probeDurationMs(videoPath) {
 
   const ffprobeExe = findFfprobeExe();
   if (ffprobeExe) {
-    const seconds = await new Promise((resolve, reject) => {
-      const child = spawn(
-        ffprobeExe,
-        [
-          '-v',
-          'error',
-          '-show_entries',
-          'format=duration',
-          '-of',
-          'default=noprint_wrappers=1:nokey=1',
-          input,
-        ],
-        { windowsHide: true }
-      );
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (buf) => {
-        stdout += String(buf || '');
+    // Try method 1: Read format duration (fast, works for most files)
+    try {
+      const seconds = await new Promise((resolve, reject) => {
+        const child = spawn(
+          ffprobeExe,
+          [
+            '-v',
+            'error',
+            '-show_entries',
+            'format=duration',
+            '-of',
+            'default=noprint_wrappers=1:nokey=1',
+            input,
+          ],
+          { windowsHide: true }
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (buf) => {
+          stdout += String(buf || '');
+        });
+        child.stderr.on('data', (buf) => {
+          stderr += String(buf || '');
+        });
+        child.on('error', (err) => reject(err));
+        child.on('close', (code) => {
+          if (code !== 0) return reject(new Error(stderr || `ffprobe exited with code ${code}`));
+          const s = Number(String(stdout || '').trim());
+          if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid format duration'));
+          resolve(s);
+        });
       });
-      child.stderr.on('data', (buf) => {
-        stderr += String(buf || '');
+      return Math.round(seconds * 1000);
+    } catch (formatError) {
+      // Method 1 failed, try method 2: Read stream duration (works for WebM without container duration)
+      const seconds = await new Promise((resolve, reject) => {
+        const child = spawn(
+          ffprobeExe,
+          [
+            '-v',
+            'error',
+            '-select_streams',
+            'v:0',
+            '-show_entries',
+            'stream=duration',
+            '-of',
+            'default=noprint_wrappers=1:nokey=1',
+            input,
+          ],
+          { windowsHide: true }
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (buf) => {
+          stdout += String(buf || '');
+        });
+        child.stderr.on('data', (buf) => {
+          stderr += String(buf || '');
+        });
+        child.on('error', (err) => reject(err));
+        child.on('close', (code) => {
+          if (code !== 0) return reject(new Error(stderr || `ffprobe stream probe exited with code ${code}`));
+          const s = Number(String(stdout || '').trim());
+          if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid stream duration from ffprobe'));
+          resolve(s);
+        });
       });
-      child.on('error', (err) => reject(err));
-      child.on('close', (code) => {
-        if (code !== 0) return reject(new Error(stderr || `ffprobe exited with code ${code}`));
-        const s = Number(String(stdout || '').trim());
-        if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid duration from ffprobe'));
-        resolve(s);
-      });
-    });
-    return Math.round(seconds * 1000);
+      return Math.round(seconds * 1000);
+    }
   }
 
   // Fallback: parse ffmpeg -i stderr ("Duration: HH:MM:SS.xx")
