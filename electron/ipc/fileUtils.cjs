@@ -145,7 +145,6 @@ async function probeDurationMs(videoPath) {
     } catch (err1) {
       const msg1 = err1 instanceof Error ? err1.message : String(err1);
       errors.push(`Method 1 (format): ${msg1}`);
-      console.log('[probeDurationMs] Method 1 failed:', msg1);
     }
 
     // Try method 2: Read stream duration (works for WebM without container duration)
@@ -186,7 +185,6 @@ async function probeDurationMs(videoPath) {
     } catch (err2) {
       const msg2 = err2 instanceof Error ? err2.message : String(err2);
       errors.push(`Method 2 (stream): ${msg2}`);
-      console.log('[probeDurationMs] Method 2 failed:', msg2);
     }
   }
 
@@ -194,7 +192,6 @@ async function probeDurationMs(videoPath) {
   const ffmpegExe = findFfmpegExe();
   if (!ffmpegExe) {
     errors.push('Method 3 (ffmpeg): ffmpeg not found');
-    console.log('[probeDurationMs] Method 3 failed: ffmpeg not found');
     throw new Error(`All duration methods failed: ${errors.join('; ')}`);
   }
 
@@ -223,7 +220,6 @@ async function probeDurationMs(videoPath) {
   } catch (err3) {
     const msg3 = err3 instanceof Error ? err3.message : String(err3);
     errors.push(`Method 3 (ffmpeg): ${msg3}`);
-    console.log('[probeDurationMs] Method 3 failed:', msg3);
     throw new Error(`All duration methods failed: ${errors.join('; ')}`);
   }
 }

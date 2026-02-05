@@ -134,6 +134,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     mimeType: string;
   } | null>(null);
   const remoteOverlayRotateInProgressRef = React.useRef<boolean>(false);
+  const remoteOverlayPendingDurationRef = React.useRef<{ videoPath: string; promise: Promise<number | null>; jobId: string } | null>(null);
   const remoteOverlayPendingUploadsRef = React.useRef<RemoteOverlayUploadTask[]>([]);
   const remoteOverlayUploadInFlightRef = React.useRef<boolean>(false);
   const remoteOverlayCurrentUploadFileNameRef = React.useRef<string>('');
@@ -1488,30 +1489,53 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
           const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
           // Measure actual media duration for alignment (prevents drift on long overlay recordings).
+          // Wait for previous chunk's duration measurement if still pending
           let durationMs = 0;
-          const maxRetries = 3;
-          const retryDelayMs = 300;
-          
-          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          if (remoteOverlayPendingDurationRef.current && remoteOverlayPendingDurationRef.current.jobId !== jobId) {
+            const pendingJobId = remoteOverlayPendingDurationRef.current.jobId;
             try {
-              const durRes = await electronAPI.getVideoDurationMs?.(String(writeRes.videoPath));
-              const dm = Number(durRes?.durationMs || 0);
-              if (Number.isFinite(dm) && dm > 0) {
-                durationMs = dm;
-                break; // Success - exit retry loop
+              const prevDuration = await remoteOverlayPendingDurationRef.current.promise;
+              if (prevDuration && prevDuration > 0) {
+                // Apply the previous chunk's duration to its metadata
+                const prevMeta = sessionState.chunkMetaByJobId.get(pendingJobId);
+                if (prevMeta) {
+                  const previousOffsetMs = prevMeta.offsetMs;
+                  sessionState.chunkMetaByJobId.set(pendingJobId, { 
+                    offsetMs: previousOffsetMs, 
+                    durationMs: prevDuration 
+                  });
+                  sessionState.cumulativeMediaMs = previousOffsetMs + prevDuration;
+                  remoteOverlayCumulativeMediaMsRef.current = sessionState.cumulativeMediaMs;
+                }
+              } else {
+                addLog(`[RemoteOverlay] ffprobe failed for ${pendingJobId}, using wall-clock duration`, LogLevel.WARN);
               }
             } catch (err) {
-              if (attempt < maxRetries) {
-                await new Promise(r => setTimeout(r, retryDelayMs));
-              }
+              addLog(`[RemoteOverlay] Duration measurement error for ${pendingJobId}, using wall-clock duration`, LogLevel.WARN);
             }
+            remoteOverlayPendingDurationRef.current = null;
           }
-          
-          if (!durationMs) {
-            // Fallback to wall-clock (may cause timestamp drift over long sessions)
-            durationMs = Math.max(1, Math.round(chunkEndWallMs - chunkStartWallMs));
-            addLog(`[RemoteOverlay] WARNING: Using wall-clock duration for chunk ${chunkIndex} (ffprobe failed)`, LogLevel.WARN);
-          }
+
+          // Start background duration measurement for current chunk
+          const measureDuration = async (videoPath: string): Promise<number | null> => {
+            try {
+              const durRes = await electronAPI.getVideoDurationMs?.(videoPath);
+              const dm = Number(durRes?.durationMs || 0);
+              return (Number.isFinite(dm) && dm > 0) ? dm : null;
+            } catch {
+              return null;
+            }
+          };
+
+          const durationPromise = measureDuration(String(writeRes.videoPath));
+          remoteOverlayPendingDurationRef.current = {
+            videoPath: String(writeRes.videoPath),
+            promise: durationPromise,
+            jobId
+          };
+
+          // Use wall-clock as initial placeholder (will be updated when measurement completes)
+          durationMs = Math.max(1, Math.round(chunkEndWallMs - chunkStartWallMs));
           sessionState.chunkMetaByJobId.set(jobId, { offsetMs: chunkOffsetMs, durationMs });
           sessionState.cumulativeMediaMs = chunkOffsetMs + durationMs;
           remoteOverlayCumulativeMediaMsRef.current = sessionState.cumulativeMediaMs;
@@ -1555,6 +1579,31 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           }
 
           if (isFinal) {
+            // Wait for final chunk's duration measurement
+            if (remoteOverlayPendingDurationRef.current) {
+              const finalJobId = remoteOverlayPendingDurationRef.current.jobId;
+              try {
+                const finalDuration = await remoteOverlayPendingDurationRef.current.promise;
+                if (finalDuration && finalDuration > 0) {
+                  const finalMeta = sessionState.chunkMetaByJobId.get(finalJobId);
+                  if (finalMeta) {
+                    const finalOffsetMs = finalMeta.offsetMs;
+                    sessionState.chunkMetaByJobId.set(finalJobId, { 
+                      offsetMs: finalOffsetMs, 
+                      durationMs: finalDuration 
+                    });
+                    sessionState.cumulativeMediaMs = finalOffsetMs + finalDuration;
+                    remoteOverlayCumulativeMediaMsRef.current = sessionState.cumulativeMediaMs;
+                  }
+                } else {
+                  addLog(`[RemoteOverlay] ffprobe failed for final chunk ${finalJobId}, using wall-clock duration`, LogLevel.WARN);
+                }
+              } catch {
+                addLog(`[RemoteOverlay] Duration measurement error for final chunk ${finalJobId}, using wall-clock duration`, LogLevel.WARN);
+              }
+              remoteOverlayPendingDurationRef.current = null;
+            }
+
             // enqueue manifest as last upload
             const chunks = localChunkPaths.map((p, idx) => ({
               chunkIndex: idx + 1,
