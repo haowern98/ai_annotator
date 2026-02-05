@@ -105,9 +105,11 @@ async function probeDurationMs(videoPath) {
   const input = String(videoPath || '').trim();
   if (!input) throw new Error('Missing videoPath');
 
+  const errors = [];
+
+  // Try method 1: Read format duration (fast, works for most files)
   const ffprobeExe = findFfprobeExe();
   if (ffprobeExe) {
-    // Try method 1: Read format duration (fast, works for most files)
     try {
       const seconds = await new Promise((resolve, reject) => {
         const child = spawn(
@@ -140,8 +142,14 @@ async function probeDurationMs(videoPath) {
         });
       });
       return Math.round(seconds * 1000);
-    } catch (formatError) {
-      // Method 1 failed, try method 2: Read stream duration (works for WebM without container duration)
+    } catch (err1) {
+      const msg1 = err1 instanceof Error ? err1.message : String(err1);
+      errors.push(`Method 1 (format): ${msg1}`);
+      console.log('[probeDurationMs] Method 1 failed:', msg1);
+    }
+
+    // Try method 2: Read stream duration (works for WebM without container duration)
+    try {
       const seconds = await new Promise((resolve, reject) => {
         const child = spawn(
           ffprobeExe,
@@ -170,38 +178,54 @@ async function probeDurationMs(videoPath) {
         child.on('close', (code) => {
           if (code !== 0) return reject(new Error(stderr || `ffprobe stream probe exited with code ${code}`));
           const s = Number(String(stdout || '').trim());
-          if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid stream duration from ffprobe'));
+          if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid stream duration'));
           resolve(s);
         });
       });
       return Math.round(seconds * 1000);
+    } catch (err2) {
+      const msg2 = err2 instanceof Error ? err2.message : String(err2);
+      errors.push(`Method 2 (stream): ${msg2}`);
+      console.log('[probeDurationMs] Method 2 failed:', msg2);
     }
   }
 
-  // Fallback: parse ffmpeg -i stderr ("Duration: HH:MM:SS.xx")
+  // Try method 3: parse ffmpeg -i stderr ("Duration: HH:MM:SS.xx")
   const ffmpegExe = findFfmpegExe();
-  if (!ffmpegExe) throw new Error('ffmpeg not found');
-  const ms = await new Promise((resolve, reject) => {
-    const child = spawn(ffmpegExe, ['-hide_banner', '-i', input], { windowsHide: true });
-    let stderr = '';
-    child.stderr.on('data', (buf) => {
-      stderr += String(buf || '');
-      if (stderr.length > 20000) stderr = stderr.slice(-20000);
+  if (!ffmpegExe) {
+    errors.push('Method 3 (ffmpeg): ffmpeg not found');
+    console.log('[probeDurationMs] Method 3 failed: ffmpeg not found');
+    throw new Error(`All duration methods failed: ${errors.join('; ')}`);
+  }
+
+  try {
+    const ms = await new Promise((resolve, reject) => {
+      const child = spawn(ffmpegExe, ['-hide_banner', '-i', input], { windowsHide: true });
+      let stderr = '';
+      child.stderr.on('data', (buf) => {
+        stderr += String(buf || '');
+        if (stderr.length > 20000) stderr = stderr.slice(-20000);
+      });
+      child.on('error', (err) => reject(err));
+      child.on('close', () => {
+        const m = stderr.match(/Duration:\s*(\d+):(\d{2}):(\d{2})(?:\.(\d+))?/);
+        if (!m) return reject(new Error('Duration not found in ffmpeg output'));
+        const hh = Number(m[1]);
+        const mm = Number(m[2]);
+        const ss = Number(m[3]);
+        const frac = m[4] ? Number(`0.${m[4]}`) : 0;
+        if (![hh, mm, ss].every(Number.isFinite)) return reject(new Error('Invalid Duration parse'));
+        const totalMs = Math.round(((hh * 3600 + mm * 60 + ss) + frac) * 1000);
+        resolve(totalMs);
+      });
     });
-    child.on('error', (err) => reject(err));
-    child.on('close', () => {
-      const m = stderr.match(/Duration:\s*(\d+):(\d{2}):(\d{2})(?:\.(\d+))?/);
-      if (!m) return reject(new Error('Duration not found in ffmpeg output'));
-      const hh = Number(m[1]);
-      const mm = Number(m[2]);
-      const ss = Number(m[3]);
-      const frac = m[4] ? Number(`0.${m[4]}`) : 0;
-      if (![hh, mm, ss].every(Number.isFinite)) return reject(new Error('Invalid Duration parse'));
-      const totalMs = Math.round(((hh * 3600 + mm * 60 + ss) + frac) * 1000);
-      resolve(totalMs);
-    });
-  });
-  return ms;
+    return ms;
+  } catch (err3) {
+    const msg3 = err3 instanceof Error ? err3.message : String(err3);
+    errors.push(`Method 3 (ffmpeg): ${msg3}`);
+    console.log('[probeDurationMs] Method 3 failed:', msg3);
+    throw new Error(`All duration methods failed: ${errors.join('; ')}`);
+  }
 }
 
 function setupFileUtilsHandlers(ipcMain) {
