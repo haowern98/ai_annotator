@@ -350,9 +350,15 @@ function setupFileUtilsHandlers(ipcMain) {
   // Get the duration of a video file in milliseconds (fast header probe).
   // Used by overlay mode to align transcript timestamps to the recorded media timeline.
   ipcMain.handle('video:getDurationMs', async (_event, videoPathRaw) => {
-    const input = await safeResolve(videoPathRaw);
-    const ms = await probeDurationMs(input);
-    return { success: true, durationMs: ms };
+    try {
+      const input = await safeResolve(videoPathRaw);
+      const ms = await probeDurationMs(input);
+      return { success: true, durationMs: ms };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error('[video:getDurationMs] Error:', errorMsg);
+      return { success: false, error: errorMsg, durationMs: 0 };
+    }
   });
 
   // Concatenate multiple WebM files into a single WebM using ffmpeg concat demuxer.
