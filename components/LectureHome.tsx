@@ -1250,6 +1250,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 if (tr?.success && tr?.data) {
                   const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
                   const offsetMs = meta.offsetMs;
+                  addLog(`[RemoteOverlay] Applying transcript for ${jobId}: offsetMs=${formatTimestamp(offsetMs)}, chunkDuration=${formatTimestamp(meta.durationMs)}`, LogLevel.INFO);
                   for (let i = 0; i < raw.length; i++) {
                     const t = raw[i] || {};
                     const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
