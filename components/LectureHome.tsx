@@ -1532,11 +1532,31 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
           const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
           
-          // Use MediaRecorder's actual timecodes for precise duration (no drift, no external tools needed)
+          // Determine chunk duration for transcript alignment.
+          // Prefer probing the written chunk file (ffprobe) so offsets match the actual playback timeline.
           let durationMs = 0;
           const wallClockMs = Math.round(chunkEndWallMs - chunkStartWallMs);
-          
-          if (collected.firstTimecode !== null && collected.lastTimecode !== null) {
+
+          let probedMs: number | null = null;
+          try {
+            if (electronAPI?.getVideoDurationMs && writeRes?.videoPath) {
+              const durRes = await electronAPI.getVideoDurationMs(String(writeRes.videoPath));
+              const d = Number(durRes?.durationMs);
+              if (durRes?.success && Number.isFinite(d) && d > 0) {
+                probedMs = Math.round(d);
+              }
+            }
+          } catch {
+            probedMs = null;
+          }
+
+          if (probedMs !== null) {
+            durationMs = probedMs;
+            addLog(
+              `[RemoteOverlay] Chunk ${chunkIndex} duration: ${formatTimestamp(durationMs)} (ffprobe) vs ${formatTimestamp(wallClockMs)} (wall-clock)`,
+              LogLevel.INFO
+            );
+          } else if (collected.firstTimecode !== null && collected.lastTimecode !== null) {
             const baseMs = Math.max(0, collected.lastTimecode - collected.firstTimecode);
             const deltas = Array.isArray(collected.timecodeDeltas) ? collected.timecodeDeltas : [];
             const recent = deltas
