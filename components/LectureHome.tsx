@@ -1250,7 +1250,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 if (tr?.success && tr?.data) {
                   const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
                   const offsetMs = meta.offsetMs;
-                  addLog(`[RemoteOverlay] Applying transcript for ${jobId}: offsetMs=${formatTimestamp(offsetMs)}, chunkDuration=${formatTimestamp(meta.durationMs)}`, LogLevel.INFO);
+                  const serverAudioDuration = tr.data?.duration_s ? Math.round(tr.data.duration_s * 1000) : null;
+                  const logMsg = `[RemoteOverlay] Applying transcript for ${jobId}: offsetMs=${formatTimestamp(offsetMs)}, videoDuration=${formatTimestamp(meta.durationMs)}${serverAudioDuration ? `, audioDuration=${formatTimestamp(serverAudioDuration)}` : ''}`;
+                  addLog(logMsg, LogLevel.INFO);
                   for (let i = 0; i < raw.length; i++) {
                     const t = raw[i] || {};
                     const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
