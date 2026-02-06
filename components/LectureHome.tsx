@@ -134,6 +134,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     mimeType: string;
     firstTimecode: number | null;
     lastTimecode: number | null;
+    timecodeDeltas: number[];
   } | null>(null);
   const remoteOverlayRotateInProgressRef = React.useRef<boolean>(false);
   const remoteOverlayPendingDurationRef = React.useRef<{ videoPath: string; promise: Promise<number | null>; jobId: string } | null>(null);
@@ -817,7 +818,14 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           videoBitsPerSecond: captureQuality === 'high' ? 8000000 : captureQuality === 'medium' ? 2500000 : 1000000,
         });
 
-        remoteOverlayActiveChunkRecorderRef.current = { recorder, blobs, mimeType, firstTimecode: null, lastTimecode: null };
+        remoteOverlayActiveChunkRecorderRef.current = {
+          recorder,
+          blobs,
+          mimeType,
+          firstTimecode: null,
+          lastTimecode: null,
+          timecodeDeltas: [],
+        };
         mediaRecorderRef.current = recorder;
 
         recorder.ondataavailable = (event) => {
@@ -830,6 +838,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             const timecode = (event as any).timecode;
             if (typeof timecode === 'number') {
               if (active.firstTimecode === null) active.firstTimecode = timecode;
+              if (active.lastTimecode !== null) {
+                const delta = timecode - active.lastTimecode;
+                if (Number.isFinite(delta) && delta > 0 && delta < 10_000) {
+                  active.timecodeDeltas.push(delta);
+                }
+              }
               active.lastTimecode = timecode;
             }
           }
@@ -843,10 +857,18 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         recorder.start(1000);
       };
 
-      const stopChunkRecorderAndCollect = async (): Promise<{ blobs: Blob[]; mimeType: string; firstTimecode: number | null; lastTimecode: number | null } | null> => {
+      const stopChunkRecorderAndCollect = async (): Promise<{
+        blobs: Blob[];
+        mimeType: string;
+        firstTimecode: number | null;
+        lastTimecode: number | null;
+        timecodeDeltas: number[];
+      } | null> => {
         const active = remoteOverlayActiveChunkRecorderRef.current;
         if (!active) return null;
-        const { recorder, blobs, mimeType, firstTimecode, lastTimecode } = active;
+        const recorder = active.recorder;
+        const blobs = active.blobs;
+        const mimeType = active.mimeType;
 
         const collected = await new Promise<Blob[]>((resolve) => {
           let resolved = false;
@@ -886,7 +908,15 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           }
         });
 
-        return collected && collected.length ? { blobs: collected, mimeType, firstTimecode, lastTimecode } : null;
+        return collected && collected.length
+          ? {
+              blobs: collected,
+              mimeType,
+              firstTimecode: active.firstTimecode,
+              lastTimecode: active.lastTimecode,
+              timecodeDeltas: active.timecodeDeltas.slice(),
+            }
+          : null;
       };
 
       const setupChunkRecorder = async () => {
@@ -1507,7 +1537,33 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const wallClockMs = Math.round(chunkEndWallMs - chunkStartWallMs);
           
           if (collected.firstTimecode !== null && collected.lastTimecode !== null) {
-            durationMs = Math.round(collected.lastTimecode - collected.firstTimecode);
+            const baseMs = Math.max(0, collected.lastTimecode - collected.firstTimecode);
+            const deltas = Array.isArray(collected.timecodeDeltas) ? collected.timecodeDeltas : [];
+            const recent = deltas
+              .slice(-6)
+              .map((d) => Number(d))
+              .filter((d) => Number.isFinite(d) && d > 0 && d < 10_000);
+
+            let sliceEstimateMs = 0;
+            if (recent.length) {
+              const sorted = recent.slice().sort((a, b) => a - b);
+              sliceEstimateMs = sorted[Math.floor(sorted.length / 2)];
+            }
+
+            // BlobEvent.timecode is the *start* timestamp of each slice. Add an estimated tail so we
+            // count the final slice's duration too (no cumulative drift across chunks).
+            const remainderMs = Math.max(0, wallClockMs - baseMs);
+            let tailMs = 0;
+            if (sliceEstimateMs > 0) {
+              tailMs = sliceEstimateMs;
+              // If we stopped mid-slice, wall-clock remainder is smaller than the typical slice.
+              if (remainderMs <= tailMs) tailMs = remainderMs;
+            } else {
+              // Fallback: derive tail from wall-clock if we have no deltas.
+              tailMs = remainderMs;
+            }
+
+            durationMs = Math.max(1, Math.round(baseMs + tailMs));
             addLog(
               `[RemoteOverlay] Chunk ${chunkIndex} duration: ${formatTimestamp(durationMs)} (MediaRecorder timecode) vs ${formatTimestamp(wallClockMs)} (wall-clock)`,
               LogLevel.INFO
