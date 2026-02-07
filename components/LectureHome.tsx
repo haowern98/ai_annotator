@@ -595,7 +595,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       // Detect supported MIME types and fallback gracefully
       // Prioritize WebM when audio is present (better compatibility)
       const supportedMimeTypes = [
-        'video/webm;codecs="vp8,opus"',               // WebM VP8 + Opus (best for canvas+audio)
+        'video/webm;codecs="vp9,opus"',               // WebM vp9 + Opus (best for canvas+audio)
         'video/webm',                                   // Generic WebM
         'video/mp4;codecs="avc1.4d401e,mp4a.40.2"',  // H.264 + AAC
         'video/mp4'                                     // Generic MP4
@@ -965,6 +965,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         audioTracks.forEach((track) => canvasStream.addTrack(track));
 
         const supportedMimeTypes = [
+          'video/webm;codecs="vp9,opus"',
           'video/webm;codecs="vp8,opus"',
           'video/webm',
         ];
