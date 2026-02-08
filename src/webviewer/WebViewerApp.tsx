@@ -56,6 +56,32 @@ interface TranscodeJob {
   error?: string | null;
 }
 
+function isSafariLikeDevice(): boolean {
+  try {
+    const ua = String(navigator.userAgent || '');
+    const platform = String((navigator as any).platform || '');
+    const maxTouchPoints = Number((navigator as any).maxTouchPoints || 0);
+
+    const isIPhone = /iPhone/i.test(ua);
+    const isIPad = /iPad/i.test(ua);
+    const isIPod = /iPod/i.test(ua);
+    const isIOS = isIPhone || isIPad || isIPod;
+
+    // iPadOS can report as "Macintosh" but with touch points.
+    const isIPadOS13Plus = /Macintosh/i.test(ua) && maxTouchPoints > 1 && /Mac/i.test(platform);
+
+    if (isIOS || isIPadOS13Plus) return true;
+
+    // Desktop Safari (macOS): contains "Safari" but not Chrome/Edge/Opera.
+    const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|Edg|OPR|Opera/i.test(ua);
+    if (isSafari) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function parseTimestampToMs(timestamp: string): number {
   // [HH:MM:SS]
   let match = timestamp.match(/\[?(\d+):(\d+):(\d+)\]?/);
@@ -237,6 +263,7 @@ const LectureListPage: React.FC<{ onOpen: (id: string) => void }> = ({ onOpen })
 
 const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = ({ lectureId, onBack }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const safariLikeRef = useRef<boolean>(isSafariLikeDevice());
   const [tab, setTab] = useState<SummaryTab>('transcript');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -283,6 +310,15 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
       return null;
     }
   };
+
+  // Safari/iOS sometimes won't fire a useful <video> error; proactively show the MP4 prompt.
+  useEffect(() => {
+    if (!lecture) return;
+    if (!safariLikeRef.current) return;
+    if (lecture.hasMp4) return;
+
+    void fetchTranscodeStatus();
+  }, [lecture?.id, lecture?.hasMp4]);
 
   useEffect(() => {
     if (!lecture) return;
@@ -403,7 +439,7 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
                   preload="metadata"
                   src={`/api/lectures/${encodeURIComponent(lecture.id)}/video?v=${videoSrcToken}`}
                   onError={async () => {
-                    setVideoError('Playback failed');
+                    setVideoError(safariLikeRef.current ? 'MP4 required for this device' : 'Playback failed');
                     // If MP4 isn't available yet, show prompt/progress for on-demand conversion.
                     if (!lecture.hasMp4) {
                       await fetchTranscodeStatus();
@@ -412,10 +448,12 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
                   onCanPlay={() => setVideoError(null)}
                 />
 
-                {videoError && !lecture.hasMp4 && (
+                {(!lecture.hasMp4 && (videoError || safariLikeRef.current)) && (
                   <div className="wv-video-overlay">
                     <div className="wv-video-overlay-card">
-                      <div className="wv-video-overlay-title">This device can’t play this video</div>
+                      <div className="wv-video-overlay-title">
+                        {safariLikeRef.current ? 'MP4 required for playback on this device' : 'This device can’t play this video'}
+                      </div>
                       <div className="wv-video-overlay-sub">
                         Generate an MP4 copy (Safari-compatible). The original WebM will be kept.
                       </div>
