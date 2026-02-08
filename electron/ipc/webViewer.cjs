@@ -492,6 +492,10 @@ function setupWebViewerHandlers(ipcMain, options) {
       '-y',
       '-i',
       job.inputPath,
+      // H.264 (yuv420p) requires even dimensions; overlay WebM can have odd sizes (e.g. 1280x799).
+      // Pad up to the nearest even width/height (adds at most 1px per dimension).
+      '-vf',
+      'pad=ceil(iw/2)*2:ceil(ih/2)*2',
       '-c:v',
       'libx264',
       '-preset',
