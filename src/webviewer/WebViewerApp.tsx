@@ -395,7 +395,7 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
   };
 
   return (
-    <div className="wv-container">
+    <div className="wv-container wv-detail-container">
       <div className="wv-header">
         <div className="wv-title-row">
           <button className="wv-btn" onClick={onBack}>
@@ -507,7 +507,7 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
             )}
           </div>
 
-          <div className="wv-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="wv-card wv-detail-bottom">
             <div className="wv-tabs">
               <button className={`wv-tab ${tab === 'transcript' ? 'wv-tab-active' : ''}`} onClick={() => setTab('transcript')}>
                 <FileText size={14} color={tab === 'transcript' ? 'var(--accent)' : 'var(--muted)'} />
@@ -523,48 +523,50 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
               </button>
             </div>
 
-            {tab === 'transcript' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {lecture.transcripts.length === 0 ? (
-                  <div className="wv-empty">No transcripts available</div>
-                ) : (
-                  lecture.transcripts.map((t, idx) => {
-                    const ms = typeof t.timestampMs === 'number' ? t.timestampMs : parseTimestampToMs(t.timestamp);
-                    return (
-                      <div
-                        key={idx}
-                        className="wv-block wv-card-pressable"
-                        onClick={() => handleSeek(ms)}
-                        onMouseEnter={(e) => {
-                          (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--accent)';
-                        }}
-                        onMouseLeave={(e) => {
-                          (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--border)';
-                        }}
-                      >
-                        <div className="wv-block-title">{t.timestamp}</div>
-                        <div style={{ fontSize: 13, color: '#cccccc', lineHeight: 1.6 }}>{t.text}</div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            )}
+            <div className="wv-detail-scroll">
+              {tab === 'transcript' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {lecture.transcripts.length === 0 ? (
+                    <div className="wv-empty">No transcripts available</div>
+                  ) : (
+                    lecture.transcripts.map((t, idx) => {
+                      const ms = typeof t.timestampMs === 'number' ? t.timestampMs : parseTimestampToMs(t.timestamp);
+                      return (
+                        <div
+                          key={idx}
+                          className="wv-block wv-card-pressable"
+                          onClick={() => handleSeek(ms)}
+                          onMouseEnter={(e) => {
+                            (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--accent)';
+                          }}
+                          onMouseLeave={(e) => {
+                            (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--border)';
+                          }}
+                        >
+                          <div className="wv-block-title">{t.timestamp}</div>
+                          <div style={{ fontSize: 13, color: '#cccccc', lineHeight: 1.6 }}>{t.text}</div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
 
-            {tab !== 'transcript' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {(tab === 'topics' ? topicSummaries : shortSummaries).length === 0 ? (
-                  <div className="wv-empty">No summaries available</div>
-                ) : (
-                  (tab === 'topics' ? topicSummaries : shortSummaries).map((s, idx) => (
-                    <div key={idx} className="wv-block">
-                      <div className="wv-block-title">{s.windowLabel}</div>
-                      <MarkdownBlock content={s.text} />
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
+              {tab !== 'transcript' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {(tab === 'topics' ? topicSummaries : shortSummaries).length === 0 ? (
+                    <div className="wv-empty">No summaries available</div>
+                  ) : (
+                    (tab === 'topics' ? topicSummaries : shortSummaries).map((s, idx) => (
+                      <div key={idx} className="wv-block">
+                        <div className="wv-block-title">{s.windowLabel}</div>
+                        <MarkdownBlock content={s.text} />
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}

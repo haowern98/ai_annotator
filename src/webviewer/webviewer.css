@@ -14,6 +14,12 @@
   box-sizing: border-box;
 }
 
+/* Firefox scrollbar support (match desktop app) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #444444 #1a1a1a;
+}
+
 html,
 body {
   height: 100%;
@@ -55,6 +61,30 @@ a {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #555555;
+}
+
+.wv-detail-container {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.wv-detail-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wv-detail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .wv-container {
