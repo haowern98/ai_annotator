@@ -70,6 +70,24 @@ a {
   min-height: 0;
 }
 
+.wv-detail-top {
+  flex: 0 0 33%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.wv-detail-top .wv-video-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+.wv-detail-top .wv-video {
+  height: 100%;
+  object-fit: contain;
+}
+
 .wv-detail-bottom {
   display: flex;
   flex-direction: column;
@@ -199,6 +217,11 @@ a {
 .wv-badge-muted {
   color: #666666;
   font-weight: 600;
+}
+
+.wv-badge-danger {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 .wv-btn {

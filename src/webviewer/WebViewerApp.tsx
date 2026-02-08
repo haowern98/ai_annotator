@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import {
-  ArrowLeft,
   BarChart3,
   BookOpen,
   Calendar,
@@ -396,25 +395,37 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
 
   return (
     <div className="wv-container wv-detail-container">
-      <div className="wv-header">
-        <div className="wv-title-row">
-          <button className="wv-btn" onClick={onBack}>
-            <ArrowLeft size={16} />
-            Back
-          </button>
-        </div>
-
-        {isLoading && <div className="wv-subtitle">Loading…</div>}
-        {error && <div className="wv-error">{error}</div>}
-      </div>
+      {!lecture && isLoading && <div className="wv-card wv-subtitle">Loading…</div>}
+      {!lecture && error && <div className="wv-card wv-error">{error}</div>}
 
       {lecture && (
         <>
-          <div className="wv-card">
+          <div className="wv-card wv-detail-top">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
               <BookOpen size={18} color="var(--accent)" />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>{lecture.title}</div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, justifyContent: 'space-between' }}>
+                  <div
+                    style={{
+                      fontSize: 16,
+                      fontWeight: 700,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {lecture.title}
+                  </div>
+                  {(isLoading || error) && (
+                    <div
+                      className={error ? 'wv-badge-danger' : 'wv-badge-muted'}
+                      style={{ fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 }}
+                    >
+                      {error ? 'Error' : 'Loading…'}
+                    </div>
+                  )}
+                </div>
                 <div className="wv-meta">
                   <span className="wv-meta-item">
                     <Calendar size={14} color="var(--muted)" />
@@ -427,6 +438,8 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
                 </div>
               </div>
             </div>
+
+            {error && <div className="wv-error">{error}</div>}
 
             {lecture.hasVideo ? (
               <div className="wv-video-wrap">
