@@ -699,6 +699,8 @@ function setupWebViewerHandlers(ipcMain, options) {
     const st = await fsp.stat(filePath);
     const fileSize = st.size;
     const ct = guessContentType(filePath);
+    const method = String(req.method || '').toUpperCase();
+    const isHead = method === 'HEAD';
 
     const range = req.headers.range;
     if (!range) {
@@ -707,25 +709,59 @@ function setupWebViewerHandlers(ipcMain, options) {
         'Content-Length': String(fileSize),
         'Accept-Ranges': 'bytes',
       });
+      if (isHead) {
+        res.end();
+        return;
+      }
       fs.createReadStream(filePath).pipe(res);
       return;
     }
 
-    const m = String(range).match(/bytes=(\d+)-(\d*)/);
-    if (!m) {
-      res.writeHead(416, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Invalid Range');
+    const failRange = (message) => {
+      res.writeHead(416, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Range': `bytes */${fileSize}`,
+        'Accept-Ranges': 'bytes',
+      });
+      if (isHead) {
+        res.end();
+        return;
+      }
+      res.end(String(message || 'Range Not Satisfiable'));
+    };
+
+    // Support "bytes=start-end", "bytes=start-" and Safari-style suffix ranges "bytes=-N".
+    const raw = String(range || '').split(',')[0].trim().replace(/\s+/g, '');
+    let start = null;
+    let end = null;
+
+    let m = raw.match(/^bytes=(\d+)-(\d*)$/i);
+    if (m) {
+      start = Number(m[1]);
+      end = m[2] ? Number(m[2]) : fileSize - 1;
+    } else {
+      m = raw.match(/^bytes=-(\d+)$/i);
+      if (m) {
+        const suffixLen = Number(m[1]);
+        if (!Number.isFinite(suffixLen) || suffixLen <= 0) {
+          failRange('Invalid Range');
+          return;
+        }
+        start = Math.max(0, fileSize - suffixLen);
+        end = fileSize - 1;
+      }
+    }
+
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start === null || end === null) {
+      failRange('Invalid Range');
       return;
     }
 
-    const start = Number(m[1]);
-    const end = m[2] ? Number(m[2]) : fileSize - 1;
+    // Clamp end to the file size (many clients send large ranges; browsers expect clamping).
+    if (end >= fileSize) end = fileSize - 1;
 
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= fileSize) {
-      res.writeHead(416, {
-        'Content-Range': `bytes */${fileSize}`,
-      });
-      res.end();
+    if (start < 0 || start >= fileSize || end < 0 || start > end) {
+      failRange('Range Not Satisfiable');
       return;
     }
 
@@ -736,6 +772,10 @@ function setupWebViewerHandlers(ipcMain, options) {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
     });
+    if (isHead) {
+      res.end();
+      return;
+    }
     fs.createReadStream(filePath, { start, end }).pipe(res);
   };
 
@@ -843,7 +883,7 @@ function setupWebViewerHandlers(ipcMain, options) {
       }
 
       if (sub === 'video') {
-        if (method !== 'GET') {
+        if (method !== 'GET' && method !== 'HEAD') {
           respondJson(res, 405, { success: false, error: 'Method not allowed' });
           return;
         }
