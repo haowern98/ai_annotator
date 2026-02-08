@@ -29,6 +29,22 @@ function guessContentType(filePath) {
   return 'application/octet-stream';
 }
 
+function isSafariLikeUserAgent(userAgent) {
+  const ua = String(userAgent || '');
+  const isIOS = /iP(hone|ad|od)/i.test(ua);
+  const isWebKit = /AppleWebKit/i.test(ua);
+  const isSafari = /Safari/i.test(ua);
+  const isOtherBrowser = /(Chrome|Chromium|Edg|OPR|Brave|Firefox)/i.test(ua);
+
+  // iOS browsers (including Chrome/Firefox) use WebKit and have similar media limitations.
+  if (isIOS && isWebKit) return true;
+
+  // Desktop Safari (macOS) is the other common case.
+  if (!isIOS && isSafari && isWebKit && !isOtherBrowser) return true;
+
+  return false;
+}
+
 function findFfmpegExe() {
   const fromEnv = process.env.FFMPEG_EXE || process.env.VIDEOCONTEXT_FFMPEG_EXE;
   if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
@@ -173,6 +189,72 @@ async function probeDurationMs(videoPath) {
     const msg3 = err3 instanceof Error ? err3.message : String(err3);
     throw new Error(`All duration methods failed: ${errors.join('; ')}; ffmpeg: ${msg3}`);
   }
+}
+
+async function probeVideoStreamInfo(videoPath) {
+  const input = String(videoPath || '').trim();
+  if (!input) throw new Error('Missing videoPath');
+
+  const ffprobeExe = findFfprobeExe();
+  if (!ffprobeExe) throw new Error('ffprobe not found');
+
+  const stdout = await new Promise((resolve, reject) => {
+    const child = spawn(
+      ffprobeExe,
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=codec_name,profile,level,pix_fmt',
+        '-of',
+        'json',
+        input,
+      ],
+      { windowsHide: true }
+    );
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (buf) => {
+      out += String(buf || '');
+    });
+    child.stderr.on('data', (buf) => {
+      err += String(buf || '');
+    });
+    child.on('error', (e) => reject(e));
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(err || `ffprobe exited with code ${code}`));
+      resolve(out);
+    });
+  });
+
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout || ''));
+  } catch {
+    throw new Error('ffprobe returned invalid JSON');
+  }
+
+  const s = Array.isArray(parsed?.streams) ? parsed.streams[0] : null;
+  if (!s || typeof s !== 'object') throw new Error('ffprobe stream not found');
+  return {
+    codec_name: String(s.codec_name || ''),
+    profile: String(s.profile || ''),
+    level: Number(s.level),
+    pix_fmt: String(s.pix_fmt || ''),
+  };
+}
+
+async function isMp4SafariCompatible(mp4Path) {
+  const info = await probeVideoStreamInfo(mp4Path);
+  // iOS Safari is sensitive to H.264 level signaling; older overlay transcodes ended up as level 6.0.
+  // Keep a conservative threshold here; H.264 up to level 4.2 is widely supported on iOS devices.
+  const level = Number(info.level);
+  const codecOk = info.codec_name.toLowerCase() === 'h264';
+  const pixOk = info.pix_fmt.toLowerCase() === 'yuv420p';
+  const levelOk = Number.isFinite(level) ? level <= 42 : true;
+  return codecOk && pixOk && levelOk;
 }
 
 function formatLectureFromMetadata(rec, index, baseId) {
@@ -492,16 +574,22 @@ function setupWebViewerHandlers(ipcMain, options) {
       '-y',
       '-i',
       job.inputPath,
-      // H.264 (yuv420p) requires even dimensions; overlay WebM can have odd sizes (e.g. 1280x799).
-      // Pad up to the nearest even width/height (adds at most 1px per dimension).
+      // Safari/iOS compatibility:
+      // - Force a sane framerate (older overlay WebM files may report 1000fps, which breaks H.264 level signaling).
+      // - Pad to even dimensions (H.264 yuv420p requires even width/height).
+      // - Encode H.264 baseline with a conservative level (widely supported on iOS Safari).
       '-vf',
-      'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+      'fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2',
       '-c:v',
       'libx264',
       '-preset',
       'veryfast',
       '-crf',
       '23',
+      '-profile:v',
+      'baseline',
+      '-level',
+      '3.2',
       '-pix_fmt',
       'yuv420p',
       '-c:a',
@@ -605,14 +693,32 @@ function setupWebViewerHandlers(ipcMain, options) {
 
     const outputPath = getMp4PathForLecture(id);
     if (await hasFile(outputPath)) {
-      const existing = transcode.jobs.get(id);
-      if (existing) {
-        existing.state = 'complete';
-        existing.percent = 100;
-        existing.updatedAt = Date.now();
-        sendTranscodeUpdate(existing);
+      // If an MP4 already exists, validate it's Safari-friendly; older transcodes could be H.264 level 6.0.
+      // If it's incompatible/broken, delete and regenerate.
+      let compatible = true;
+      try {
+        compatible = await isMp4SafariCompatible(outputPath);
+      } catch {
+        // If we can't probe it, assume it's usable and avoid a long re-transcode.
+        compatible = true;
       }
-      return { success: true, job: { lectureId: id, state: 'complete', percent: 100, phase: 'Complete' } };
+
+      if (compatible) {
+        const existing = transcode.jobs.get(id);
+        if (existing) {
+          existing.state = 'complete';
+          existing.percent = 100;
+          existing.updatedAt = Date.now();
+          sendTranscodeUpdate(existing);
+        }
+        return { success: true, job: { lectureId: id, state: 'complete', percent: 100, phase: 'Complete' } };
+      }
+
+      try {
+        await fsp.unlink(outputPath);
+      } catch {
+        // ignore
+      }
     }
 
     const existingJob = transcode.jobs.get(id);
@@ -892,7 +998,25 @@ function setupWebViewerHandlers(ipcMain, options) {
         // Do not serve the MP4 while it is actively being generated (it may be incomplete).
         const tj = transcode.jobs.get(lectureId);
         const mp4InProgress = tj && (tj.state === 'queued' || tj.state === 'running');
-        if (!mp4InProgress) candidates.push(`${lectureId}.mp4`);
+        if (!mp4InProgress) {
+          const ua = String(req.headers['user-agent'] || '');
+          const safariLike = isSafariLikeUserAgent(ua);
+          if (!safariLike) {
+            candidates.push(`${lectureId}.mp4`);
+          } else {
+            const mp4Path = path.join(recordingsDir, `${lectureId}.mp4`);
+            const exists = await hasFile(mp4Path);
+            if (exists) {
+              let compatible = true;
+              try {
+                compatible = await isMp4SafariCompatible(mp4Path);
+              } catch {
+                compatible = true;
+              }
+              if (compatible) candidates.push(`${lectureId}.mp4`);
+            }
+          }
+        }
         if (rec?.videoFilename) candidates.push(String(rec.videoFilename));
         if (rec?.videoPath) candidates.push(String(rec.videoPath).split(/[\\/]/).pop() || '');
         candidates.push(`${lectureId}.webm`);
@@ -934,8 +1058,16 @@ function setupWebViewerHandlers(ipcMain, options) {
 
       const tj = transcode.jobs.get(lectureId);
       const mp4InProgress = tj && (tj.state === 'queued' || tj.state === 'running');
-      const hasMp4OnDisk = await hasFile(path.join(recordingsDir, `${lectureId}.mp4`));
-      const hasMp4 = Boolean(hasMp4OnDisk && !mp4InProgress);
+      const mp4Path = path.join(recordingsDir, `${lectureId}.mp4`);
+      const hasMp4OnDisk = await hasFile(mp4Path);
+      let hasMp4 = Boolean(hasMp4OnDisk && !mp4InProgress);
+      if (hasMp4) {
+        try {
+          hasMp4 = await isMp4SafariCompatible(mp4Path);
+        } catch {
+          // If we can't probe it, assume it's usable.
+        }
+      }
       const hasWebm = await hasFile(path.join(recordingsDir, `${lectureId}.webm`));
 
       const lecture = {
