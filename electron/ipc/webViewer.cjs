@@ -822,7 +822,8 @@ function setupWebViewerHandlers(ipcMain, options) {
           const outputPath = getMp4PathForLecture(lectureId);
           const outputExists = await hasFile(outputPath);
           const job = transcode.jobs.get(lectureId);
-          if (outputExists) {
+          const inProgress = job && (job.state === 'queued' || job.state === 'running');
+          if (outputExists && !inProgress) {
             respondJson(res, 200, { success: true, job: { lectureId, state: 'complete', percent: 100, phase: 'Complete' } });
             return;
           }
@@ -888,7 +889,10 @@ function setupWebViewerHandlers(ipcMain, options) {
         return;
       }
 
-      const hasMp4 = await hasFile(path.join(recordingsDir, `${lectureId}.mp4`));
+      const tj = transcode.jobs.get(lectureId);
+      const mp4InProgress = tj && (tj.state === 'queued' || tj.state === 'running');
+      const hasMp4OnDisk = await hasFile(path.join(recordingsDir, `${lectureId}.mp4`));
+      const hasMp4 = Boolean(hasMp4OnDisk && !mp4InProgress);
       const hasWebm = await hasFile(path.join(recordingsDir, `${lectureId}.webm`));
 
       const lecture = {
