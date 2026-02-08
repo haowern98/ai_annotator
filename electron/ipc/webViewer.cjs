@@ -544,11 +544,14 @@ function setupWebViewerHandlers(ipcMain, options) {
         const value = line.slice(idx + 1).trim();
 
         if (key === 'out_time_ms' || key === 'out_time_us') {
-          const outMs = key === 'out_time_us' ? Math.floor(Number(value) / 1000) : Number(value);
+          // FFmpeg progress reports out_time_ms in *microseconds* (despite the name).
+          // Normalize to milliseconds for percent calculation.
+          const outRaw = Number(value);
+          const outMs = Math.floor(outRaw / 1000);
           if (Number.isFinite(outMs) && outMs >= 0) {
             job.outTimeMs = outMs;
             if (Number.isFinite(Number(job.durationMs)) && job.durationMs > 0) {
-              const pct = Math.max(0, Math.min(100, (outMs / job.durationMs) * 100));
+              const pct = Math.max(0, Math.min(99, (outMs / job.durationMs) * 100));
               job.percent = Math.floor(pct);
             }
             maybeEmitProgress();
