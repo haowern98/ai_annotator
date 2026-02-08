@@ -15,6 +15,7 @@ const { setupNetworkHandlers } = require('./ipc/network.cjs');
 const { setupQwenControlHandlers } = require('./ipc/qwenControl.cjs');
 const { setupRemoteInboxHandlers } = require('./ipc/remoteInbox.cjs');
 const { setupRemoteUploadHandlers } = require('./ipc/remoteUpload.cjs');
+const { setupWebViewerHandlers } = require('./ipc/webViewer.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
 // Only set command-line switches if app is properly loaded
@@ -679,6 +680,11 @@ function createWindow() {
         // ignore
       }
     },
+  });
+  setupWebViewerHandlers(ipcMain, {
+    getRecordingsDir: getRecordingsDirFallback,
+    distDir: path.join(__dirname, '../dist'),
+    defaultPort: 7558,
   });
 
   // Load the app

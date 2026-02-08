@@ -496,6 +496,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('video:getDurationMs', videoPath);
   },
 
+  // Web viewer (browser UI on port 7558)
+  startWebViewer: async (portOverride) => {
+    return await ipcRenderer.invoke('webviewer:start', portOverride);
+  },
+
+  stopWebViewer: async () => {
+    return await ipcRenderer.invoke('webviewer:stop');
+  },
+
+  getWebViewerStatus: async () => {
+    return await ipcRenderer.invoke('webviewer:status');
+  },
+
   // YouTube downloader (Python yt_dlp in .venv)
   downloadYouTube: async (url, onProgress, options) => {
     const id = `yt_${Date.now()}_${Math.random().toString(36).slice(2)}`;

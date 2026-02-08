@@ -77,6 +77,8 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
   const [latency, setLatency] = useState<number | null>(null);
   const [isServerRunning, setIsServerRunning] = useState(false);
   const [isWebViewerEnabled, setIsWebViewerEnabled] = useState(false);
+  const [isWebViewerBusy, setIsWebViewerBusy] = useState(false);
+  const [webViewerStatus, setWebViewerStatus] = useState<{ running: boolean; port: number; lastError?: string | null } | null>(null);
 
   // Load saved config and detect IPs on mount
   useEffect(() => {
@@ -104,6 +106,25 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     if (typeof savedWebViewer?.enabled === 'boolean') {
       setIsWebViewerEnabled(savedWebViewer.enabled);
     }
+
+    const checkWebViewer = async () => {
+      if (window.electronAPI?.getWebViewerStatus) {
+        try {
+          const result = await window.electronAPI.getWebViewerStatus();
+          if (result?.success) {
+            setWebViewerStatus({
+              running: Boolean(result.running),
+              port: Number(result.port || 7558),
+              lastError: (result as any).lastError ?? null,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    checkWebViewer();
 
     // Detect local and public IPs
     const detectIPs = async () => {
@@ -297,10 +318,51 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     onSuccess?.(); // Opens UploadLectureModal
   };
 
-  const handleToggleWebViewer = () => {
+  const handleToggleWebViewer = async () => {
+    if (isWebViewerBusy) return;
+
     const nextEnabled = !isWebViewerEnabled;
     setIsWebViewerEnabled(nextEnabled);
     saveWebViewerConfig({ enabled: nextEnabled });
+
+    if (!window.electronAPI?.startWebViewer || !window.electronAPI?.stopWebViewer) {
+      setWebViewerStatus((prev) => prev || { running: false, port: 7558, lastError: 'Electron API not available' });
+      return;
+    }
+
+    setIsWebViewerBusy(true);
+    try {
+      const result = nextEnabled
+        ? await window.electronAPI.startWebViewer(7558)
+        : await window.electronAPI.stopWebViewer();
+
+      if (!result?.success) {
+        const errMsg = String((result as any)?.error || 'Failed to update web viewer');
+        setWebViewerStatus((prev) => ({
+          running: prev?.running ?? false,
+          port: prev?.port ?? 7558,
+          lastError: errMsg,
+        }));
+        alert(errMsg);
+      }
+
+      if (window.electronAPI?.getWebViewerStatus) {
+        try {
+          const s = await window.electronAPI.getWebViewerStatus();
+          if (s?.success) {
+            setWebViewerStatus({
+              running: Boolean(s.running),
+              port: Number(s.port || 7558),
+              lastError: (s as any).lastError ?? null,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    } finally {
+      setIsWebViewerBusy(false);
+    }
   };
 
   return (
@@ -748,6 +810,7 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
 
                 <button
                   onClick={handleToggleWebViewer}
+                  disabled={isWebViewerBusy}
                   aria-pressed={isWebViewerEnabled}
                   style={{
                     width: '52px',
@@ -756,9 +819,10 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                     border: '1px solid #333333',
                     borderRadius: '999px',
                     backgroundColor: isWebViewerEnabled ? 'rgba(14, 114, 237, 0.35)' : '#1a1a1a',
-                    cursor: 'pointer',
+                    cursor: isWebViewerBusy ? 'not-allowed' : 'pointer',
                     position: 'relative',
-                    transition: 'all 0.2s'
+                    transition: 'all 0.2s',
+                    opacity: isWebViewerBusy ? 0.6 : 1
                   }}
                 >
                   <div
@@ -877,7 +941,19 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                 <div style={{ display: 'flex', gap: '12px' }}>
                   <Lightbulb size={20} color="#F59E0B" style={{ flexShrink: 0, marginTop: '2px' }} />
                   <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.5' }}>
-                    UI only for now. We'll wire this toggle to start/stop the web viewer server next.
+                    <div style={{ marginBottom: '8px' }}>
+                      Status:{' '}
+                      <span style={{ color: webViewerStatus?.running ? '#10b981' : '#aaaaaa', fontWeight: 600 }}>
+                        {webViewerStatus ? (webViewerStatus.running ? 'Running' : 'Stopped') : 'Unknown'}
+                      </span>
+                      {webViewerStatus?.lastError ? (
+                        <span style={{ color: '#ef4444' }}> — {webViewerStatus.lastError}</span>
+                      ) : null}
+                    </div>
+                    <div>
+                      Open the URL above on your phone/tablet/laptop (LAN or Tailscale). If it isn’t reachable, allow inbound TCP port{' '}
+                      <span style={{ fontFamily: 'monospace' }}>7558</span> in Windows Firewall.
+                    </div>
                   </div>
                 </div>
               </div>

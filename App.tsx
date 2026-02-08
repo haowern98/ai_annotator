@@ -117,6 +117,44 @@ export default function App() {
       console.error('[App] Failed to clear server mode:', e);
     }
 
+    const api = window.electronAPI as any;
+
+    // Web Viewer autostart (port 7558) - independent from remote client/server mode.
+    const WEB_VIEWER_CONFIG_KEY = 'web_viewer_config';
+    const readWebViewerEnabled = () => {
+      try {
+        const raw = localStorage.getItem(WEB_VIEWER_CONFIG_KEY);
+        if (!raw) return false;
+        const parsed = JSON.parse(raw);
+        return Boolean(parsed?.enabled);
+      } catch {
+        return false;
+      }
+    };
+
+    const applyWebViewerEnabled = async (enabled: boolean) => {
+      if (!api?.startWebViewer || !api?.stopWebViewer) return;
+      try {
+        if (enabled) {
+          const res = await api.startWebViewer(7558);
+          if (!res?.success) console.warn('[WebViewer] start failed:', res?.error || res);
+        } else {
+          const res = await api.stopWebViewer();
+          if (!res?.success) console.warn('[WebViewer] stop failed:', res?.error || res);
+        }
+      } catch (e) {
+        console.warn('[WebViewer] apply failed:', e);
+      }
+    };
+
+    // Start/stop on launch based on persisted renderer config.
+    void applyWebViewerEnabled(readWebViewerEnabled());
+
+    const onWebViewerConfigChanged = () => {
+      void applyWebViewerEnabled(readWebViewerEnabled());
+    };
+    window.addEventListener('web-viewer-config-changed', onWebViewerConfigChanged);
+
     const uploadParakeet = new ParakeetBatchTranscriber(addLog);
     
     // Load remote processing config
@@ -166,7 +204,6 @@ export default function App() {
 
     // In server mode, accept full-video uploads via the Electron main-process inbox.
     // When a file arrives, enqueue it for local processing (same pipeline as local path/YouTube uploads).
-    const api = window.electronAPI as any;
     const handleInboxFile = async (payload: any) => {
       try {
         if (payload?.isManifest) return;
@@ -216,6 +253,7 @@ export default function App() {
     }
 
     return () => {
+      window.removeEventListener('web-viewer-config-changed', onWebViewerConfigChanged);
       try {
         (window.electronAPI as any)?.removeInboxListeners?.();
       } catch {

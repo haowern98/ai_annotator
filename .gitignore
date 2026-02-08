@@ -56,6 +56,7 @@ electron-builder-output/
 # User recordings and captures
 recordings/
 recordings/*.json
+.recordings/
 captures/
 temp_audio/
 temp_video/

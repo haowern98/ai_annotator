@@ -29,6 +29,7 @@ export default defineConfig(({ mode }) => {
             main: path.resolve(__dirname, 'index.html'),
             overlay: path.resolve(__dirname, 'overlay.html'),
             'lecture-overlay': path.resolve(__dirname, 'lecture-overlay.html'),
+            webviewer: path.resolve(__dirname, 'webviewer.html'),
           },
         },
       },

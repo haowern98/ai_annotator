@@ -89,6 +89,11 @@ interface ElectronAPI {
   convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
   getVideoDurationMs: (videoPath: string) => Promise<{success: boolean; durationMs?: number; error?: string}>;
 
+  // Web viewer (browser UI on port 7558)
+  startWebViewer: (portOverride?: number) => Promise<{success: boolean; port?: number; error?: string; running?: boolean}>;
+  stopWebViewer: () => Promise<{success: boolean; error?: string}>;
+  getWebViewerStatus: () => Promise<{success: boolean; running: boolean; port: number; lastError?: string | null}>;
+
   // Remote full-video upload (client/server inbox)
   getInboxStatus: () => Promise<{success: boolean; status?: any; error?: string}>;
   onInboxActivity: (callback: (activity: any) => void) => void;

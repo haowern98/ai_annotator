@@ -1,0 +1,409 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
+import {
+  ArrowLeft,
+  BarChart3,
+  BookOpen,
+  Calendar,
+  ChevronRight,
+  Clock,
+  FileText,
+  Film,
+  Search,
+} from 'lucide-react';
+
+type SummaryTab = 'transcript' | 'topics' | 'short';
+
+interface LectureListItem {
+  id: string;
+  title: string;
+  date: string;
+  time: string;
+  duration: string;
+  transcriptCount: number;
+  summaryCount: number;
+  recordingEnabled: boolean;
+  quality: string | null;
+  fileSize: string;
+  lastModified?: string;
+}
+
+interface TranscriptEntry {
+  text: string;
+  timestamp: string;
+  timestampMs?: number;
+}
+
+interface SummaryEntry {
+  text: string;
+  windowLabel: string;
+}
+
+interface LectureDetailsData extends LectureListItem {
+  transcripts: TranscriptEntry[];
+  summaries: SummaryEntry[];
+  hasVideo: boolean;
+}
+
+function parseTimestampToMs(timestamp: string): number {
+  // [HH:MM:SS]
+  let match = timestamp.match(/\[?(\d+):(\d+):(\d+)\]?/);
+  if (match) {
+    const [, hours, minutes, seconds] = match;
+    return (Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)) * 1000;
+  }
+
+  // [MM:SS]
+  match = timestamp.match(/\[?(\d+):(\d+)\]?/);
+  if (match) {
+    const [, minutes, seconds] = match;
+    return (Number(minutes) * 60 + Number(seconds)) * 1000;
+  }
+
+  return 0;
+}
+
+function useRoute() {
+  const parse = () => {
+    const raw = String(window.location.hash || '').trim();
+    const hash = raw.startsWith('#') ? raw.slice(1) : raw;
+    const parts = hash.split('/').filter(Boolean);
+    if (parts[0] === 'lecture' && parts[1]) return { page: 'detail' as const, id: decodeURIComponent(parts[1]) };
+    return { page: 'list' as const, id: null as string | null };
+  };
+
+  const [route, setRoute] = useState(parse);
+
+  useEffect(() => {
+    const onChange = () => setRoute(parse());
+    window.addEventListener('hashchange', onChange);
+    return () => window.removeEventListener('hashchange', onChange);
+  }, []);
+
+  return route;
+}
+
+const MarkdownBlock: React.FC<{ content: string }> = ({ content }) => {
+  const html = useMemo(() => {
+    const raw = marked.parse(content || '', { breaks: true }) as string;
+    return DOMPurify.sanitize(raw);
+  }, [content]);
+
+  return <div className="wv-markdown" dangerouslySetInnerHTML={{ __html: html }} />;
+};
+
+async function fetchJson<T>(path: string): Promise<T> {
+  const res = await fetch(path, { headers: { Accept: 'application/json' } });
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // ignore
+  }
+  if (!res.ok) {
+    const msg = json?.error || `${res.status} ${res.statusText}` || 'Request failed';
+    throw new Error(msg);
+  }
+  return json as T;
+}
+
+const LectureListPage: React.FC<{ onOpen: (id: string) => void }> = ({ onOpen }) => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [lectures, setLectures] = useState<LectureListItem[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const data = await fetchJson<{ success: boolean; lectures: LectureListItem[] }>('/api/lectures');
+        if (!cancelled) setLectures(Array.isArray(data.lectures) ? data.lectures : []);
+      } catch (e: any) {
+        if (!cancelled) setError(String(e?.message || e));
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return lectures;
+    return lectures.filter((l) => l.title.toLowerCase().includes(q) || l.date.toLowerCase().includes(q));
+  }, [lectures, searchQuery]);
+
+  return (
+    <div className="wv-container">
+      <div className="wv-header">
+        <div className="wv-title-row">
+          <div>
+            <div className="wv-title">
+              <BookOpen size={18} color="var(--accent)" />
+              Recent Lectures
+            </div>
+            <div className="wv-subtitle">{isLoading ? 'Loading…' : `${lectures.length} recordings`}</div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <Search size={16} color="var(--muted)" />
+          <input
+            className="wv-search"
+            placeholder="Search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {error && <div className="wv-error">{error}</div>}
+
+      {!error && !isLoading && filtered.length === 0 && <div className="wv-empty">No lectures found</div>}
+
+      <div className="wv-list">
+        {filtered.map((lecture) => (
+          <div
+            key={lecture.id}
+            className="wv-card wv-card-pressable"
+            onClick={() => onOpen(lecture.id)}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--accent)';
+              (e.currentTarget as HTMLDivElement).style.backgroundColor = '#2a2a2a';
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--border)';
+              (e.currentTarget as HTMLDivElement).style.backgroundColor = 'var(--panel)';
+            }}
+          >
+            <div className="wv-row">
+              <div className="wv-left">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <BookOpen size={18} color="var(--accent)" />
+                  <h3 className="wv-h1" style={{ margin: 0, fontSize: 15 }}>
+                    {lecture.title}
+                  </h3>
+                </div>
+
+                <div className="wv-meta">
+                  <span className="wv-meta-item">
+                    <Calendar size={14} color="var(--muted)" />
+                    {lecture.date} | {lecture.time}
+                  </span>
+                  <span className="wv-meta-item">
+                    <Clock size={14} color="var(--muted)" />
+                    Duration: {lecture.duration}
+                  </span>
+                  <span className="wv-meta-item">
+                    <FileText size={14} color="var(--muted)" />
+                    {lecture.transcriptCount}
+                  </span>
+                  <span className="wv-meta-item">
+                    <BarChart3 size={14} color="var(--muted)" />
+                    {lecture.summaryCount}
+                  </span>
+                  <span className={lecture.recordingEnabled ? 'wv-badge-ok' : 'wv-badge-muted'}>
+                    Recording: {lecture.recordingEnabled ? `Yes (${lecture.quality || 'N/A'})` : 'No'}
+                  </span>
+                </div>
+              </div>
+
+              <ChevronRight size={18} color="var(--muted)" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = ({ lectureId, onBack }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [tab, setTab] = useState<SummaryTab>('transcript');
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lecture, setLecture] = useState<LectureDetailsData | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const data = await fetchJson<{ success: boolean; lecture: LectureDetailsData }>(
+          `/api/lectures/${encodeURIComponent(lectureId)}`
+        );
+        if (!cancelled) setLecture(data.lecture);
+      } catch (e: any) {
+        if (!cancelled) setError(String(e?.message || e));
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [lectureId]);
+
+  const { topicSummaries, shortSummaries } = useMemo(() => {
+    const summaries = lecture?.summaries || [];
+    const isTopic = (s: SummaryEntry) => String(s?.windowLabel || '').trim().toLowerCase().startsWith('topics:');
+    return {
+      topicSummaries: summaries.filter(isTopic),
+      shortSummaries: summaries.filter((s) => !isTopic(s)),
+    };
+  }, [lecture?.summaries]);
+
+  const handleSeek = (ms: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = Math.max(0, ms / 1000);
+  };
+
+  return (
+    <div className="wv-container">
+      <div className="wv-header">
+        <div className="wv-title-row">
+          <button className="wv-btn" onClick={onBack}>
+            <ArrowLeft size={16} />
+            Back
+          </button>
+        </div>
+
+        {isLoading && <div className="wv-subtitle">Loading…</div>}
+        {error && <div className="wv-error">{error}</div>}
+      </div>
+
+      {lecture && (
+        <>
+          <div className="wv-card">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <BookOpen size={18} color="var(--accent)" />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>{lecture.title}</div>
+                <div className="wv-meta">
+                  <span className="wv-meta-item">
+                    <Calendar size={14} color="var(--muted)" />
+                    {lecture.date} | {lecture.time}
+                  </span>
+                  <span className="wv-meta-item">
+                    <Clock size={14} color="var(--muted)" />
+                    {lecture.duration}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {lecture.hasVideo ? (
+              <video
+                ref={videoRef}
+                className="wv-video"
+                controls
+                playsInline
+                preload="metadata"
+                src={`/api/lectures/${encodeURIComponent(lecture.id)}/video`}
+              />
+            ) : (
+              <div className="wv-empty">No video available for this recording.</div>
+            )}
+          </div>
+
+          <div className="wv-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div className="wv-tabs">
+              <button className={`wv-tab ${tab === 'transcript' ? 'wv-tab-active' : ''}`} onClick={() => setTab('transcript')}>
+                <FileText size={14} color={tab === 'transcript' ? 'var(--accent)' : 'var(--muted)'} />
+                Transcript ({lecture.transcripts.length})
+              </button>
+              <button className={`wv-tab ${tab === 'topics' ? 'wv-tab-active' : ''}`} onClick={() => setTab('topics')}>
+                <BarChart3 size={14} color={tab === 'topics' ? 'var(--accent)' : 'var(--muted)'} />
+                3-Min Topics ({topicSummaries.length})
+              </button>
+              <button className={`wv-tab ${tab === 'short' ? 'wv-tab-active' : ''}`} onClick={() => setTab('short')}>
+                <Film size={14} color={tab === 'short' ? 'var(--accent)' : 'var(--muted)'} />
+                Short ({shortSummaries.length})
+              </button>
+            </div>
+
+            {tab === 'transcript' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {lecture.transcripts.length === 0 ? (
+                  <div className="wv-empty">No transcripts available</div>
+                ) : (
+                  lecture.transcripts.map((t, idx) => {
+                    const ms = typeof t.timestampMs === 'number' ? t.timestampMs : parseTimestampToMs(t.timestamp);
+                    return (
+                      <div
+                        key={idx}
+                        className="wv-block wv-card-pressable"
+                        onClick={() => handleSeek(ms)}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--accent)';
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--border)';
+                        }}
+                      >
+                        <div className="wv-block-title">{t.timestamp}</div>
+                        <div style={{ fontSize: 13, color: '#cccccc', lineHeight: 1.6 }}>{t.text}</div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {tab !== 'transcript' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {(tab === 'topics' ? topicSummaries : shortSummaries).length === 0 ? (
+                  <div className="wv-empty">No summaries available</div>
+                ) : (
+                  (tab === 'topics' ? topicSummaries : shortSummaries).map((s, idx) => (
+                    <div key={idx} className="wv-block">
+                      <div className="wv-block-title">{s.windowLabel}</div>
+                      <MarkdownBlock content={s.text} />
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+const WebViewerApp: React.FC = () => {
+  const route = useRoute();
+
+  if (route.page === 'detail' && route.id) {
+    return (
+      <LectureDetailPage
+        lectureId={route.id}
+        onBack={() => {
+          window.location.hash = '#/';
+        }}
+      />
+    );
+  }
+
+  return (
+    <LectureListPage
+      onOpen={(id) => {
+        window.location.hash = `#/lecture/${encodeURIComponent(id)}`;
+      }}
+    />
+  );
+};
+
+export default WebViewerApp;
+
