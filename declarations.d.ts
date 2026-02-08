@@ -93,6 +93,10 @@ interface ElectronAPI {
   startWebViewer: (portOverride?: number) => Promise<{success: boolean; port?: number; error?: string; running?: boolean}>;
   stopWebViewer: () => Promise<{success: boolean; error?: string}>;
   getWebViewerStatus: () => Promise<{success: boolean; running: boolean; port: number; lastError?: string | null}>;
+  getWebViewerTranscodeJobs: () => Promise<{success: boolean; jobs?: any[]; error?: string}>;
+  cancelWebViewerTranscode: (lectureId: string) => Promise<{success: boolean; error?: string}>;
+  onWebViewerTranscode: (callback: (payload: any) => void) => void;
+  removeWebViewerTranscodeListeners: () => void;
 
   // Remote full-video upload (client/server inbox)
   getInboxStatus: () => Promise<{success: boolean; status?: any; error?: string}>;

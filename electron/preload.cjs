@@ -508,6 +508,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getWebViewerStatus: async () => {
     return await ipcRenderer.invoke('webviewer:status');
   },
+  getWebViewerTranscodeJobs: async () => {
+    return await ipcRenderer.invoke('webviewer:transcodeList');
+  },
+  cancelWebViewerTranscode: async (lectureId) => {
+    return await ipcRenderer.invoke('webviewer:transcodeCancel', lectureId);
+  },
+  onWebViewerTranscode: (callback) => {
+    ipcRenderer.on('webviewer:transcode', (_event, payload) => callback(payload));
+  },
+  removeWebViewerTranscodeListeners: () => {
+    ipcRenderer.removeAllListeners('webviewer:transcode');
+  },
 
   // YouTube downloader (Python yt_dlp in .venv)
   downloadYouTube: async (url, onProgress, options) => {

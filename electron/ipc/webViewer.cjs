@@ -2,6 +2,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
+const { spawn, spawnSync } = require('child_process');
 
 function safeDecodePath(p) {
   try {
@@ -26,6 +27,152 @@ function guessContentType(filePath) {
   if (ext === '.mp4') return 'video/mp4';
   if (ext === '.webm') return 'video/webm';
   return 'application/octet-stream';
+}
+
+function findFfmpegExe() {
+  const fromEnv = process.env.FFMPEG_EXE || process.env.VIDEOCONTEXT_FFMPEG_EXE;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+
+  const shim = path.join(__dirname, '..', '..', 'qwen_worker', '.ffmpeg_shim', 'ffmpeg.exe');
+  if (fs.existsSync(shim)) return shim;
+
+  try {
+    const res = spawnSync('where', ['ffmpeg'], { encoding: 'utf8' });
+    if (res.status === 0) {
+      const first = String(res.stdout || '').split(/\r?\n/).find(Boolean);
+      if (first && fs.existsSync(first.trim())) return first.trim();
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+function findFfprobeExe() {
+  const ffmpegExe = findFfmpegExe();
+  if (ffmpegExe && typeof ffmpegExe === 'string' && /ffmpeg\.exe$/i.test(ffmpegExe)) {
+    const candidate = ffmpegExe.replace(/ffmpeg\.exe$/i, 'ffprobe.exe');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const res = spawnSync('where', ['ffprobe'], { encoding: 'utf8' });
+    if (res.status === 0) {
+      const first = String(res.stdout || '').split(/\r?\n/).find(Boolean);
+      if (first && fs.existsSync(first.trim())) return first.trim();
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+async function probeDurationMs(videoPath) {
+  const input = String(videoPath || '').trim();
+  if (!input) throw new Error('Missing videoPath');
+
+  const errors = [];
+  const ffprobeExe = findFfprobeExe();
+  if (ffprobeExe) {
+    try {
+      const seconds = await new Promise((resolve, reject) => {
+        const child = spawn(
+          ffprobeExe,
+          ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', input],
+          { windowsHide: true }
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (buf) => {
+          stdout += String(buf || '');
+        });
+        child.stderr.on('data', (buf) => {
+          stderr += String(buf || '');
+        });
+        child.on('error', (err) => reject(err));
+        child.on('close', (code) => {
+          if (code !== 0) return reject(new Error(stderr || `ffprobe exited with code ${code}`));
+          const s = Number(String(stdout || '').trim());
+          if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid format duration'));
+          resolve(s);
+        });
+      });
+      return Math.round(seconds * 1000);
+    } catch (err1) {
+      const msg1 = err1 instanceof Error ? err1.message : String(err1);
+      errors.push(`format: ${msg1}`);
+    }
+
+    try {
+      const seconds = await new Promise((resolve, reject) => {
+        const child = spawn(
+          ffprobeExe,
+          [
+            '-v',
+            'error',
+            '-select_streams',
+            'v:0',
+            '-show_entries',
+            'stream=duration',
+            '-of',
+            'default=nw=1:nk=1',
+            input,
+          ],
+          { windowsHide: true }
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (buf) => {
+          stdout += String(buf || '');
+        });
+        child.stderr.on('data', (buf) => {
+          stderr += String(buf || '');
+        });
+        child.on('error', (err) => reject(err));
+        child.on('close', (code) => {
+          if (code !== 0) return reject(new Error(stderr || `ffprobe stream probe exited with code ${code}`));
+          const s = Number(String(stdout || '').trim());
+          if (!Number.isFinite(s) || s <= 0) return reject(new Error('Invalid stream duration'));
+          resolve(s);
+        });
+      });
+      return Math.round(seconds * 1000);
+    } catch (err2) {
+      const msg2 = err2 instanceof Error ? err2.message : String(err2);
+      errors.push(`stream: ${msg2}`);
+    }
+  }
+
+  const ffmpegExe = findFfmpegExe();
+  if (!ffmpegExe) throw new Error(`ffmpeg not found; duration probe failed: ${errors.join('; ')}`);
+
+  try {
+    const ms = await new Promise((resolve, reject) => {
+      const child = spawn(ffmpegExe, ['-hide_banner', '-i', input], { windowsHide: true });
+      let stderr = '';
+      child.stderr.on('data', (buf) => {
+        stderr += String(buf || '');
+        if (stderr.length > 20000) stderr = stderr.slice(-20000);
+      });
+      child.on('error', (err) => reject(err));
+      child.on('close', () => {
+        const m = stderr.match(/Duration:\s*(\d+):(\d{2}):(\d{2})(?:\.(\d+))?/);
+        if (!m) return reject(new Error('Duration not found in ffmpeg output'));
+        const hh = Number(m[1]);
+        const mm = Number(m[2]);
+        const ss = Number(m[3]);
+        const frac = m[4] ? Number(`0.${m[4]}`) : 0;
+        if (![hh, mm, ss].every(Number.isFinite)) return reject(new Error('Invalid Duration parse'));
+        resolve(Math.round(((hh * 3600 + mm * 60 + ss) + frac) * 1000));
+      });
+    });
+    return ms;
+  } catch (err3) {
+    const msg3 = err3 instanceof Error ? err3.message : String(err3);
+    throw new Error(`All duration methods failed: ${errors.join('; ')}; ffmpeg: ${msg3}`);
+  }
 }
 
 function formatLectureFromMetadata(rec, index, baseId) {
@@ -160,7 +307,7 @@ async function readJsonFile(filePath) {
 }
 
 function setupWebViewerHandlers(ipcMain, options) {
-  const { getRecordingsDir, distDir: distDirOverride, defaultPort = 7558 } = options || {};
+  const { getRecordingsDir, distDir: distDirOverride, defaultPort = 7558, sendToRenderer } = options || {};
 
   const state = {
     running: false,
@@ -170,6 +317,22 @@ function setupWebViewerHandlers(ipcMain, options) {
 
   let server = null;
 
+  const transcode = {
+    jobs: new Map(),
+    queue: [],
+    runningLectureId: null,
+    runningChild: null,
+  };
+
+  const emitTranscodeEvent = (payload) => {
+    if (typeof sendToRenderer !== 'function') return;
+    try {
+      sendToRenderer('webviewer:transcode', payload);
+    } catch {
+      // ignore
+    }
+  };
+
   const getDistDir = () => {
     if (distDirOverride) return distDirOverride;
     return path.join(__dirname, '..', '..', 'dist');
@@ -178,6 +341,332 @@ function setupWebViewerHandlers(ipcMain, options) {
   const getRecordingsDirResolved = () => {
     if (typeof getRecordingsDir === 'function') return getRecordingsDir();
     return path.join(__dirname, '..', '..', '.recordings');
+  };
+
+  const getTranscodeJobSummary = (job) => {
+    const state = String(job?.state || 'idle');
+    const cancelRequested = Boolean(job?.cancelRequested);
+    const phase =
+      state === 'queued'
+        ? 'Queued'
+        : state === 'running'
+          ? cancelRequested
+            ? 'Cancelling…'
+            : 'Transcoding to MP4'
+          : state === 'complete'
+            ? 'Complete'
+            : state === 'cancelled'
+              ? 'Cancelled'
+              : state === 'error'
+                ? 'Error'
+                : 'Idle';
+
+    return {
+      lectureId: String(job?.lectureId || ''),
+      state,
+      phase,
+      percent: Number.isFinite(Number(job?.percent)) ? Number(job.percent) : 0,
+      error: job?.error ? String(job.error) : null,
+      updatedAt: Number(job?.updatedAt || Date.now()),
+    };
+  };
+
+  const listTranscodeJobs = () => {
+    return Array.from(transcode.jobs.values()).map(getTranscodeJobSummary);
+  };
+
+  const sendTranscodeUpdate = (job) => {
+    const summary = getTranscodeJobSummary(job);
+    emitTranscodeEvent({ type: 'update', job: summary });
+  };
+
+  const removeFromQueue = (lectureId) => {
+    const id = String(lectureId || '').trim();
+    if (!id) return;
+    transcode.queue = transcode.queue.filter((x) => x !== id);
+  };
+
+  const resolveVideoPathForLecture = async (lectureId, rec) => {
+    const recordingsDir = getRecordingsDirResolved();
+
+    const candidates = [];
+    if (rec?.videoFilename) candidates.push(String(rec.videoFilename));
+    if (rec?.videoPath) candidates.push(String(rec.videoPath).split(/[\\/]/).pop() || '');
+    candidates.push(`${lectureId}.webm`);
+
+    for (const c of candidates) {
+      const base = String(c || '').trim();
+      if (!base) continue;
+      const p = path.join(recordingsDir, path.basename(base));
+      try {
+        const st = await fsp.stat(p);
+        if (st.isFile()) return p;
+      } catch {
+        // ignore
+      }
+    }
+
+    return '';
+  };
+
+  const getMp4PathForLecture = (lectureId) => {
+    const recordingsDir = getRecordingsDirResolved();
+    return path.join(recordingsDir, `${lectureId}.mp4`);
+  };
+
+  const hasFile = async (filePath) => {
+    try {
+      const st = await fsp.stat(filePath);
+      return st.isFile() && st.size > 0;
+    } catch {
+      return false;
+    }
+  };
+
+  const startNextTranscode = () => {
+    if (transcode.runningChild || transcode.runningLectureId) return;
+
+    // Pick the next queued job in FIFO order.
+    while (transcode.queue.length > 0) {
+      const nextId = String(transcode.queue.shift() || '').trim();
+      if (!nextId) continue;
+      const job = transcode.jobs.get(nextId);
+      if (!job || job.state !== 'queued') continue;
+      void runTranscodeJob(job);
+      return;
+    }
+  };
+
+  const finalizeTranscodeJob = async (job, finalState, errorMessage) => {
+    job.state = finalState;
+    job.updatedAt = Date.now();
+    if (errorMessage) job.error = String(errorMessage);
+
+    if (finalState !== 'complete') {
+      try {
+        await fsp.unlink(job.outputPath);
+      } catch {
+        // ignore
+      }
+    }
+
+    sendTranscodeUpdate(job);
+  };
+
+  const runTranscodeJob = async (job) => {
+    const ffmpegExe = findFfmpegExe();
+    if (!ffmpegExe) {
+      await finalizeTranscodeJob(job, 'error', 'ffmpeg not found');
+      startNextTranscode();
+      return;
+    }
+
+    job.state = 'running';
+    job.error = null;
+    job.cancelRequested = false;
+    job.percent = 0;
+    job.updatedAt = Date.now();
+    sendTranscodeUpdate(job);
+
+    try {
+      if (!Number.isFinite(Number(job.durationMs)) || job.durationMs <= 0) {
+        job.durationMs = await probeDurationMs(job.inputPath);
+      }
+    } catch (e) {
+      // Duration is only for progress percentage; allow transcode to proceed without it.
+      job.durationMs = 0;
+    }
+
+    const recordingsDir = getRecordingsDirResolved();
+    await fsp.mkdir(recordingsDir, { recursive: true });
+
+    // Overwrite any partial output from a previous attempt.
+    try {
+      await fsp.unlink(job.outputPath);
+    } catch {
+      // ignore
+    }
+
+    const args = [
+      '-hide_banner',
+      '-y',
+      '-i',
+      job.inputPath,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '23',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-movflags',
+      '+faststart',
+      '-progress',
+      'pipe:1',
+      '-nostats',
+      job.outputPath,
+    ];
+
+    const child = spawn(ffmpegExe, args, { windowsHide: true });
+    transcode.runningChild = child;
+    transcode.runningLectureId = job.lectureId;
+
+    let stdoutBuf = '';
+    let stderrTail = '';
+    let lastEmitAt = 0;
+
+    const maybeEmitProgress = () => {
+      const now = Date.now();
+      if (now - lastEmitAt < 400) return;
+      lastEmitAt = now;
+      job.updatedAt = now;
+      sendTranscodeUpdate(job);
+    };
+
+    child.stdout.on('data', (buf) => {
+      stdoutBuf += String(buf || '');
+      const lines = stdoutBuf.split(/\r?\n/);
+      stdoutBuf = lines.pop() || '';
+
+      for (const line of lines) {
+        const idx = line.indexOf('=');
+        if (idx <= 0) continue;
+        const key = line.slice(0, idx).trim();
+        const value = line.slice(idx + 1).trim();
+
+        if (key === 'out_time_ms' || key === 'out_time_us') {
+          const outMs = key === 'out_time_us' ? Math.floor(Number(value) / 1000) : Number(value);
+          if (Number.isFinite(outMs) && outMs >= 0) {
+            job.outTimeMs = outMs;
+            if (Number.isFinite(Number(job.durationMs)) && job.durationMs > 0) {
+              const pct = Math.max(0, Math.min(100, (outMs / job.durationMs) * 100));
+              job.percent = Math.floor(pct);
+            }
+            maybeEmitProgress();
+          }
+        }
+
+        if (key === 'progress' && value === 'end') {
+          maybeEmitProgress();
+        }
+      }
+    });
+
+    child.stderr.on('data', (buf) => {
+      stderrTail = (stderrTail + String(buf || '')).slice(-4000);
+    });
+
+    child.on('close', async (code) => {
+      const wasCancelled = Boolean(job.cancelRequested);
+
+      transcode.runningChild = null;
+      transcode.runningLectureId = null;
+
+      if (wasCancelled) {
+        await finalizeTranscodeJob(job, 'cancelled');
+        startNextTranscode();
+        return;
+      }
+
+      if (code === 0 && (await hasFile(job.outputPath))) {
+        job.percent = 100;
+        await finalizeTranscodeJob(job, 'complete');
+        startNextTranscode();
+        return;
+      }
+
+      await finalizeTranscodeJob(job, 'error', stderrTail || `ffmpeg exited with code ${code}`);
+      startNextTranscode();
+    });
+
+    child.on('error', async (err) => {
+      transcode.runningChild = null;
+      transcode.runningLectureId = null;
+      await finalizeTranscodeJob(job, 'error', String(err?.message || err));
+      startNextTranscode();
+    });
+  };
+
+  const ensureTranscodeJob = async (lectureId, rec) => {
+    const id = String(lectureId || '').trim();
+    if (!id) return { success: false, error: 'Missing lecture id' };
+
+    const outputPath = getMp4PathForLecture(id);
+    if (await hasFile(outputPath)) {
+      const existing = transcode.jobs.get(id);
+      if (existing) {
+        existing.state = 'complete';
+        existing.percent = 100;
+        existing.updatedAt = Date.now();
+        sendTranscodeUpdate(existing);
+      }
+      return { success: true, job: { lectureId: id, state: 'complete', percent: 100, phase: 'Complete' } };
+    }
+
+    const existingJob = transcode.jobs.get(id);
+    if (existingJob && (existingJob.state === 'queued' || existingJob.state === 'running')) {
+      return { success: true, job: getTranscodeJobSummary(existingJob) };
+    }
+
+    const inputPath = await resolveVideoPathForLecture(id, rec);
+    if (!inputPath || !String(inputPath).toLowerCase().endsWith('.webm')) {
+      return { success: false, error: 'No WebM source found to transcode' };
+    }
+
+    const job = {
+      lectureId: id,
+      inputPath,
+      outputPath,
+      state: 'queued',
+      percent: 0,
+      durationMs: 0,
+      outTimeMs: 0,
+      cancelRequested: false,
+      error: null,
+      updatedAt: Date.now(),
+    };
+
+    transcode.jobs.set(id, job);
+    removeFromQueue(id);
+    transcode.queue.push(id);
+    sendTranscodeUpdate(job);
+    startNextTranscode();
+
+    return { success: true, job: getTranscodeJobSummary(job) };
+  };
+
+  const cancelTranscodeJob = async (lectureId) => {
+    const id = String(lectureId || '').trim();
+    if (!id) return { success: false, error: 'Missing lecture id' };
+
+    const job = transcode.jobs.get(id);
+    if (!job) return { success: false, error: 'Job not found' };
+
+    if (job.state === 'queued') {
+      removeFromQueue(id);
+      await finalizeTranscodeJob(job, 'cancelled');
+      startNextTranscode();
+      return { success: true };
+    }
+
+    if (job.state === 'running') {
+      job.cancelRequested = true;
+      job.updatedAt = Date.now();
+      sendTranscodeUpdate(job);
+      try {
+        transcode.runningChild?.kill();
+      } catch {
+        // ignore
+      }
+      return { success: true };
+    }
+
+    return { success: true };
   };
 
   const respondJson = (res, statusCode, payload) => {
@@ -290,9 +779,9 @@ function setupWebViewerHandlers(ipcMain, options) {
       return;
     }
 
-    // /api/lectures/:id or /api/lectures/:id/video
+    // /api/lectures/:id or /api/lectures/:id/video or /api/lectures/:id/transcode
     const lecturePrefix = '/api/lectures/';
-    if (method === 'GET' && pathname.startsWith(lecturePrefix)) {
+    if (pathname.startsWith(lecturePrefix)) {
       const rest = pathname.slice(lecturePrefix.length);
       const [idRaw, sub] = rest.split('/').filter(Boolean);
       const lectureId = String(idRaw || '').trim();
@@ -312,11 +801,53 @@ function setupWebViewerHandlers(ipcMain, options) {
         return;
       }
 
+      if (sub === 'transcode') {
+        if (method === 'POST') {
+          const result = await ensureTranscodeJob(lectureId, rec);
+          respondJson(res, result.success ? 200 : 400, result);
+          return;
+        }
+
+        if (method === 'DELETE') {
+          const result = await cancelTranscodeJob(lectureId);
+          respondJson(res, result.success ? 200 : 400, result);
+          return;
+        }
+
+        if (method === 'GET') {
+          const outputPath = getMp4PathForLecture(lectureId);
+          const outputExists = await hasFile(outputPath);
+          const job = transcode.jobs.get(lectureId);
+          if (outputExists) {
+            respondJson(res, 200, { success: true, job: { lectureId, state: 'complete', percent: 100, phase: 'Complete' } });
+            return;
+          }
+          if (!job) {
+            respondJson(res, 200, { success: true, job: { lectureId, state: 'idle', percent: 0, phase: 'Idle' } });
+            return;
+          }
+          respondJson(res, 200, { success: true, job: getTranscodeJobSummary(job) });
+          return;
+        }
+
+        respondJson(res, 405, { success: false, error: 'Method not allowed' });
+        return;
+      }
+
       if (sub === 'video') {
+        if (method !== 'GET') {
+          respondJson(res, 405, { success: false, error: 'Method not allowed' });
+          return;
+        }
         const candidates = [];
+        // Prefer MP4 cache if present (Safari-friendly), then fall back to metadata candidates.
+        // Do not serve the MP4 while it is actively being generated (it may be incomplete).
+        const tj = transcode.jobs.get(lectureId);
+        const mp4InProgress = tj && (tj.state === 'queued' || tj.state === 'running');
+        if (!mp4InProgress) candidates.push(`${lectureId}.mp4`);
         if (rec?.videoFilename) candidates.push(String(rec.videoFilename));
         if (rec?.videoPath) candidates.push(String(rec.videoPath).split(/[\\/]/).pop() || '');
-        candidates.push(`${lectureId}.mp4`, `${lectureId}.webm`);
+        candidates.push(`${lectureId}.webm`);
 
         let videoPath = '';
         for (const c of candidates) {
@@ -343,11 +874,26 @@ function setupWebViewerHandlers(ipcMain, options) {
         return;
       }
 
+      if (sub) {
+        respondJson(res, 404, { success: false, error: 'Not found' });
+        return;
+      }
+
+      if (method !== 'GET') {
+        respondJson(res, 405, { success: false, error: 'Method not allowed' });
+        return;
+      }
+
+      const hasMp4 = await hasFile(path.join(recordingsDir, `${lectureId}.mp4`));
+      const hasWebm = await hasFile(path.join(recordingsDir, `${lectureId}.webm`));
+
       const lecture = {
         ...formatLectureFromMetadata(rec, 0, lectureId),
         transcripts: Array.isArray(rec?.transcripts) ? rec.transcripts : [],
         summaries: Array.isArray(rec?.summaries) ? rec.summaries : [],
         hasVideo: Boolean(rec?.videoPath && Number(rec?.fileSize || 0) > 0),
+        hasMp4,
+        hasWebm,
       };
 
       respondJson(res, 200, { success: true, lecture });
@@ -483,6 +1029,14 @@ function setupWebViewerHandlers(ipcMain, options) {
 
   ipcMain.handle('webviewer:status', async () => {
     return status();
+  });
+
+  ipcMain.handle('webviewer:transcodeList', async () => {
+    return { success: true, jobs: listTranscodeJobs() };
+  });
+
+  ipcMain.handle('webviewer:transcodeCancel', async (_event, lectureId) => {
+    return await cancelTranscodeJob(lectureId);
   });
 
   return { start, stop, status };

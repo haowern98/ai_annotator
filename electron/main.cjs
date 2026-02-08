@@ -685,6 +685,15 @@ function createWindow() {
     getRecordingsDir: getRecordingsDirFallback,
     distDir: path.join(__dirname, '../dist'),
     defaultPort: 7558,
+    sendToRenderer: (channel, payload) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(channel, payload);
+        }
+      } catch {
+        // ignore
+      }
+    },
   });
 
   // Load the app

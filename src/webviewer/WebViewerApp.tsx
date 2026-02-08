@@ -44,6 +44,16 @@ interface LectureDetailsData extends LectureListItem {
   transcripts: TranscriptEntry[];
   summaries: SummaryEntry[];
   hasVideo: boolean;
+  hasMp4?: boolean;
+  hasWebm?: boolean;
+}
+
+interface TranscodeJob {
+  lectureId: string;
+  state: 'idle' | 'queued' | 'running' | 'complete' | 'cancelled' | 'error';
+  phase: string;
+  percent: number;
+  error?: string | null;
 }
 
 function parseTimestampToMs(timestamp: string): number {
@@ -231,12 +241,18 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lecture, setLecture] = useState<LectureDetailsData | null>(null);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [transcodeJob, setTranscodeJob] = useState<TranscodeJob | null>(null);
+  const [videoSrcToken, setVideoSrcToken] = useState<number>(() => Date.now());
+  const [isStartingTranscode, setIsStartingTranscode] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       setIsLoading(true);
       setError(null);
+      setVideoError(null);
+      setTranscodeJob(null);
       try {
         const data = await fetchJson<{ success: boolean; lecture: LectureDetailsData }>(
           `/api/lectures/${encodeURIComponent(lectureId)}`
@@ -253,6 +269,79 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
       cancelled = true;
     };
   }, [lectureId]);
+
+  const fetchTranscodeStatus = async (): Promise<TranscodeJob | null> => {
+    if (!lecture) return null;
+    try {
+      const data = await fetchJson<{ success: boolean; job: TranscodeJob }>(
+        `/api/lectures/${encodeURIComponent(lecture.id)}/transcode`
+      );
+      if (!data?.job) return null;
+      setTranscodeJob(data.job);
+      return data.job;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!lecture) return;
+    if (!transcodeJob) return;
+    if (transcodeJob.state !== 'queued' && transcodeJob.state !== 'running') return;
+
+    let cancelled = false;
+    const interval = window.setInterval(async () => {
+      if (cancelled) return;
+      const job = await fetchTranscodeStatus();
+      if (!job) return;
+      if (job.state === 'complete') {
+        setLecture((prev) => (prev ? { ...prev, hasMp4: true } : prev));
+        setVideoError(null);
+        setVideoSrcToken(Date.now());
+      }
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [lecture, transcodeJob?.state]);
+
+  const handleStartTranscode = async () => {
+    if (!lecture) return;
+    setIsStartingTranscode(true);
+    try {
+      const res = await fetch(`/api/lectures/${encodeURIComponent(lecture.id)}/transcode`, { method: 'POST' });
+      const text = await res.text();
+      const json = JSON.parse(text);
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `${res.status} ${res.statusText}` || 'Failed to start transcode');
+      }
+      if (json?.job) setTranscodeJob(json.job);
+      await fetchTranscodeStatus();
+    } catch (e: any) {
+      setTranscodeJob({
+        lectureId: lecture.id,
+        state: 'error',
+        phase: 'Error',
+        percent: 0,
+        error: String(e?.message || e),
+      });
+    } finally {
+      setIsStartingTranscode(false);
+    }
+  };
+
+  const handleCancelTranscode = async () => {
+    if (!lecture) return;
+    try {
+      await fetch(`/api/lectures/${encodeURIComponent(lecture.id)}/transcode`, { method: 'DELETE' });
+    } catch {
+      // ignore
+    } finally {
+      await fetchTranscodeStatus();
+    }
+  };
 
   const { topicSummaries, shortSummaries } = useMemo(() => {
     const summaries = lecture?.summaries || [];
@@ -304,14 +393,77 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
             </div>
 
             {lecture.hasVideo ? (
-              <video
-                ref={videoRef}
-                className="wv-video"
-                controls
-                playsInline
-                preload="metadata"
-                src={`/api/lectures/${encodeURIComponent(lecture.id)}/video`}
-              />
+              <div className="wv-video-wrap">
+                <video
+                  key={videoSrcToken}
+                  ref={videoRef}
+                  className="wv-video"
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={`/api/lectures/${encodeURIComponent(lecture.id)}/video?v=${videoSrcToken}`}
+                  onError={async () => {
+                    setVideoError('Playback failed');
+                    // If MP4 isn't available yet, show prompt/progress for on-demand conversion.
+                    if (!lecture.hasMp4) {
+                      await fetchTranscodeStatus();
+                    }
+                  }}
+                  onCanPlay={() => setVideoError(null)}
+                />
+
+                {videoError && !lecture.hasMp4 && (
+                  <div className="wv-video-overlay">
+                    <div className="wv-video-overlay-card">
+                      <div className="wv-video-overlay-title">This device can’t play this video</div>
+                      <div className="wv-video-overlay-sub">
+                        Generate an MP4 copy (Safari-compatible). The original WebM will be kept.
+                      </div>
+
+                      {(transcodeJob?.state === 'queued' || transcodeJob?.state === 'running') && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                            {transcodeJob.phase} {Number.isFinite(transcodeJob.percent) ? `(${transcodeJob.percent}%)` : ''}
+                          </div>
+                          <div className="wv-progress">
+                            <div className="wv-progress-bar" style={{ width: `${Math.max(0, Math.min(100, transcodeJob.percent || 0))}%` }} />
+                          </div>
+                        </div>
+                      )}
+
+                      {transcodeJob?.state === 'error' && transcodeJob?.error && (
+                        <div className="wv-error" style={{ marginTop: 8 }}>
+                          {transcodeJob.error}
+                        </div>
+                      )}
+
+                      <div className="wv-video-overlay-actions">
+                        {(transcodeJob?.state === 'queued' || transcodeJob?.state === 'running') ? (
+                          <button className="wv-btn wv-btn-secondary" onClick={handleCancelTranscode}>
+                            Cancel
+                          </button>
+                        ) : (
+                          <button className="wv-btn wv-btn-secondary" onClick={() => setVideoSrcToken(Date.now())}>
+                            Retry
+                          </button>
+                        )}
+
+                        <button
+                          className="wv-btn wv-btn-primary"
+                          onClick={handleStartTranscode}
+                          disabled={isStartingTranscode || transcodeJob?.state === 'queued' || transcodeJob?.state === 'running'}
+                        >
+                          {isStartingTranscode
+                            ? 'Starting…'
+                            : (transcodeJob?.state === 'queued' || transcodeJob?.state === 'running')
+                              ? 'Generating…'
+                              : 'Generate MP4'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="wv-empty">No video available for this recording.</div>
             )}
@@ -406,4 +558,3 @@ const WebViewerApp: React.FC = () => {
 };
 
 export default WebViewerApp;
-

@@ -33,6 +33,15 @@ interface LectureHomeSidebarProps {
   onClearCompleted?: () => void;
 }
 
+type WebViewerTranscodeJob = {
+  lectureId: string;
+  state: 'idle' | 'queued' | 'running' | 'complete' | 'cancelled' | 'error' | string;
+  phase?: string;
+  percent?: number;
+  error?: string | null;
+  updatedAt?: number;
+};
+
 const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
   uploadQueue,
   onCancelVideo,
@@ -47,6 +56,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
   const [isCheckingServer, setIsCheckingServer] = useState(false);
   const [qwenActivity, setQwenActivity] = useState<any | null>(null);
   const [inboxActivity, setInboxActivity] = useState<any | null>(null);
+  const [transcodeJobs, setTranscodeJobs] = useState<WebViewerTranscodeJob[]>([]);
 
   // Load remote config on mount
   useEffect(() => {
@@ -116,6 +126,42 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
     api.onInboxActivity((activity: any) => setInboxActivity(activity));
     return () => {
       // Do not remove inbox listeners here; App.tsx owns the file-received subscription.
+    };
+  }, []);
+
+  // Subscribe to web viewer transcode jobs (any mode)
+  useEffect(() => {
+    const api = window.electronAPI as any;
+    if (!api?.getWebViewerTranscodeJobs || !api?.onWebViewerTranscode) return;
+
+    let cancelled = false;
+
+    api.getWebViewerTranscodeJobs()
+      .then((res: any) => {
+        if (cancelled) return;
+        if (res?.success && Array.isArray(res.jobs)) {
+          setTranscodeJobs(res.jobs);
+        }
+      })
+      .catch(() => {});
+
+    const onEvent = (payload: any) => {
+      const job = payload?.job;
+      if (!job?.lectureId) return;
+      setTranscodeJobs((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex((x) => x.lectureId === job.lectureId);
+        if (idx >= 0) next[idx] = { ...next[idx], ...job };
+        else next.unshift(job);
+        // Keep list reasonably small
+        return next.slice(0, 20);
+      });
+    };
+
+    api.onWebViewerTranscode(onEvent);
+    return () => {
+      cancelled = true;
+      api.removeWebViewerTranscodeListeners?.();
     };
   }, []);
 
@@ -297,6 +343,38 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
     error: uploadQueue.filter((v) => v.status === 'error').length,
   };
 
+  const transcodeStats = {
+    total: transcodeJobs.length,
+    processing: transcodeJobs.filter((j) => j.state === 'queued' || j.state === 'running').length,
+    complete: transcodeJobs.filter((j) => j.state === 'complete').length,
+    error: transcodeJobs.filter((j) => j.state === 'error').length,
+    cancelled: transcodeJobs.filter((j) => j.state === 'cancelled').length,
+  };
+
+  const combinedStats = {
+    total: stats.total + transcodeStats.total,
+    processing: stats.processing + transcodeStats.processing,
+    complete: stats.complete + transcodeStats.complete,
+    error: stats.error + transcodeStats.error,
+  };
+
+  const hasClearableTranscodes = transcodeJobs.some((j) => j.state === 'complete' || j.state === 'error' || j.state === 'cancelled');
+
+  const handleClearCompletedClick = () => {
+    onClearCompleted?.();
+    setTranscodeJobs((prev) => prev.filter((j) => j.state === 'queued' || j.state === 'running'));
+  };
+
+  const handleCancelTranscode = async (lectureId: string) => {
+    const api = window.electronAPI as any;
+    if (!api?.cancelWebViewerTranscode) return;
+    try {
+      await api.cancelWebViewerTranscode(lectureId);
+    } catch {
+      // ignore
+    }
+  };
+
   const isConnectedToRemote = remoteConfig?.mode === 'client' && remoteConfig?.remoteUrl;
   const isServerMode = remoteConfig?.mode === 'server';
 
@@ -388,16 +466,74 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
             <h3 className="text-sm font-semibold text-white">Upload Queue</h3>
           </div>
           <div className="text-xs text-[#8a8a8a]">
-            {stats.processing > 0 ? `Processing ${stats.processing}` : `${stats.complete} / ${stats.total} complete`}
+            {combinedStats.processing > 0
+              ? `Processing ${combinedStats.processing}`
+              : `${combinedStats.complete} / ${combinedStats.total} complete`}
           </div>
         </div>
         <div className="border-t border-[#3a3a3a] pt-3 mt-3 overflow-y-auto flex-1">
-          {uploadQueue.length === 0 ? (
+          {uploadQueue.length === 0 && transcodeJobs.length === 0 ? (
             <div className="text-center py-8 text-[#8a8a8a] text-sm">
               No videos in queue
             </div>
           ) : (
             <div className="space-y-4">
+              {transcodeJobs.map((job) => (
+                <div
+                  key={`transcode-${job.lectureId}`}
+                  className={`space-y-2 p-3 rounded-lg border ${
+                    job.state === 'error' ? 'border-[#ef4444]' : 'border-[#333333]'
+                  } bg-[#1a1a1a]`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      {job.state === 'running' || job.state === 'queued' ? (
+                        <Loader2 className="w-5 h-5 text-[#0E72ED] animate-spin flex-shrink-0" />
+                      ) : job.state === 'complete' ? (
+                        <CheckCircle2 className="w-5 h-5 text-[#10b981] flex-shrink-0" />
+                      ) : job.state === 'error' ? (
+                        <XCircle className="w-5 h-5 text-[#ef4444] flex-shrink-0" />
+                      ) : job.state === 'cancelled' ? (
+                        <X className="w-5 h-5 text-[#8a8a8a] flex-shrink-0" />
+                      ) : (
+                        <Clock className="w-5 h-5 text-[#8a8a8a] flex-shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-white font-medium truncate">
+                          {job.lectureId}
+                        </div>
+                        <div className="text-xs text-[#8a8a8a] truncate">
+                          MP4 Transcode {'\u00b7'} {job.phase || (job.state === 'running' ? 'Transcoding to MP4' : job.state)}
+                        </div>
+                      </div>
+                    </div>
+                    {(job.state === 'queued' || job.state === 'running') && (
+                      <button
+                        onClick={() => handleCancelTranscode(job.lectureId)}
+                        className="px-3 py-1 text-xs text-[#8a8a8a] hover:text-white hover:bg-[#2a2a2a] rounded transition-colors flex-shrink-0 border border-[#444444]"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+
+                  {(job.state === 'queued' || job.state === 'running') && (
+                    <div className="w-full bg-[#2a2a2a] rounded-full h-1 overflow-hidden">
+                      <div
+                        className="bg-[#0E72ED] h-full rounded-full transition-all duration-300"
+                        style={{ width: `${Math.max(0, Math.min(100, Number(job.percent || 0)))}%` }}
+                      />
+                    </div>
+                  )}
+
+                  {job.state === 'error' && job.error && (
+                    <div className="mt-1 p-2 bg-[rgba(239,68,68,0.1)] border border-[rgba(239,68,68,0.3)] rounded text-xs text-[#ef4444]">
+                      {job.error}
+                    </div>
+                  )}
+                </div>
+              ))}
+
               {uploadQueue.map((video) => (
                 <div
                   key={video.id}
@@ -481,10 +617,10 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
 
         <div className="border-t border-[#3a3a3a] pt-3 mt-3 flex items-center justify-between gap-3">
           <button
-            onClick={() => onClearCompleted?.()}
-            disabled={!onClearCompleted || (stats.complete === 0 && stats.error === 0)}
+            onClick={handleClearCompletedClick}
+            disabled={!onClearCompleted || ((stats.complete === 0 && stats.error === 0) && !hasClearableTranscodes)}
             className={`px-4 py-2 text-sm rounded border transition-colors ${
-              !onClearCompleted || (stats.complete === 0 && stats.error === 0)
+              !onClearCompleted || ((stats.complete === 0 && stats.error === 0) && !hasClearableTranscodes)
                 ? 'opacity-50 cursor-not-allowed border-[#444444] text-[#8a8a8a]'
                 : 'border-[#444444] text-[#8a8a8a] hover:text-white hover:bg-[#2a2a2a]'
             }`}
@@ -492,7 +628,7 @@ const LectureHomeSidebar: React.FC<LectureHomeSidebarProps> = ({
             Clear Completed
           </button>
           <div className="text-xs text-[#8a8a8a]">
-            {stats.total > 0 ? `${stats.complete} complete \u00b7 ${stats.error} errors` : ''}
+            {combinedStats.total > 0 ? `${combinedStats.complete} complete \u00b7 ${combinedStats.error} errors` : ''}
           </div>
         </div>
       </div>
