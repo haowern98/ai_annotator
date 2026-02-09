@@ -41,6 +41,49 @@ function sanitizeBaseFilename(name) {
   return safe || generateFilename();
 }
 
+function sanitizeTitle(title) {
+  const t = String(title ?? '').trim().replace(/\s+/g, ' ');
+  if (!t) return null;
+  return t.slice(0, 80);
+}
+
+function metaPathForId(dir, baseFilename) {
+  const safe = String(baseFilename || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+  return path.join(dir, `${safe}.meta.json`);
+}
+
+async function readTitleOverride(dir, baseFilename) {
+  const p = metaPathForId(dir, baseFilename);
+  try {
+    const content = await fs.readFile(p, 'utf8');
+    const obj = JSON.parse(content);
+    const t = sanitizeTitle(obj?.title);
+    return t;
+  } catch {
+    return null;
+  }
+}
+
+async function writeTitleOverride(dir, baseFilename, title) {
+  const p = metaPathForId(dir, baseFilename);
+  const t = sanitizeTitle(title);
+  if (!t) {
+    try {
+      await fs.unlink(p);
+    } catch {
+      // ignore
+    }
+    return { success: true, title: null, cleared: true };
+  }
+
+  const payload = {
+    title: t,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(p, JSON.stringify(payload, null, 2));
+  return { success: true, title: t, cleared: false };
+}
+
 function setupRecordingHandlers(ipcMain) {
   // Initialize and return recordings directory path
   ipcMain.handle('recording:init', async () => {
@@ -142,6 +185,7 @@ function setupRecordingHandlers(ipcMain) {
       // Find all metadata JSON files
       const metadataFiles = files.filter((f) => {
         if (!f.endsWith('.json')) return false;
+        if (f.endsWith('.meta.json')) return false;
         // Exclude auxiliary files (e.g. word timestamp dumps) that live next to metadata.
         if (f.endsWith('_words.json')) return false;
         // Exclude remote overlay manifests and per-chunk artifacts.
@@ -155,7 +199,11 @@ function setupRecordingHandlers(ipcMain) {
           try {
             const metadataPath = path.join(dir, filename);
             const content = await fs.readFile(metadataPath, 'utf8');
-            return JSON.parse(content);
+            const rec = JSON.parse(content);
+            const baseId = String(filename || '').replace(/\.json$/i, '');
+            const userTitle = await readTitleOverride(dir, baseId);
+            if (userTitle) rec.userTitle = userTitle;
+            return rec;
           } catch (err) {
             console.error('[Recording] Failed to read metadata:', filename, err);
             return null;
@@ -181,6 +229,7 @@ function setupRecordingHandlers(ipcMain) {
       const dir = await initRecordingsDir();
       const baseFilename = videoFilename.replace(/\.(webm|mp4|json)$/, '');
       const metadataPath = path.join(dir, `${baseFilename}.json`);
+      const metaPath = metaPathForId(dir, baseFilename);
 
       // Try to delete video file - support both .mp4 and .webm extensions
       const extensionsToTry = ['.mp4', '.webm'];
@@ -207,6 +256,15 @@ function setupRecordingHandlers(ipcMain) {
         throw new Error('Metadata file not found');
       }
 
+      // Delete title override file (if present)
+      try {
+        await fs.access(metaPath);
+        await fs.unlink(metaPath);
+        console.log('[Recording] Title override deleted:', metaPath);
+      } catch {
+        // ignore
+      }
+
       return { success: true };
     } catch (err) {
       console.error('[Recording] Failed to delete recording:', err);
@@ -223,10 +281,29 @@ function setupRecordingHandlers(ipcMain) {
 
       const metadataContent = await fs.readFile(metadataPath, 'utf-8');
       const metadata = JSON.parse(metadataContent);
+      const userTitle = await readTitleOverride(dir, baseFilename);
+      if (userTitle) metadata.userTitle = userTitle;
 
       return { success: true, metadata };
     } catch (err) {
       console.error('[Recording] Failed to read metadata:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Set or clear lecture display title override (stored in <lectureId>.meta.json).
+  ipcMain.handle('recording:setTitle', async (event, lectureId, title) => {
+    try {
+      const dir = await initRecordingsDir();
+      const id = String(lectureId || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+      if (!id) return { success: false, error: 'Missing lectureId' };
+
+      // Ensure the lecture exists (metadata file is the source of truth).
+      const metadataPath = path.join(dir, `${id}.json`);
+      await fs.access(metadataPath);
+
+      return await writeTitleOverride(dir, id, title);
+    } catch (err) {
       return { success: false, error: err.message };
     }
   });

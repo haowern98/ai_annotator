@@ -383,6 +383,62 @@ function formatLectureFromMetadata(rec, index, baseId) {
   };
 }
 
+function sanitizeTitleOverride(title) {
+  const t = String(title ?? '').trim().replace(/\s+/g, ' ');
+  if (!t) return null;
+  return t.slice(0, 80);
+}
+
+async function readTitleOverrideForLectureId(recordingsDir, lectureId) {
+  const safeId = String(lectureId || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+  if (!safeId) return null;
+  const metaPath = path.join(recordingsDir, `${safeId}.meta.json`);
+  try {
+    const raw = await fsp.readFile(metaPath, 'utf8');
+    const obj = JSON.parse(raw);
+    return sanitizeTitleOverride(obj?.title);
+  } catch {
+    return null;
+  }
+}
+
+async function writeTitleOverrideForLectureId(recordingsDir, lectureId, title) {
+  const safeId = String(lectureId || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+  if (!safeId) return { success: false, error: 'Missing lecture id' };
+  const metaPath = path.join(recordingsDir, `${safeId}.meta.json`);
+  const t = sanitizeTitleOverride(title);
+
+  if (!t) {
+    try {
+      await fsp.unlink(metaPath);
+    } catch {
+      // ignore
+    }
+    return { success: true, title: null, cleared: true };
+  }
+
+  const payload = { title: t, updatedAt: new Date().toISOString() };
+  await fsp.writeFile(metaPath, JSON.stringify(payload, null, 2));
+  return { success: true, title: t, cleared: false };
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  return await new Promise((resolve, reject) => {
+    req.on('data', (buf) => chunks.push(buf));
+    req.on('error', reject);
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if (!raw.trim()) return resolve({});
+        resolve(JSON.parse(raw));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
 async function readJsonFile(filePath) {
   const text = await fsp.readFile(filePath, 'utf8');
   return JSON.parse(text);
@@ -902,6 +958,7 @@ function setupWebViewerHandlers(ipcMain, options) {
         const name = String(f || '');
         const lower = name.toLowerCase();
         if (!lower.endsWith('.json')) return false;
+        if (lower.endsWith('.meta.json')) return false;
         if (!lower.startsWith('lecture_')) return false;
         if (lower.endsWith('_words.json')) return false;
         if (lower.endsWith('_manifest.json')) return false;
@@ -917,7 +974,10 @@ function setupWebViewerHandlers(ipcMain, options) {
           const metadataPath = path.join(recordingsDir, filename);
           const rec = await readJsonFile(metadataPath);
           const sortMs = Date.parse(String(rec?.savedAt || '')) || 0;
-          lecturesWithSortKey.push({ lecture: formatLectureFromMetadata(rec, i, baseId), sortMs });
+          const lecture = formatLectureFromMetadata(rec, i, baseId);
+          const override = await readTitleOverrideForLectureId(recordingsDir, baseId);
+          if (override) lecture.title = override;
+          lecturesWithSortKey.push({ lecture, sortMs });
         } catch {
           // ignore broken entries
         }
@@ -951,6 +1011,25 @@ function setupWebViewerHandlers(ipcMain, options) {
         rec = await readJsonFile(metadataPath);
       } catch {
         respondJson(res, 404, { success: false, error: 'Lecture not found' });
+        return;
+      }
+
+      if (sub === 'title') {
+        if (method !== 'POST' && method !== 'DELETE') {
+          respondJson(res, 405, { success: false, error: 'Method not allowed' });
+          return;
+        }
+        try {
+          let nextTitle = '';
+          if (method === 'POST') {
+            const body = await readJsonBody(req);
+            nextTitle = body?.title ?? '';
+          }
+          const result = await writeTitleOverrideForLectureId(recordingsDir, lectureId, method === 'DELETE' ? '' : nextTitle);
+          respondJson(res, result.success ? 200 : 400, result);
+        } catch (err) {
+          respondJson(res, 400, { success: false, error: err instanceof Error ? err.message : String(err) });
+        }
         return;
       }
 
@@ -1078,6 +1157,9 @@ function setupWebViewerHandlers(ipcMain, options) {
         hasMp4,
         hasWebm,
       };
+
+      const override = await readTitleOverrideForLectureId(recordingsDir, lectureId);
+      if (override) lecture.title = override;
 
       respondJson(res, 200, { success: true, lecture });
       return;

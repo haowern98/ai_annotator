@@ -30,6 +30,7 @@ interface RecordingMetadata {
   videoPath: string;
   savedAt: string;
   fileSize: number;
+  userTitle?: string | null;
 }
 
 interface HistoryHomeProps {
@@ -148,7 +149,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
             return {
               id: filename,
-              title: `Lecture ${formattedDate}`,
+              title: rec.userTitle ? String(rec.userTitle) : `Lecture ${formattedDate}`,
               date: formattedDate,
               time: formattedTime,
               duration: formattedDuration,
@@ -237,7 +238,16 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
   // Show lecture details if navigated to that view
   if (currentView === 'lecture-details') {
-    return <LectureDetails lectureId={selectedLectureId || undefined} />;
+    return (
+      <LectureDetails
+        lectureId={selectedLectureId || undefined}
+        onTitleUpdated={(id, newTitle) => {
+          setLectures((prev) =>
+            prev.map((l) => (l.id === id ? { ...l, title: newTitle } : l))
+          );
+        }}
+      />
+    );
   }
 
   return (

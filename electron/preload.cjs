@@ -427,6 +427,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('recording:metadata', videoFilename);
   },
 
+  // Set lecture title override (display only; does not rename files)
+  setRecordingTitle: async (lectureId, title) => {
+    return await ipcRenderer.invoke('recording:setTitle', lectureId, title);
+  },
+
   // Get video file data as base64
   getRecordingVideo: async (videoFilename) => {
     return await ipcRenderer.invoke('recording:getVideo', videoFilename);

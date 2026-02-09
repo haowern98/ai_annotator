@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Play, Pause, Download, BookOpen, Calendar, Clock, FileText, BarChart3, Film } from 'lucide-react';
+import { Play, Pause, Download, BookOpen, Calendar, Clock, FileText, BarChart3, Film, Pencil, Check, X } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -294,9 +294,10 @@ function processInlineFormatting(text: string, baseKey: number): React.ReactNode
 
 interface LectureDetailsProps {
   lectureId?: string;
+  onTitleUpdated?: (lectureId: string, title: string) => void;
 }
 
-const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
+const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, onTitleUpdated }) => {
   const [lectureData, setLectureData] = useState<LectureData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -306,6 +307,10 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoDurationMs, setVideoDurationMs] = useState(0);
   const [summaryTab, setSummaryTab] = useState<'topics' | 'short'>('topics');
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [isSavingTitle, setIsSavingTitle] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -403,9 +408,10 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
           // Format file size
           const fileSizeMB = meta.fileSize ? (meta.fileSize / 1024 / 1024).toFixed(2) : '0';
 
+          const userTitle = typeof meta.userTitle === 'string' ? meta.userTitle.trim() : '';
           setLectureData({
             id: filename,
-            title: `Lecture ${formattedDate}`,
+            title: userTitle ? userTitle : `Lecture ${formattedDate}`,
             date: formattedDate,
             time: formattedTime,
             duration: formattedDuration,
@@ -539,6 +545,48 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
     }
   };
 
+  const handleStartEditTitle = () => {
+    if (!lectureData || !lectureId) return;
+    setTitleError(null);
+    setDraftTitle(lectureData.title || '');
+    setIsEditingTitle(true);
+  };
+
+  const handleCancelEditTitle = () => {
+    setTitleError(null);
+    setIsEditingTitle(false);
+  };
+
+  const handleSaveTitle = async () => {
+    if (!lectureId) return;
+    const next = String(draftTitle || '').trim().replace(/\s+/g, ' ');
+    if (!next) {
+      setTitleError('Title cannot be empty');
+      return;
+    }
+    setIsSavingTitle(true);
+    setTitleError(null);
+    try {
+      const electronAPI = (window as any).electronAPI;
+      if (!electronAPI?.setRecordingTitle) {
+        setTitleError('setRecordingTitle not available');
+        return;
+      }
+      const res = await electronAPI.setRecordingTitle(lectureId, next);
+      if (!res?.success) {
+        setTitleError(String(res?.error || 'Failed to save title'));
+        return;
+      }
+      setLectureData((prev) => (prev ? { ...prev, title: next } : prev));
+      onTitleUpdated?.(lectureId, next);
+      setIsEditingTitle(false);
+    } catch (err: any) {
+      setTitleError(String(err?.message || err));
+    } finally {
+      setIsSavingTitle(false);
+    }
+  };
+
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = parseInt(e.target.value);
     isSeekingRef.current = true;
@@ -640,10 +688,105 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId }) => {
             <div style={{ flexShrink: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
                 <BookOpen size={18} color="#8a8a8a" />
-                <span style={{ fontSize: '16px', fontWeight: 600, color: '#ffffff' }}>
-                  {lectureData.title}
-                </span>
+                {!isEditingTitle ? (
+                  <>
+                    <span style={{ fontSize: '16px', fontWeight: 600, color: '#ffffff' }}>
+                      {lectureData.title}
+                    </span>
+                    <button
+                      onClick={handleStartEditTitle}
+                      title="Rename lecture"
+                      style={{
+                        marginLeft: '6px',
+                        background: 'transparent',
+                        border: '1px solid #333333',
+                        borderRadius: '8px',
+                        padding: '6px',
+                        cursor: 'pointer',
+                        color: '#8a8a8a',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        transition: 'all 0.15s',
+                      }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#2a2a2a';
+                        (e.currentTarget as HTMLButtonElement).style.color = '#ffffff';
+                        (e.currentTarget as HTMLButtonElement).style.borderColor = '#444444';
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
+                        (e.currentTarget as HTMLButtonElement).style.color = '#8a8a8a';
+                        (e.currentTarget as HTMLButtonElement).style.borderColor = '#333333';
+                      }}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                    <input
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      placeholder="Lecture title"
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        border: '1px solid #333333',
+                        backgroundColor: '#1a1a1a',
+                        color: '#ffffff',
+                        outline: 'none',
+                        fontSize: '14px',
+                      }}
+                    />
+                    <button
+                      onClick={handleSaveTitle}
+                      disabled={isSavingTitle}
+                      title="Save"
+                      style={{
+                        backgroundColor: '#0e72ed',
+                        border: '1px solid #0e72ed',
+                        borderRadius: '8px',
+                        padding: '8px',
+                        cursor: isSavingTitle ? 'not-allowed' : 'pointer',
+                        opacity: isSavingTitle ? 0.6 : 1,
+                        color: '#ffffff',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <Check size={14} />
+                    </button>
+                    <button
+                      onClick={handleCancelEditTitle}
+                      disabled={isSavingTitle}
+                      title="Cancel"
+                      style={{
+                        backgroundColor: 'transparent',
+                        border: '1px solid #333333',
+                        borderRadius: '8px',
+                        padding: '8px',
+                        cursor: isSavingTitle ? 'not-allowed' : 'pointer',
+                        opacity: isSavingTitle ? 0.6 : 1,
+                        color: '#8a8a8a',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
               </div>
+              {titleError && (
+                <div style={{ color: '#ef4444', fontSize: '12px', marginTop: '-4px', marginBottom: '6px' }}>
+                  {titleError}
+                </div>
+              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '13px', color: '#8a8a8a' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <Calendar size={18} color="#8a8a8a" />

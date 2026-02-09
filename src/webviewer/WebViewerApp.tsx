@@ -9,7 +9,10 @@ import {
   Clock,
   FileText,
   Film,
+  Pencil,
   Search,
+  Check,
+  X,
 } from 'lucide-react';
 
 type SummaryTab = 'transcript' | 'topics' | 'short';
@@ -271,6 +274,10 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
   const [transcodeJob, setTranscodeJob] = useState<TranscodeJob | null>(null);
   const [videoSrcToken, setVideoSrcToken] = useState<number>(() => Date.now());
   const [isStartingTranscode, setIsStartingTranscode] = useState(false);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [isSavingTitle, setIsSavingTitle] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -393,6 +400,52 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
     v.currentTime = Math.max(0, ms / 1000);
   };
 
+  const handleStartEditTitle = () => {
+    if (!lecture) return;
+    setTitleError(null);
+    setDraftTitle(lecture.title || '');
+    setIsEditingTitle(true);
+  };
+
+  const handleCancelEditTitle = () => {
+    setTitleError(null);
+    setIsEditingTitle(false);
+  };
+
+  const handleSaveTitle = async () => {
+    if (!lecture) return;
+    const next = String(draftTitle || '').trim().replace(/\s+/g, ' ');
+    if (!next) {
+      setTitleError('Title cannot be empty');
+      return;
+    }
+    setIsSavingTitle(true);
+    setTitleError(null);
+    try {
+      const res = await fetch(`/api/lectures/${encodeURIComponent(lecture.id)}/title`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ title: next }),
+      });
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        // ignore
+      }
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `${res.status} ${res.statusText}` || 'Failed to save title');
+      }
+      setLecture((prev) => (prev ? { ...prev, title: next } : prev));
+      setIsEditingTitle(false);
+    } catch (e: any) {
+      setTitleError(String(e?.message || e));
+    } finally {
+      setIsSavingTitle(false);
+    }
+  };
+
   return (
     <div className="wv-container wv-detail-container">
       {!lecture && isLoading && <div className="wv-card wv-subtitle">Loading…</div>}
@@ -405,18 +458,99 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
               <BookOpen size={18} color="var(--accent)" />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, justifyContent: 'space-between' }}>
-                  <div
-                    style={{
-                      fontSize: 16,
-                      fontWeight: 700,
-                      minWidth: 0,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {lecture.title}
-                  </div>
+                  {!isEditingTitle ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                      <div
+                        style={{
+                          fontSize: 16,
+                          fontWeight: 700,
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          flex: 1,
+                        }}
+                      >
+                        {lecture.title}
+                      </div>
+                      <button
+                        onClick={handleStartEditTitle}
+                        title="Rename lecture"
+                        style={{
+                          flexShrink: 0,
+                          background: 'transparent',
+                          border: '1px solid var(--border)',
+                          borderRadius: 10,
+                          padding: 8,
+                          color: 'var(--muted)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                      <input
+                        value={draftTitle}
+                        onChange={(e) => setDraftTitle(e.target.value)}
+                        placeholder="Lecture title"
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          padding: '10px 12px',
+                          borderRadius: 12,
+                          border: '1px solid var(--border)',
+                          background: 'var(--panel-2)',
+                          color: 'var(--text)',
+                          fontSize: 14,
+                          outline: 'none',
+                        }}
+                      />
+                      <button
+                        onClick={handleSaveTitle}
+                        disabled={isSavingTitle}
+                        title="Save"
+                        style={{
+                          flexShrink: 0,
+                          background: 'var(--accent)',
+                          border: '1px solid var(--accent)',
+                          borderRadius: 12,
+                          padding: 10,
+                          color: 'white',
+                          opacity: isSavingTitle ? 0.6 : 1,
+                          cursor: isSavingTitle ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        onClick={handleCancelEditTitle}
+                        disabled={isSavingTitle}
+                        title="Cancel"
+                        style={{
+                          flexShrink: 0,
+                          background: 'transparent',
+                          border: '1px solid var(--border)',
+                          borderRadius: 12,
+                          padding: 10,
+                          color: 'var(--muted)',
+                          opacity: isSavingTitle ? 0.6 : 1,
+                          cursor: isSavingTitle ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  )}
                   {(isLoading || error) && (
                     <div
                       className={error ? 'wv-badge-danger' : 'wv-badge-muted'}
@@ -426,6 +560,7 @@ const LectureDetailPage: React.FC<{ lectureId: string; onBack: () => void }> = (
                     </div>
                   )}
                 </div>
+                {titleError && <div className="wv-error">{titleError}</div>}
                 <div className="wv-meta">
                   <span className="wv-meta-item">
                     <Calendar size={14} color="var(--muted)" />
