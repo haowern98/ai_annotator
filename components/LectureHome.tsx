@@ -1529,73 +1529,50 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           );
 
           const storedFileName = `${cfg.baseFilename}_chunk_${String(chunkIndex).padStart(4, '0')}.webm`;
-          localChunkPaths.push(String(writeRes.videoPath));
 
           const jobId = `${cfg.sessionId}_chunk_${String(chunkIndex).padStart(4, '0')}`;
           
           // Determine chunk duration for transcript alignment.
           // Prefer probing the written chunk file (ffprobe) so offsets match the actual playback timeline.
-          let durationMs = 0;
           const wallClockMs = Math.round(chunkEndWallMs - chunkStartWallMs);
 
-          let probedMs: number | null = null;
+          let durationMs: number | null = null;
           try {
             if (electronAPI?.getVideoDurationMs && writeRes?.videoPath) {
               const durRes = await electronAPI.getVideoDurationMs(String(writeRes.videoPath));
               const d = Number(durRes?.durationMs);
               if (durRes?.success && Number.isFinite(d) && d > 0) {
-                probedMs = Math.round(d);
+                durationMs = Math.round(d);
               }
             }
           } catch {
-            probedMs = null;
+            durationMs = null;
           }
 
-          if (probedMs !== null) {
-            durationMs = probedMs;
+          if (durationMs !== null) {
             addLog(
               `[RemoteOverlay] Chunk ${chunkIndex} duration: ${formatTimestamp(durationMs)} (ffprobe) vs ${formatTimestamp(wallClockMs)} (wall-clock)`,
               LogLevel.INFO
             );
-          } else if (collected.firstTimecode !== null && collected.lastTimecode !== null) {
-            const baseMs = Math.max(0, collected.lastTimecode - collected.firstTimecode);
-            const deltas = Array.isArray(collected.timecodeDeltas) ? collected.timecodeDeltas : [];
-            const recent = deltas
-              .slice(-6)
-              .map((d) => Number(d))
-              .filter((d) => Number.isFinite(d) && d > 0 && d < 10_000);
-
-            let sliceEstimateMs = 0;
-            if (recent.length) {
-              const sorted = recent.slice().sort((a, b) => a - b);
-              sliceEstimateMs = sorted[Math.floor(sorted.length / 2)];
-            }
-
-            // BlobEvent.timecode is the *start* timestamp of each slice. Add an estimated tail so we
-            // count the final slice's duration too (no cumulative drift across chunks).
-            const remainderMs = Math.max(0, wallClockMs - baseMs);
-            let tailMs = 0;
-            if (sliceEstimateMs > 0) {
-              tailMs = sliceEstimateMs;
-              // If we stopped mid-slice, wall-clock remainder is smaller than the typical slice.
-              if (remainderMs <= tailMs) tailMs = remainderMs;
-            } else {
-              // Fallback: derive tail from wall-clock if we have no deltas.
-              tailMs = remainderMs;
-            }
-
-            durationMs = Math.max(1, Math.round(baseMs + tailMs));
-            addLog(
-              `[RemoteOverlay] Chunk ${chunkIndex} duration: ${formatTimestamp(durationMs)} (MediaRecorder timecode) vs ${formatTimestamp(wallClockMs)} (wall-clock)`,
-              LogLevel.INFO
-            );
           } else {
-            durationMs = Math.max(1, wallClockMs);
-            addLog(
-              `[RemoteOverlay] Chunk ${chunkIndex} duration: ${formatTimestamp(durationMs)} (wall-clock fallback - no timecodes)`,
-              LogLevel.WARN
-            );
+            const msg = `ffprobe failed; cannot align transcript for this chunk (chunk=${chunkIndex}). Keeping chunk file on disk and stopping overlay session.`;
+            addLog(`[RemoteOverlay] ${msg}`, LogLevel.ERROR);
+            setError(msg);
+            try {
+              const isSessionActive = remoteOverlayCurrentSessionIdRef.current === sessionId;
+              if (isSessionActive) {
+                (window.electronAPI as any)?.updateLectureStatus?.(JSON.stringify({ remotePhase: `Error: ffprobe failed` }));
+              }
+            } catch {
+              // ignore
+            }
+            // Stop overlay session to avoid accumulating incorrect offsets. Do not enqueue/upload this chunk.
+            stopRemoteOverlaySession();
+            return;
           }
+
+          // Only include chunks in the session once we have a reliable duration (ffprobe).
+          localChunkPaths.push(String(writeRes.videoPath));
           sessionState.chunkMetaByJobId.set(jobId, { offsetMs: chunkOffsetMs, durationMs });
           sessionState.cumulativeMediaMs = chunkOffsetMs + durationMs;
           remoteOverlayCumulativeMediaMsRef.current = sessionState.cumulativeMediaMs;
