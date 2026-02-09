@@ -1149,6 +1149,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
           if (cfg.recordingEnabled) {
             // Merge local chunks and save recording + metadata with the final lecture_* name.
+            if (!session.localChunkPaths || session.localChunkPaths.length === 0) {
+              throw new Error('No valid overlay chunks to merge (session aborted before any chunk could be aligned).');
+            }
             const outPath = `${session.recordingsDir}\\${outBase}.webm`;
             await electronAPI.concatWebm(session.localChunkPaths, outPath);
             const meta = {
@@ -1535,6 +1538,34 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           // Determine chunk duration for transcript alignment.
           // Prefer probing the written chunk file (ffprobe) so offsets match the actual playback timeline.
           const wallClockMs = Math.round(chunkEndWallMs - chunkStartWallMs);
+
+          // MediaRecorder can produce WebM chunks with "Duration: N/A" until the container is remuxed.
+          // Remux in-place (no re-encode) to force a usable duration/index for ffprobe.
+          try {
+            if (electronAPI?.remuxVideoInPlace && writeRes?.videoPath) {
+              addLog(`[RemoteOverlay] Remuxing chunk ${chunkIndex} for duration metadata...`, LogLevel.INFO);
+              const remuxRes = await electronAPI.remuxVideoInPlace(String(writeRes.videoPath));
+              if (remuxRes && remuxRes.success === false) {
+                throw new Error(String(remuxRes.error || 'Remux failed'));
+              }
+            }
+          } catch (e) {
+            const errMsg = e instanceof Error ? e.message : String(e);
+            const msg = `ffmpeg remux failed; cannot align transcript for this chunk (chunk=${chunkIndex}): ${errMsg}`;
+            addLog(`[RemoteOverlay] ${msg}`, LogLevel.ERROR);
+            setError(msg);
+            try {
+              const isSessionActive = remoteOverlayCurrentSessionIdRef.current === sessionId;
+              if (isSessionActive) {
+                (window.electronAPI as any)?.updateLectureStatus?.(JSON.stringify({ remotePhase: `Error: remux failed` }));
+              }
+            } catch {
+              // ignore
+            }
+            // Stop overlay session to avoid accumulating incorrect offsets. Do not enqueue/upload this chunk.
+            stopRemoteOverlaySession();
+            return;
+          }
 
           let durationMs: number | null = null;
           try {
