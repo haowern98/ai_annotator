@@ -25,7 +25,7 @@ interface LectureHomeProps {
 }
 
 // Remote polling configuration
-const REMOTE_POLL_MAX_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+const REMOTE_POLL_MAX_DURATION_MS = 120 * 60 * 1000; // 120 minutes
 const REMOTE_POLL_MAX_CONSECUTIVE_FAILURES = 20;
 const REMOTE_POLL_DELAY_MS = 2500; // For YouTube/File uploads
 const REMOTE_OVERLAY_POLL_DELAY_MS = 1500; // For overlay chunks
