@@ -521,6 +521,7 @@ export class QwenHttpClient {
         : 0;
       
       const numWindows = Math.ceil(maxTime / WINDOW_SIZE_SECONDS);
+      let previousTopicTitles: string[] = [];
       
       for (let i = 0; i < numWindows; i++) {
         const windowStart = i * WINDOW_SIZE_SECONDS;
@@ -543,7 +544,14 @@ export class QwenHttpClient {
           `[Upload Queue] Summarizing topics for ${formatTime(windowStart)}-${formatTime(windowEnd)}…`
         );
         
-        const summary = await this.summarizeTopics(batchesInWindow);
+        if (previousTopicTitles.length) {
+          const preview = previousTopicTitles.slice(0, 10).join(' | ');
+          this.callbacks?.onProgress?.(
+            `[Upload Queue] Reduce context: using previous topics (${previousTopicTitles.length}): ${preview}`
+          );
+        }
+
+        const summary = await this.summarizeTopicsWithContext(batchesInWindow, previousTopicTitles);
         if (summary) {
           allResults.push({
             batch_id: allResults.length,
@@ -559,6 +567,12 @@ export class QwenHttpClient {
             tokens_estimate: { prompt: 0, completion: 0 },
             window_label: `Topics: ${formatTime(windowStart)}-${formatTime(windowEnd)}`,
           });
+
+          previousTopicTitles = this.extractTopicTitlesFromMarkdown(summary);
+          if (previousTopicTitles.length) {
+            const preview = previousTopicTitles.slice(0, 10).join(' | ');
+            this.callbacks?.onProgress?.(`[Upload Queue] Reduce context for next window: ${preview}`);
+          }
         }
       }
     } catch (e) {
@@ -569,12 +583,95 @@ export class QwenHttpClient {
   }
 
   private async summarizeTopics(batches: QwenBatchResult[]): Promise<string | null> {
+    return this.summarizeTopicsWithContext(batches, null);
+  }
+
+  private extractTopicTitlesFromMarkdown(markdown: string): string[] {
+    const md = String(markdown || '').trim();
+    if (!md) return [];
+
+    const rawLines = md.split(/\r?\n/).map((l) => l.trim());
+    const lines = rawLines.filter(Boolean);
+
+    const titles: string[] = [];
+    const seen = new Set<string>();
+
+    const push = (t: string) => {
+      const s = String(t || '').trim().replace(/\s+/g, ' ');
+      if (!s) return;
+      const key = s.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      titles.push(s);
+    };
+
+    // Prefer markdown headings first.
+    for (const line of lines) {
+      const m = line.match(/^#{2,6}\s+(.+?)\s*$/);
+      if (!m) continue;
+      const title = m[1].trim();
+      if (!title) continue;
+      if (title.toLowerCase() === 'topics') continue;
+      push(title);
+    }
+    if (titles.length) return titles.slice(0, 12);
+
+    // Fallback: treat standalone non-bullet lines as topic titles.
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lower = line.toLowerCase();
+      if (!line) continue;
+      if (lower === 'topics') continue;
+      if (lower.startsWith('time ranges:')) continue;
+      if (lower.startsWith('key points:')) continue;
+      if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) continue;
+      if (line.startsWith('>') || line.startsWith('```') || line.startsWith('#')) continue;
+      if (line.startsWith('[')) continue; // timestamp blocks like [00:10]-[00:15]
+      if (line.length > 120) continue;
+      if (line.endsWith(':')) continue;
+      // Heuristic: likely a section title if previous line was blank (in raw markdown)
+      const prevRaw = rawLines[i - 1] ?? '';
+      if (i > 0 && prevRaw.trim() !== '') continue;
+      push(line);
+    }
+
+    return titles.slice(0, 12);
+  }
+
+  private async summarizeTopicsWithContext(
+    batches: QwenBatchResult[],
+    previousTopicTitles: string[] | null
+  ): Promise<string | null> {
     if (!this.isConnectedFlag) return null;
     if (!batches.length) return null;
 
     const url = `${this.baseUrl}/api/v1/summarize_topics`;
     const formData = new FormData();
-    formData.append('batches_json', JSON.stringify(batches));
+
+    let requestBatches = batches;
+    const titles = (previousTopicTitles || []).map((t) => String(t || '').trim()).filter(Boolean);
+    if (titles.length) {
+      const contextBatch: QwenBatchResult = {
+        batch_id: -1,
+        time_start: 0,
+        time_end: 0,
+        topic: 'Previous window topics (context)',
+        content_type: 'other',
+        description: `Previous 3-minute window topic titles (may continue or change):\n${titles
+          .slice(0, 12)
+          .map((t) => `- ${t}`)
+          .join('\n')}`,
+        has_structured_content: false,
+        structured_hints: [],
+        is_topic_complete: true,
+        inference_time: 0,
+        tokens_estimate: { prompt: 0, completion: 0 },
+        window_label: 'Context',
+      };
+      requestBatches = [contextBatch, ...batches];
+    }
+
+    formData.append('batches_json', JSON.stringify(requestBatches));
 
     const controller = new AbortController();
     const requestTimeoutMs = Number((import.meta as any).env?.VITE_QWEN_REQUEST_TIMEOUT_MS || 600000); // 10 min default
