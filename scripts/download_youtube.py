@@ -137,44 +137,64 @@ def main() -> int:
 
     ffmpeg_loc = find_ffmpeg_location()
 
-    ydl_opts = {
-        # Prefer H.264/AAC for maximum Chromium compatibility (Electron frame extraction needs seeking/decoding).
-        # Fallback to generic MP4, then best as last resort.
-        "format": (
-            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
-            "bv*[ext=mp4]+ba[ext=m4a]/"
-            "b[ext=mp4]/"
-            "best"
-        ),
-        "outtmpl": outtmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "progress_hooks": [progress_hook],
-        # Avoid Windows-invalid filenames from extractor.
-        "windowsfilenames": True,
-        "restrictfilenames": False,
-        # Allow yt_dlp to merge formats (requires ffmpeg).
-        "merge_output_format": "mp4",
-    }
-    if ffmpeg_loc:
-        ydl_opts["ffmpeg_location"] = ffmpeg_loc
+    def build_ydl_opts(format_selector: str) -> Dict[str, Any]:
+        ydl_opts: Dict[str, Any] = {
+            "format": format_selector,
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "progress_hooks": [progress_hook],
+            # Avoid Windows-invalid filenames from extractor.
+            "windowsfilenames": True,
+            "restrictfilenames": False,
+            # Allow yt_dlp to merge formats (requires ffmpeg).
+            "merge_output_format": "mp4",
+        }
+        if ffmpeg_loc:
+            ydl_opts["ffmpeg_location"] = ffmpeg_loc
+        return ydl_opts
 
+    # Prefer H.264/AAC for maximum Chromium compatibility (Electron frame extraction needs seeking/decoding).
+    # Fallback to generic MP4, then best as last resort.
+    primary_format = (
+        "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
+        "bv*[ext=mp4]+ba[ext=m4a]/"
+        "b[ext=mp4]/"
+        "best"
+    )
+    fallback_format = "18/b[ext=mp4]/best"
+
+    download_error_primary: Optional[str] = None
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(build_ydl_opts(primary_format)) as ydl:
             info2 = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info2)
     except Exception as e:
+        download_error_primary = str(e)
         emit(
             {
-                "type": "error",
-                "message": "yt_dlp download failed",
-                "detail": str(e),
-                "ffmpeg_found": bool(ffmpeg_loc),
-                "ffmpeg_location": ffmpeg_loc or "",
+                "type": "progress",
+                "phase": "retrying_fallback",
+                "message": "Primary YouTube download failed; retrying with progressive MP4 (format 18).",
             }
         )
-        return 4
+        try:
+            with yt_dlp.YoutubeDL(build_ydl_opts(fallback_format)) as ydl:
+                info2 = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info2)
+        except Exception as e2:
+            emit(
+                {
+                    "type": "error",
+                    "message": "yt_dlp download failed",
+                    "detail": download_error_primary,
+                    "detail_fallback": str(e2),
+                    "ffmpeg_found": bool(ffmpeg_loc),
+                    "ffmpeg_location": ffmpeg_loc or "",
+                }
+            )
+            return 4
 
     file_path = os.path.abspath(file_path)
     try:
@@ -203,6 +223,7 @@ def main() -> int:
             "duration_s": float(duration or 0),
             "size": int(size),
             "output_base": forced_base or "",
+            "used_fallback_format_18": bool(download_error_primary),
         }
     )
     return 0
