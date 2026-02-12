@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Play, Pause, Download, BookOpen, Calendar, Clock, FileText, BarChart3, Film, Pencil, Check, X } from 'lucide-react';
+import { Play, Pause, Download, BookOpen, Calendar, Clock, FileText, BarChart3, Film, MessageSquare, Pencil, Check, X } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -306,7 +306,7 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, onTitleUpdat
   const [activeTranscriptIndex, setActiveTranscriptIndex] = useState<number>(-1);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoDurationMs, setVideoDurationMs] = useState(0);
-  const [summaryTab, setSummaryTab] = useState<'topics' | 'short'>('topics');
+  const [summaryTab, setSummaryTab] = useState<'topics' | 'short' | 'chat'>('topics');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [titleError, setTitleError] = useState<string | null>(null);
@@ -1175,44 +1175,171 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, onTitleUpdat
                 <Film size={14} color={summaryTab === 'short' ? '#0E72ED' : '#8a8a8a'} />
                 Short (5-frame) ({shortSummaries.length})
               </button>
+              <button
+                onClick={() => setSummaryTab('chat')}
+                style={{
+                  padding: '6px 10px',
+                  backgroundColor: summaryTab === 'chat' ? '#1a1a1a' : 'transparent',
+                  border: `1px solid ${summaryTab === 'chat' ? '#0E72ED' : '#333333'}`,
+                  borderRadius: '8px',
+                  color: summaryTab === 'chat' ? '#0E72ED' : '#8a8a8a',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <MessageSquare size={14} color={summaryTab === 'chat' ? '#0E72ED' : '#8a8a8a'} />
+                Chat
+              </button>
             </div>
-            <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
-              {(summaryTab === 'topics' ? topicSummaries : shortSummaries).length > 0 ? (
-                (summaryTab === 'topics' ? topicSummaries : shortSummaries).map((summary, idx) => (
-                  <div
-                    key={`${summaryTab}-${idx}`}
-                    style={{
+
+            {/* Tab Content */}
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+              {summaryTab === 'chat' ? (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+                  <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
+                    <div style={{
                       backgroundColor: '#1a1a1a',
                       border: '1px solid #333333',
                       borderRadius: '8px',
-                      padding: '10px',
-                      transition: 'all 0.15s'
-                    }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLDivElement).style.borderColor = '#0E72ED';
-                      (e.currentTarget as HTMLDivElement).style.backgroundColor = '#242424';
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLDivElement).style.borderColor = '#333333';
-                      (e.currentTarget as HTMLDivElement).style.backgroundColor = '#1a1a1a';
-                    }}
-                  >
-                    <div style={{ fontSize: '12px', fontWeight: 600, color: '#0E72ED', marginBottom: '6px' }}>
-                      {summary.windowLabel}
+                      padding: '10px'
+                    }}>
+                      <div style={{ fontSize: '12px', fontWeight: 600, color: '#8a8a8a', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <MessageSquare size={14} color="#8a8a8a" />
+                        Ask about this lecture
+                      </div>
+                      <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.6' }}>
+                        Chat UI is ready, but not wired up yet. It will use lecture transcript + visual evidence once implemented.
+                      </div>
                     </div>
-                    <MarkdownRenderer content={summary.text} />
+
+                    <div style={{
+                      alignSelf: 'flex-end',
+                      maxWidth: '90%',
+                      backgroundColor: '#0f2a4a',
+                      border: '1px solid #0E72ED',
+                      borderRadius: '10px',
+                      padding: '10px'
+                    }}>
+                      <div style={{ fontSize: '12px', fontWeight: 600, color: '#0E72ED', marginBottom: '6px' }}>
+                        You
+                      </div>
+                      <div style={{ fontSize: '13px', color: '#ffffff', lineHeight: '1.6' }}>
+                        When does the lecturer explain “Project One”?
+                      </div>
+                    </div>
+
+                    <div style={{
+                      alignSelf: 'flex-start',
+                      maxWidth: '90%',
+                      backgroundColor: '#1a1a1a',
+                      border: '1px solid #333333',
+                      borderRadius: '10px',
+                      padding: '10px'
+                    }}>
+                      <div style={{ fontSize: '12px', fontWeight: 600, color: '#8a8a8a', marginBottom: '6px' }}>
+                        Assistant
+                      </div>
+                      <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.6' }}>
+                        (Example) I’ll answer with timestamps and frame evidence once retrieval is wired up.
+                      </div>
+                      <div style={{ marginTop: '8px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {['[58:05]', '[58:10]', '[58:15]'].map((c) => (
+                          <div
+                            key={c}
+                            style={{
+                              color: '#0E72ED',
+                              fontSize: '12px',
+                              fontWeight: 600,
+                              userSelect: 'none',
+                              lineHeight: '1.2'
+                            }}
+                            title="Citations will be clickable when wired up"
+                          >
+                            {c}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                ))
+
+                  <div style={{ borderTop: '1px solid #333333', paddingTop: '10px', display: 'flex', gap: '8px' }}>
+                    <input
+                      type="text"
+                      placeholder="Ask a question…"
+                      disabled
+                      style={{
+                        flex: 1,
+                        backgroundColor: '#1a1a1a',
+                        border: '1px solid #333333',
+                        borderRadius: '8px',
+                        padding: '10px',
+                        fontSize: '13px',
+                        color: '#ffffff',
+                        outline: 'none'
+                      }}
+                    />
+                    <button
+                      disabled
+                      style={{
+                        padding: '10px 14px',
+                        backgroundColor: '#1a1a1a',
+                        border: '1px solid #333333',
+                        borderRadius: '8px',
+                        color: '#8a8a8a',
+                        fontSize: '13px',
+                        cursor: 'not-allowed',
+                        transition: 'all 0.15s'
+                      }}
+                      title="Chat is UI-only for now"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
               ) : (
-                <div style={{
-                  flex: 1,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: '#666666',
-                  fontSize: '13px'
-                }}>
-                  No summaries available
+                <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
+                  {(summaryTab === 'topics' ? topicSummaries : shortSummaries).length > 0 ? (
+                    (summaryTab === 'topics' ? topicSummaries : shortSummaries).map((summary, idx) => (
+                      <div
+                        key={`${summaryTab}-${idx}`}
+                        style={{
+                          backgroundColor: '#1a1a1a',
+                          border: '1px solid #333333',
+                          borderRadius: '8px',
+                          padding: '10px',
+                          transition: 'all 0.15s'
+                        }}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLDivElement).style.borderColor = '#0E72ED';
+                          (e.currentTarget as HTMLDivElement).style.backgroundColor = '#242424';
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLDivElement).style.borderColor = '#333333';
+                          (e.currentTarget as HTMLDivElement).style.backgroundColor = '#1a1a1a';
+                        }}
+                      >
+                        <div style={{ fontSize: '12px', fontWeight: 600, color: '#0E72ED', marginBottom: '6px' }}>
+                          {summary.windowLabel}
+                        </div>
+                        <MarkdownRenderer content={summary.text} />
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#666666',
+                      fontSize: '13px'
+                    }}>
+                      No summaries available
+                    </div>
+                  )}
                 </div>
               )}
             </div>
