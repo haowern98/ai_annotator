@@ -159,12 +159,14 @@ export default function App() {
     
     // Load remote processing config
     let qwenUrl = 'http://127.0.0.1:7556';
+    let isRemoteQwen = false;
     try {
       const remoteConfig = localStorage.getItem('qwen_remote_config');
       if (remoteConfig) {
         const config = JSON.parse(remoteConfig);
         if (config.mode === 'client' && config.remoteUrl) {
           qwenUrl = config.remoteUrl;
+          isRemoteQwen = true;
           console.log(`[Upload Queue] Using remote Qwen server: ${qwenUrl}`);
         }
       }
@@ -188,11 +190,14 @@ export default function App() {
           onProgress: (msg) => console.log(`[Upload Queue] ${msg}`),
         });
 
+        // Auto-indexing (embeddings) is local-mode only for v1 (batch uploads only).
+        const autoIndexOnComplete = !isRemoteQwen && /^(http:\/\/)?(127\.0\.0\.1|localhost)(:\d+)?/i.test(qwenUrl);
+
         uploadQueueRef.current = new UploadQueueManager(uploadParakeet, uploadQwen, () => false, {
           onQueueUpdate: (queue) => setUploadQueue(queue),
           onVideoComplete: (video) => console.log(`Upload complete: ${video.fileName}`),
           onVideoError: (video, err) => console.error(`Upload failed: ${video.fileName} - ${err}`),
-        });
+        }, { autoIndexOnComplete });
 
         console.log('[Upload Queue] Upload queue manager initialized');
       } catch (error) {

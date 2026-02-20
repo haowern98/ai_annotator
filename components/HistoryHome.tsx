@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, ChevronDown, ChevronUp, ExternalLink, Trash2, BookOpen, Calendar, Clock, FileText, BarChart3 } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, ExternalLink, Trash2, BookOpen, Calendar, Clock, FileText, BarChart3, Monitor, Server, List } from 'lucide-react';
 import { NavigationView } from '../types';
 import LectureDetails from './LectureDetails.tsx';
 
@@ -17,6 +17,7 @@ interface Lecture {
   filePath: string;
   videoPath: string;
   lastModified: string;
+  origin: 'local' | 'remote';
 }
 
 interface RecordingMetadata {
@@ -45,6 +46,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
   const [lectures, setLectures] = useState<Lecture[]>([]);
   const [selectedLectureId, setSelectedLectureId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [originFilterUi, setOriginFilterUi] = useState<'all' | 'local' | 'remote'>('all');
 
   // Load recordings from IPC
   useEffect(() => {
@@ -88,6 +90,8 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
             if (!filename) {
               filename = `lecture_unknown_${index}`;
             }
+
+            const isRemote = /(^|_)remote(_|$)/i.test(filename) || filename.includes('_overlay_remote');
 
             const titleParts = filename.split('_');
             const dateStr = titleParts[1] || '';
@@ -160,7 +164,8 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               fileSize: `${fileSizeMB} MB`,
               filePath: (rec.videoPath || '').replace(/\\\\/g, '/'),
               videoPath: rec.videoPath || '',
-              lastModified
+              lastModified,
+              origin: isRemote ? 'remote' : 'local',
             };
           });
 
@@ -368,9 +373,61 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           </div>
 
           {/* Lecture Count */}
-          <div style={{ marginBottom: '16px', color: '#8a8a8a', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Calendar size={16} color="#0E72ED" />
-            Recent Lectures ({filteredLectures.length})
+          <div style={{
+            marginBottom: '16px',
+            color: '#8a8a8a',
+            fontSize: '14px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Calendar size={16} color="#0E72ED" />
+              Recent Lectures ({filteredLectures.length})
+            </div>
+
+            {/* UI only (not wired): origin filter */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#8a8a8a' }}>
+              <span style={{ color: '#8a8a8a' }}>View:</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                {(['all', 'local', 'remote'] as const).map((k) => {
+                  const selected = originFilterUi === k;
+                  const label = k === 'all' ? 'All' : k === 'local' ? 'Local' : 'Remote';
+                  const Icon = k === 'all' ? List : k === 'local' ? Monitor : Server;
+                  const iconColor = selected ? '#0E72ED' : '#8a8a8a';
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      title="UI only (filtering not wired yet)"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setOriginFilterUi(k);
+                      }}
+                      style={{
+                        padding: '6px 10px',
+                        backgroundColor: selected ? '#1a1a1a' : 'transparent',
+                        border: `1px solid ${selected ? '#0E72ED' : '#333333'}`,
+                        borderRadius: '8px',
+                        color: selected ? '#0E72ED' : '#8a8a8a',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        lineHeight: 1,
+                        transition: 'all 0.15s',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <Icon size={14} color={iconColor} />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* Loading State */}
@@ -471,7 +528,26 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
                         </span>
                       </div>
                     </div>
-                    <div style={{ color: '#8a8a8a', marginLeft: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#8a8a8a', marginLeft: '16px' }}>
+                      <div
+                        title={lecture.origin === 'remote' ? 'Remote recording' : 'Local recording'}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '4px 10px',
+                          borderRadius: '999px',
+                          border: '1px solid #333333',
+                          backgroundColor: '#1f1f1f',
+                          color: '#8a8a8a',
+                          fontSize: '12px',
+                          lineHeight: 1,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {lecture.origin === 'remote' ? <Server size={12} color="#8a8a8a" /> : <Monitor size={12} color="#8a8a8a" />}
+                        <span>{lecture.origin === 'remote' ? 'Remote' : 'Local'}</span>
+                      </div>
                       {expandedId === lecture.id ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
                     </div>
                   </div>

@@ -526,6 +526,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('webviewer:transcode');
   },
 
+  // Lecture embedding index (main-process indexing for local RAG)
+  indexLectureEmbeddings: async (metadataPath, opts) => {
+    return await ipcRenderer.invoke('embedding:indexLecture', metadataPath, opts);
+  },
+  onEmbeddingIndexProgress: (callback) => {
+    ipcRenderer.on('embedding:indexProgress', (_event, payload) => callback(payload));
+  },
+  removeEmbeddingIndexProgressListeners: () => {
+    ipcRenderer.removeAllListeners('embedding:indexProgress');
+  },
+  embedLectureQuery: async (query) => {
+    return await ipcRenderer.invoke('embedding:embedQuery', query);
+  },
+
   // YouTube downloader (Python yt_dlp in .venv)
   downloadYouTube: async (url, onProgress, options) => {
     const id = `yt_${Date.now()}_${Math.random().toString(36).slice(2)}`;

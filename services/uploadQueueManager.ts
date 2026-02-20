@@ -69,6 +69,10 @@ export interface UploadQueueCallbacks {
   onLog?: (message: string, level: LogLevel) => void;
 }
 
+export interface UploadQueueOptions {
+  autoIndexOnComplete?: boolean;
+}
+
 export class UploadQueueManager {
   private queue: QueuedVideo[] = [];
   private callbacks: UploadQueueCallbacks;
@@ -78,6 +82,9 @@ export class UploadQueueManager {
   private liveSessionCheck: () => boolean;
   private currentVideoId: string | null = null;
   private remoteReportCache: Map<string, { phase: string; pct: number; at: number }> = new Map();
+  private autoIndexOnComplete: boolean = false;
+  // Indexing runs in main process (Electron IPC) so it can load models from FS cache.
+  private indexerPromise: Promise<any> | null = null;
   private prefetchInFlight: boolean = false;
   private prefetchTargetId: string | null = null;
   private prefetchPromise: Promise<void> | null = null;
@@ -118,12 +125,21 @@ export class UploadQueueManager {
     parakeetTranscriber: ParakeetBatchTranscriber,
     qwenClient: QwenHttpClient,
     liveSessionCheck: () => boolean,
-    callbacks: UploadQueueCallbacks
+    callbacks: UploadQueueCallbacks,
+    options: UploadQueueOptions = {}
   ) {
     this.parakeetTranscriber = parakeetTranscriber;
     this.qwenClient = qwenClient;
     this.liveSessionCheck = liveSessionCheck;
     this.callbacks = callbacks;
+    this.autoIndexOnComplete = Boolean(options.autoIndexOnComplete);
+  }
+
+  private async getIndexer(): Promise<any> {
+    // Back-compat: renderer indexer is deprecated; keep method but never used.
+    if (this.indexerPromise) return this.indexerPromise;
+    this.indexerPromise = Promise.resolve(null);
+    return this.indexerPromise;
   }
 
   private async getUserDataPathCached(): Promise<string> {
@@ -431,6 +447,7 @@ export class UploadQueueManager {
       file: { path: '', size: 0 },
       fileName: 'YouTube download',
       fileSize: 0,
+      sourceType: 'batch',
       status: 'downloading',
       progress: {
         phase: 'Downloading YouTube',
@@ -767,6 +784,18 @@ export class UploadQueueManager {
       }
     }
     this.callbacks.onVideoComplete?.(video);
+
+    // Post-processing: build embeddings index for batch uploads in local mode.
+    // This runs after the lecture is "Complete" (summaries already saved).
+    if (this.autoIndexOnComplete && video.sourceType === 'batch' && !video.remoteJobId && video.recordingMetadataPath) {
+      const metadataPath = String(video.recordingMetadataPath || '').trim();
+      if (metadataPath && window.electronAPI?.indexLectureEmbeddings) {
+        // Fire-and-forget to avoid blocking queue throughput.
+        void window.electronAPI.indexLectureEmbeddings(metadataPath, { includeFrames: true }).catch((err: any) => {
+          this.log(`[Index] Failed to index lecture embeddings: ${err}`, LogLevel.WARN);
+        });
+      }
+    }
   }
 
   /**

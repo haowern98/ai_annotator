@@ -16,6 +16,7 @@ const { setupQwenControlHandlers } = require('./ipc/qwenControl.cjs');
 const { setupRemoteInboxHandlers } = require('./ipc/remoteInbox.cjs');
 const { setupRemoteUploadHandlers } = require('./ipc/remoteUpload.cjs');
 const { setupWebViewerHandlers } = require('./ipc/webViewer.cjs');
+const { setupEmbeddingIndexHandlersWithSender } = require('./ipc/embeddingIndex.cjs');
 const { focusCapturedWindow } = require('./windowsNative.cjs');
 
 // Only set command-line switches if app is properly loaded
@@ -669,6 +670,15 @@ function createWindow() {
   setupRecordingHandlers(ipcMain);
   setupFileUtilsHandlers(ipcMain);
   setupYouTubeHandlers(ipcMain);
+  setupEmbeddingIndexHandlersWithSender(ipcMain, (channel, payload) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, payload);
+      }
+    } catch {
+      // ignore
+    }
+  });
   setupRemoteUploadHandlers(ipcMain, {
     inboxPort: 7557,
     sendToRenderer: (channel, payload) => {

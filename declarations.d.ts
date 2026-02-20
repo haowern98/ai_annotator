@@ -98,6 +98,12 @@ interface ElectronAPI {
   onWebViewerTranscode: (callback: (payload: any) => void) => void;
   removeWebViewerTranscodeListeners: () => void;
 
+  // Embedding index (local RAG; runs in main process)
+  indexLectureEmbeddings: (metadataPath: string, opts?: { includeFrames?: boolean }) => Promise<any>;
+  onEmbeddingIndexProgress: (callback: (payload: any) => void) => void;
+  removeEmbeddingIndexProgressListeners: () => void;
+  embedLectureQuery: (query: string) => Promise<{ success: boolean; emb_f32_b64?: string; error?: string }>;
+
   // Remote full-video upload (client/server inbox)
   getInboxStatus: () => Promise<{success: boolean; status?: any; error?: string}>;
   onInboxActivity: (callback: (activity: any) => void) => void;
