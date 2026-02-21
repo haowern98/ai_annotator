@@ -188,6 +188,9 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
     lecture.date.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const visibleLectures =
+    originFilterUi === 'all' ? filteredLectures : filteredLectures.filter((l) => l.origin === originFilterUi);
+
   const toggleExpand = (id: string) => {
     setExpandedId(expandedId === id ? null : id);
   };
@@ -384,10 +387,10 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <Calendar size={16} color="#0E72ED" />
-              Recent Lectures ({filteredLectures.length})
+              Recent Lectures ({visibleLectures.length})
             </div>
 
-            {/* UI only (not wired): origin filter */}
+            {/* Origin filter */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#8a8a8a' }}>
               <span style={{ color: '#8a8a8a' }}>View:</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -400,7 +403,6 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
                     <button
                       key={k}
                       type="button"
-                      title="UI only (filtering not wired yet)"
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -445,7 +447,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               <div style={{ fontSize: '18px', fontWeight: 600, color: '#ffffff' }}>Loading Lectures...</div>
               <div style={{ fontSize: '14px' }}>Please wait while we fetch your recordings</div>
             </div>
-          ) : filteredLectures.length === 0 ? (
+          ) : visibleLectures.length === 0 ? (
             <div style={{
               flex: 1,
               display: 'flex',
@@ -465,7 +467,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {filteredLectures.map((lecture) => (
+              {visibleLectures.map((lecture) => (
                 <div
                   key={lecture.id}
                   style={{
@@ -668,7 +670,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           )}
 
           {/* Load More Button */}
-          {filteredLectures.length > 0 && (
+          {visibleLectures.length > 0 && (
             <button
               style={{
                 marginTop: '16px',
