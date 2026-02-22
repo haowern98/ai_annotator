@@ -151,9 +151,22 @@ function setupRecordingHandlers(ipcMain) {
         console.log('[Recording] No video data - saving metadata only');
       }
 
+      const normalizeOrigin = (o) => {
+        if (!o || typeof o !== 'object') return { kind: 'local' };
+        const kind = o.kind === 'remote' ? 'remote' : 'local';
+        const serverUrl = typeof o.serverUrl === 'string' ? o.serverUrl : undefined;
+        const serverId = typeof o.serverId === 'string' ? o.serverId : undefined;
+        return {
+          kind,
+          ...(serverUrl ? { serverUrl } : {}),
+          ...(serverId ? { serverId } : {}),
+        };
+      };
+
       // Add file info to metadata
       const fullMetadata = {
         ...metadata,
+        origin: normalizeOrigin(metadata?.origin),
         videoFilename: videoFilename, // Always include filename for date/time parsing
         videoPath: videoPath, // Empty if no video
         savedAt: new Date().toISOString(),
@@ -495,8 +508,21 @@ function setupRecordingHandlers(ipcMain) {
       const metadataFilename = `${baseFilename}.json`;
       const metadataPath = path.join(dir, metadataFilename);
 
+      const normalizeOrigin = (o) => {
+        if (!o || typeof o !== 'object') return { kind: 'local' };
+        const kind = o.kind === 'remote' ? 'remote' : 'local';
+        const serverUrl = typeof o.serverUrl === 'string' ? o.serverUrl : undefined;
+        const serverId = typeof o.serverId === 'string' ? o.serverId : undefined;
+        return {
+          kind,
+          ...(serverUrl ? { serverUrl } : {}),
+          ...(serverId ? { serverId } : {}),
+        };
+      };
+
       const fullMetadata = {
         ...metadata,
+        origin: normalizeOrigin(metadata?.origin),
         videoFilename: rawName,
         videoPath: vp,
         savedAt: new Date().toISOString(),

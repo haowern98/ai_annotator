@@ -4,6 +4,61 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const { spawn } = require('child_process');
 
+function parseCookies(cookieHeader) {
+  const raw = String(cookieHeader || '').trim();
+  if (!raw) return {};
+  const out = {};
+  raw.split(';').forEach((part) => {
+    const p = String(part || '').trim();
+    if (!p) return;
+    const idx = p.indexOf('=');
+    if (idx <= 0) return;
+    const k = p.slice(0, idx).trim();
+    const v = p.slice(idx + 1).trim();
+    if (!k) return;
+    out[k] = decodeURIComponent(v);
+  });
+  return out;
+}
+
+function readRequestBody(req, maxBytes = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    const chunks = [];
+
+    req.on('data', (buf) => {
+      total += buf.length;
+      if (total > maxBytes) {
+        reject(new Error('Request body too large'));
+        try {
+          req.destroy();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on('error', (e) => reject(e));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+function getAuthTokenFromReq(req) {
+  const header = req.headers['x-ai-annotator-token'];
+  const tokenFromHeader = String(Array.isArray(header) ? header[0] : header || '').trim();
+  if (tokenFromHeader) return tokenFromHeader;
+
+  const auth = req.headers['authorization'];
+  const rawAuth = String(Array.isArray(auth) ? auth[0] : auth || '').trim();
+  const m = rawAuth.match(/^Bearer\s+(.+)$/i);
+  if (m && m[1]) return String(m[1]).trim();
+
+  const cookies = parseCookies(req.headers['cookie']);
+  const tokenFromCookie = String(cookies.ai_annotator_token || '').trim();
+  return tokenFromCookie || '';
+}
+
 function generateFilename() {
   const now = new Date();
   const year = now.getFullYear();
@@ -27,6 +82,124 @@ function sanitizeBaseFilename(name) {
   const base = raw.split(/[\\/]/).pop() || '';
   const safe = base.replace(/[^\w.\- ]+/g, '').trim().slice(0, 180);
   return safe || generateFilename();
+}
+
+function guessContentType(filePath) {
+  const lower = String(filePath || '').toLowerCase();
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function metaPathForId(dir, baseId) {
+  const safe = String(baseId || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+  return path.join(dir, `${safe}.meta.json`);
+}
+
+function sanitizeTitle(title) {
+  const t = String(title ?? '').trim().replace(/\s+/g, ' ');
+  if (!t) return null;
+  return t.slice(0, 80);
+}
+
+async function readTitleOverride(dir, baseId) {
+  const p = metaPathForId(dir, baseId);
+  try {
+    const content = await fsp.readFile(p, 'utf8');
+    const obj = JSON.parse(content);
+    return sanitizeTitle(obj?.title);
+  } catch {
+    return null;
+  }
+}
+
+async function readJsonFile(filePath) {
+  const content = await fsp.readFile(filePath, 'utf8');
+  return JSON.parse(content);
+}
+
+async function serveVideoWithRange(req, res, filePath) {
+  const st = await fsp.stat(filePath);
+  const fileSize = st.size;
+  const ct = guessContentType(filePath);
+  const method = String(req.method || '').toUpperCase();
+  const isHead = method === 'HEAD';
+
+  const range = req.headers.range;
+  if (!range) {
+    res.writeHead(200, {
+      'Content-Type': ct,
+      'Content-Length': String(fileSize),
+      'Accept-Ranges': 'bytes',
+    });
+    if (isHead) {
+      res.end();
+      return;
+    }
+    fs.createReadStream(filePath).pipe(res);
+    return;
+  }
+
+  const failRange = (message) => {
+    res.writeHead(416, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Range': `bytes */${fileSize}`,
+      'Accept-Ranges': 'bytes',
+    });
+    if (isHead) {
+      res.end();
+      return;
+    }
+    res.end(String(message || 'Range Not Satisfiable'));
+  };
+
+  // Support "bytes=start-end", "bytes=start-" and Safari-style suffix ranges "bytes=-N".
+  const raw = String(range || '').split(',')[0].trim().replace(/\s+/g, '');
+  let start = null;
+  let end = null;
+
+  let m = raw.match(/^bytes=(\d+)-(\d*)$/i);
+  if (m) {
+    start = Number(m[1]);
+    end = m[2] ? Number(m[2]) : fileSize - 1;
+  } else {
+    m = raw.match(/^bytes=-(\d+)$/i);
+    if (m) {
+      const suffixLen = Number(m[1]);
+      if (!Number.isFinite(suffixLen) || suffixLen <= 0) {
+        failRange('Invalid Range');
+        return;
+      }
+      start = Math.max(0, fileSize - suffixLen);
+      end = fileSize - 1;
+    }
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start === null || end === null) {
+    failRange('Invalid Range');
+    return;
+  }
+
+  if (end >= fileSize) end = fileSize - 1;
+
+  if (start < 0 || start >= fileSize || end < 0 || start > end) {
+    failRange('Range Not Satisfiable');
+    return;
+  }
+
+  const chunkSize = end - start + 1;
+  res.writeHead(206, {
+    'Content-Type': ct,
+    'Content-Length': String(chunkSize),
+    'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+    'Accept-Ranges': 'bytes',
+  });
+  if (isHead) {
+    res.end();
+    return;
+  }
+  fs.createReadStream(filePath, { start, end }).pipe(res);
 }
 
 function safeExtFromName(name) {
@@ -107,6 +280,17 @@ async function concatWebmFiles(recordingsDir, inputPaths, outputPath) {
   }
 }
 
+function getVenvPythonPath() {
+  const repoRoot = path.join(__dirname, '..', '..');
+  const venvPython = path.join(repoRoot, '.venv', 'Scripts', 'python.exe');
+  if (fs.existsSync(venvPython)) return venvPython;
+  return 'python';
+}
+
+function scriptPathDownloadYouTube() {
+  return path.join(__dirname, '..', '..', 'scripts', 'download_youtube.py');
+}
+
 function setupRemoteInboxHandlers(ipcMain, options) {
   const {
     getRecordingsDir,
@@ -117,6 +301,12 @@ function setupRemoteInboxHandlers(ipcMain, options) {
   // Job tracking for remote uploads. Keyed by jobId (provided by client).
   // Used by clients to poll status and fetch final metadata JSON.
   const jobs = new Map();
+
+  let authToken = null;
+  const setAuthToken = (next) => {
+    const t = String(next || '').trim();
+    authToken = t ? t : null;
+  };
 
   const state = {
     running: false,
@@ -175,16 +365,167 @@ function setupRemoteInboxHandlers(ipcMain, options) {
       try {
         const method = String(req.method || '').toUpperCase();
         const url = String(req.url || '');
+        const pathname = url.split('?')[0];
 
-        if (method === 'GET' && (url === '/inbox/health' || url === '/health')) {
+        if (method === 'GET' && (pathname === '/inbox/health' || pathname === '/health')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'ok', service: 'remote_inbox', port }));
           return;
         }
 
+        // Cookie-based login (so <video> playback does not need URL tokens).
+        // POST /auth/login { token }
+        if (method === 'POST' && (pathname === '/auth/login' || pathname === '/inbox/auth/login')) {
+          try {
+            if (!authToken) {
+              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Auth token not configured on server' }));
+              return;
+            }
+
+            const body = await readRequestBody(req, 128 * 1024);
+            let parsed = null;
+            try {
+              parsed = JSON.parse(String(body || ''));
+            } catch {
+              // ignore
+            }
+            const provided = String(parsed?.token || '').trim();
+            if (!provided || provided !== authToken) {
+              res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
+              return;
+            }
+
+            res.writeHead(200, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Set-Cookie': `ai_annotator_token=${encodeURIComponent(authToken)}; Path=/; HttpOnly; SameSite=Lax`,
+            });
+            res.end(JSON.stringify({ success: true }));
+            return;
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+            return;
+          }
+        }
+
+        // Require auth (header or cookie) for everything else (except health).
+        if (authToken) {
+          const got = getAuthTokenFromReq(req);
+          if (!got || got !== authToken) {
+            res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
+            return;
+          }
+        }
+
+        // Remote library (server is the source of truth): list and serve recordings from this PC.
+        if (method === 'GET' && (pathname === '/library/lectures' || pathname === '/library/recordings')) {
+          try {
+            const files = await fsp.readdir(recordingsDir);
+            const metadataFiles = files.filter((f) => {
+              const name = String(f || '');
+              const lower = name.toLowerCase();
+              if (!lower.endsWith('.json')) return false;
+              if (lower.endsWith('.meta.json')) return false;
+              if (lower.endsWith('_words.json')) return false;
+              if (lower.endsWith('_manifest.json')) return false;
+              if (/_overlay_remote_chunk_\d{4}\.json$/i.test(name)) return false;
+              return true;
+            });
+
+            const recordings = [];
+            for (const filename of metadataFiles) {
+              const metadataPath = path.join(recordingsDir, filename);
+              try {
+                const rec = await readJsonFile(metadataPath);
+                const baseId = String(filename || '').replace(/\.json$/i, '');
+                const userTitle = await readTitleOverride(recordingsDir, baseId);
+                if (userTitle) rec.userTitle = userTitle;
+                recordings.push(rec);
+              } catch (e) {
+                console.warn('[RemoteInbox] Failed to read metadata:', filename, e?.message || e);
+              }
+            }
+
+            recordings.sort((a, b) => (Date.parse(String(b?.savedAt || '')) || 0) - (Date.parse(String(a?.savedAt || '')) || 0));
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+            res.end(JSON.stringify({ success: true, recordings }));
+            return;
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+            return;
+          }
+        }
+
+        if (method === 'GET' && pathname.startsWith('/library/lectures/')) {
+          const rest = pathname.slice('/library/lectures/'.length);
+          const parts = rest.split('/').filter(Boolean);
+          const lectureId = decodeURIComponent(parts[0] || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+          const sub = parts[1] || 'meta';
+          if (!lectureId) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: 'Missing lectureId' }));
+            return;
+          }
+
+          if (sub === 'meta') {
+            try {
+              const metadataPath = path.join(recordingsDir, `${lectureId}.json`);
+              const rec = await readJsonFile(metadataPath);
+              const userTitle = await readTitleOverride(recordingsDir, lectureId);
+              if (userTitle) rec.userTitle = userTitle;
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+              res.end(JSON.stringify({ success: true, metadata: rec }));
+              return;
+            } catch (e) {
+              res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Metadata not found' }));
+              return;
+            }
+          }
+
+          if (sub === 'words') {
+            try {
+              const wordsPath = path.join(recordingsDir, `${lectureId}_words.json`);
+              const content = await fsp.readFile(wordsPath, 'utf8');
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+              res.end(content);
+              return;
+            } catch {
+              res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Words not found' }));
+              return;
+            }
+          }
+
+          if (sub === 'video') {
+            try {
+              const mp4 = path.join(recordingsDir, `${lectureId}.mp4`);
+              const webm = path.join(recordingsDir, `${lectureId}.webm`);
+              let videoPath = '';
+              try {
+                await fsp.stat(mp4);
+                videoPath = mp4;
+              } catch {
+                await fsp.stat(webm);
+                videoPath = webm;
+              }
+              await serveVideoWithRange(req, res, videoPath);
+              return;
+            } catch {
+              res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Video not found' }));
+              return;
+            }
+          }
+        }
+
         // Client polling: get status
-        if (method === 'GET' && url.startsWith('/inbox/status/')) {
-          const jobId = decodeURIComponent(url.slice('/inbox/status/'.length)).trim();
+        if (method === 'GET' && pathname.startsWith('/inbox/status/')) {
+          const jobId = decodeURIComponent(pathname.slice('/inbox/status/'.length)).trim();
           const job = jobs.get(jobId);
           if (!job) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -197,8 +538,8 @@ function setupRemoteInboxHandlers(ipcMain, options) {
         }
 
         // Client polling: fetch final metadata JSON
-        if (method === 'GET' && url.startsWith('/inbox/result/')) {
-          const jobId = decodeURIComponent(url.slice('/inbox/result/'.length)).trim();
+        if (method === 'GET' && pathname.startsWith('/inbox/result/')) {
+          const jobId = decodeURIComponent(pathname.slice('/inbox/result/'.length)).trim();
           const job = jobs.get(jobId);
           if (!job) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -223,8 +564,8 @@ function setupRemoteInboxHandlers(ipcMain, options) {
         }
 
         // Client polling: fetch transcript JSON (available after transcription, before VLM completes)
-        if (method === 'GET' && url.startsWith('/inbox/transcript/')) {
-          const jobId = decodeURIComponent(url.slice('/inbox/transcript/'.length)).trim();
+        if (method === 'GET' && pathname.startsWith('/inbox/transcript/')) {
+          const jobId = decodeURIComponent(pathname.slice('/inbox/transcript/'.length)).trim();
           const job = jobs.get(jobId);
           if (!job) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -248,7 +589,182 @@ function setupRemoteInboxHandlers(ipcMain, options) {
           }
         }
 
-        if (!((method === 'PUT' || method === 'POST') && url.startsWith('/inbox/upload'))) {
+        // Server-side YouTube ingestion (client sends URL; server downloads + enqueues for processing).
+        // POST /inbox/youtube { url, jobId? }
+        if (method === 'POST' && (pathname === '/inbox/youtube' || pathname === '/inbox/youtube_ingest')) {
+          try {
+            const body = await readRequestBody(req, 256 * 1024);
+            let parsed = null;
+            try {
+              parsed = JSON.parse(String(body || ''));
+            } catch {
+              parsed = null;
+            }
+            const ytUrl = String(parsed?.url || '').trim();
+            if (!ytUrl) {
+              res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Missing url' }));
+              return;
+            }
+
+            const jobIdProvided = String(parsed?.jobId || '').trim();
+            const jobId = jobIdProvided || `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            if (jobs.has(jobId)) {
+              res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: 'Job already exists', jobId }));
+              return;
+            }
+
+            const clientIp = parseClientIp(req);
+            jobs.set(jobId, {
+              state: 'processing',
+              phase: 'Downloading YouTube',
+              progressPercent: 0,
+              clientIp,
+              fileName: ytUrl,
+              storedFileName: null,
+              sessionId: null,
+              overlayBase: null,
+              chunkIndex: null,
+              recordingEnabled: null,
+              isManifest: false,
+              receivedBytes: 0,
+              totalBytes: 0,
+              savedVideoPath: null,
+              metadataPath: null,
+              transcriptReady: false,
+              transcriptPath: null,
+              error: null,
+              updatedAt: Date.now(),
+            });
+
+            res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: true, jobId }));
+
+            // Run download in the background.
+            setImmediate(async () => {
+              const outputBase = `${generateFilename()}_youtube_${Math.random().toString(36).slice(2, 7)}`;
+              const pythonCmd = getVenvPythonPath();
+              const scriptPath = scriptPathDownloadYouTube();
+
+              const updateJob = (partial) => {
+                const current = jobs.get(jobId) || {};
+                jobs.set(jobId, { ...current, ...(partial || {}), updatedAt: Date.now() });
+              };
+
+              try {
+                const child = spawn(
+                  pythonCmd,
+                  [scriptPath, '--url', ytUrl, '--output-dir', recordingsDir, '--output-base', outputBase],
+                  { windowsHide: true }
+                );
+
+                let lastError = '';
+                let finalResult = null;
+
+                const handleLine = (line) => {
+                  const trimmed = String(line || '').trim();
+                  if (!trimmed) return;
+                  let msg = null;
+                  try {
+                    msg = JSON.parse(trimmed);
+                  } catch {
+                    return;
+                  }
+                  if (!msg || typeof msg !== 'object') return;
+
+                  if (msg.type === 'progress') {
+                    const pct = Number(msg.percent);
+                    if (Number.isFinite(pct)) {
+                      updateJob({
+                        phase: String(msg.phase || 'Downloading YouTube'),
+                        progressPercent: Math.max(0, Math.min(100, Math.round(pct))),
+                      });
+                    } else {
+                      updateJob({ phase: String(msg.phase || 'Downloading YouTube') });
+                    }
+                  } else if (msg.type === 'error') {
+                    lastError = msg.message || msg.detail || 'Download failed';
+                    updateJob({ state: 'error', error: lastError, phase: 'Error' });
+                  } else if (msg.type === 'done') {
+                    finalResult = msg;
+                  }
+                };
+
+                const pump = (buf) => {
+                  const text = String(buf || '');
+                  text.split(/\r?\n/).forEach(handleLine);
+                };
+
+                child.stdout?.on('data', pump);
+                child.stderr?.on('data', (buf) => {
+                  const t = String(buf || '').trim();
+                  if (t) lastError = lastError || t;
+                });
+
+                child.on('error', (err) => {
+                  lastError = `Failed to start downloader: ${err.message || String(err)}`;
+                });
+
+                child.on('close', async (code) => {
+                  try {
+                    if (code === 0 && finalResult?.file_path) {
+                      const videoPath = String(finalResult.file_path);
+                      const storedFileName = path.basename(videoPath);
+                      const fileName = String(finalResult.file_name || storedFileName);
+                      const size = Number(finalResult.size || 0) || 0;
+
+                      updateJob({
+                        state: 'processing',
+                        phase: 'Queued for processing',
+                        progressPercent: 0,
+                        fileName,
+                        storedFileName,
+                        savedVideoPath: videoPath,
+                        receivedBytes: size,
+                        totalBytes: size,
+                        error: null,
+                      });
+
+                      try {
+                        sendToRenderer?.('inbox:file-received', {
+                          jobId,
+                          videoPath,
+                          fileName,
+                          storedFileName,
+                          fileSize: size,
+                          clientIp,
+                          sessionId: null,
+                          overlayBase: null,
+                          chunkIndex: null,
+                          recordingEnabled: null,
+                          isManifest: false,
+                        });
+                      } catch {
+                        // ignore
+                      }
+                      return;
+                    }
+
+                    const errMsg = lastError || `Downloader exited (${code})`;
+                    updateJob({ state: 'error', error: errMsg, phase: 'Error' });
+                  } catch (e) {
+                    updateJob({ state: 'error', error: String(e.message || e), phase: 'Error' });
+                  }
+                });
+              } catch (e) {
+                updateJob({ state: 'error', error: String(e.message || e), phase: 'Error' });
+              }
+            });
+            return;
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+            return;
+          }
+        }
+
+        if (!((method === 'PUT' || method === 'POST') && pathname.startsWith('/inbox/upload'))) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           res.end('Not found');
           return;
@@ -570,6 +1086,11 @@ function setupRemoteInboxHandlers(ipcMain, options) {
     return { success: true, status: { ...state } };
   });
 
+  ipcMain.handle('inbox:set-auth-token', async (_event, tokenRaw) => {
+    setAuthToken(tokenRaw);
+    return { success: true };
+  });
+
   // Renderer (server PC) updates job status while processing.
   ipcMain.handle('inbox:update-job', async (_event, jobIdRaw, partial) => {
     const jobId = String(jobIdRaw || '').trim();
@@ -611,7 +1132,7 @@ function setupRemoteInboxHandlers(ipcMain, options) {
     return { success: true };
   });
 
-  return { start, stop, state };
+  return { start, stop, state, setAuthToken };
 }
 
 module.exports = { setupRemoteInboxHandlers };

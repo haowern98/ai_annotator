@@ -33,6 +33,7 @@ const REMOTE_OVERLAY_POLL_FAILURE_DELAY_MS = 1000; // Retry delay on failure
 
 type RemoteOverlaySessionCfg = {
   remoteUrl: string;
+  authToken: string;
   sessionId: string;
   baseFilename: string;
   recordingEnabled: boolean;
@@ -663,7 +664,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         remoteCfg = null;
       }
 
-      if (!(remoteCfg?.mode === 'client' && remoteCfg?.remoteUrl)) {
+      if (!(remoteCfg?.mode === 'client' && remoteCfg?.remoteUrl && remoteCfg?.authToken)) {
         const msg = 'Remote Overlay is only available in Remote Processing Client Mode (connected).';
         addLog(msg, LogLevel.WARN);
         setError(msg);
@@ -671,8 +672,15 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       }
 
       const remoteUrl = String(remoteCfg.remoteUrl || '').trim();
+      const authToken = String(remoteCfg.authToken || '').trim();
       if (!remoteUrl) {
         const msg = 'Missing remote server URL.';
+        addLog(msg, LogLevel.ERROR);
+        setError(msg);
+        return;
+      }
+      if (!authToken) {
+        const msg = 'Missing remote server access token.';
         addLog(msg, LogLevel.ERROR);
         setError(msg);
         return;
@@ -718,7 +726,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const sessionId = `overlay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       const sessionState: RemoteOverlaySessionState = {
-        cfg: { remoteUrl, sessionId, baseFilename, recordingEnabled },
+        cfg: { remoteUrl, authToken, sessionId, baseFilename, recordingEnabled },
         recordingsDir,
         captureQuality,
         localChunkPaths: [],
@@ -1246,7 +1254,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             }
 
             // Fetch status
-            const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
+            const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId, cfg.authToken);
             if (!st?.success) {
               consecutiveFailures++;
               addLog(`[RemoteOverlay] Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES}): jobId=${jobId}`, LogLevel.WARN);
@@ -1280,7 +1288,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               typeof api.getRemoteJobTranscript === 'function'
             ) {
               try {
-                const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId);
+                const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId, cfg.authToken);
                 if (tr?.success && tr?.data) {
                   const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
                   const offsetMs = meta.offsetMs;
@@ -1324,7 +1332,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
           if (queueId) uploadQueueRef.current?.setRemoteProgress(queueId, 'Downloading results', 95);
 
-          const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
+          const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId, cfg.authToken);
           if (!res?.success || !res?.data) return;
           addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
           const serverMeta = res.data;
@@ -1440,7 +1448,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             `[RemoteOverlay] Upload start: ${next.storedFileName} (jobId=${next.jobId})`,
             LogLevel.INFO
           );
-          const res = await api.sendVideoToRemoteServer(cfg.remoteUrl, next.localPath, {
+          const res = await api.sendVideoToRemoteServerAuth(cfg.remoteUrl, next.localPath, {
             displayName: next.storedFileName,
             jobId: next.jobId,
             sessionId: cfg.sessionId,
@@ -1448,7 +1456,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             chunkIndex: next.isManifest ? '' : String(next.chunkIndex),
             isManifest: Boolean(next.isManifest),
             recordingEnabled: String(cfg.recordingEnabled),
-          });
+          }, cfg.authToken);
           if (!res?.success) {
             throw new Error(res?.error || 'Remote upload failed');
           }
@@ -1805,11 +1813,11 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         return;
       }
 
-      // If we're in client remote mode, download locally (into recordings) then upload to the remote server.
+      // If we're in client remote mode, ask the remote server to download + process the YouTube URL.
       try {
         const saved = localStorage.getItem('qwen_remote_config');
         const cfg = saved ? JSON.parse(saved) : null;
-        if (cfg?.mode === 'client' && cfg.remoteUrl) {
+        if (cfg?.mode === 'client' && cfg.remoteUrl && cfg.authToken) {
           if (!uploadQueueRef.current) {
             addLog('Upload queue not ready', LogLevel.ERROR);
             setError('Upload queue not ready yet. Try again in a moment.');
@@ -1817,63 +1825,29 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           }
 
           const api = window.electronAPI as any;
-          if (!api?.downloadYouTube || !api?.sendVideoToRemoteServer || !api?.initRecording) {
+          if (!api?.remoteYouTubeIngest || !api?.getRemoteJobStatus || !api?.getRemoteJobResult) {
             throw new Error('Electron API remote upload not available');
           }
 
-          const now = new Date();
-          const y = now.getFullYear();
-          const m = String(now.getMonth() + 1).padStart(2, '0');
-          const d = String(now.getDate()).padStart(2, '0');
-          const hh = String(now.getHours()).padStart(2, '0');
-          const mm = String(now.getMinutes()).padStart(2, '0');
-          const ss = String(now.getSeconds()).padStart(2, '0');
-          const rand = Math.random().toString(36).slice(2, 7);
-
           const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          const baseFilename = `lecture_${y}${m}${d}_${hh}${mm}${ss}_remote_${rand}`;
-
           const remoteQueueId = uploadQueueRef.current.addRemoteUpload(jobId, 0);
           remoteUploadIdRef.current = remoteQueueId;
           remoteJobIdRef.current = jobId;
           setIsUploadModalOpen(false);
           setIsUploadProgressOpen(true);
 
-          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Downloading YouTube', 0);
-          addLog('Downloading YouTube into recordings...', LogLevel.INFO);
+          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Requesting YouTube download', 0);
+          addLog('Requesting remote YouTube download...', LogLevel.INFO);
 
-          const ytRes = await api.downloadYouTube(url, (p: any) => {
-            if (p?.type === 'progress' && p.phase === 'downloading' && typeof p.percent === 'number') {
-              // Map YouTube download into 0-15%
-              const pct = Math.max(0, Math.min(15, (p.percent / 100) * 15));
-              uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading YouTube', pct);
-            }
-          }, { outputBase: baseFilename });
-
-          if (!ytRes?.success || !ytRes.file_path) {
-            throw new Error(ytRes?.error || 'YouTube download failed');
-          }
-
-          const clientVideoPath = String(ytRes.file_path);
-          remoteClientVideoPathRef.current = clientVideoPath;
-          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Downloading YouTube', 15, Number(ytRes.size || 0));
-
-          addLog('Uploading full video to remote server...', LogLevel.INFO);
-          uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Uploading to remote server', 15);
-
-          const res = await api.sendVideoToRemoteServer(
-            String(cfg.remoteUrl),
-            clientVideoPath,
-            { displayName: String(ytRes.file_name || `${baseFilename}.mp4`), jobId }
-          );
-          if (!res?.success) {
-            uploadQueueRef.current.failRemoteUpload(remoteQueueId, res?.error || 'Remote upload failed');
+          const ingestRes = await api.remoteYouTubeIngest(String(cfg.remoteUrl), url, jobId, String(cfg.authToken));
+          if (!ingestRes?.success) {
+            uploadQueueRef.current.failRemoteUpload(remoteQueueId, ingestRes?.error || 'Remote YouTube ingest failed');
             remoteUploadIdRef.current = null;
             remoteJobIdRef.current = null;
-            throw new Error(res?.error || 'Remote upload failed');
+            throw new Error(ingestRes?.error || 'Remote YouTube ingest failed');
           }
 
-          const effectiveJobId = String(res?.jobId || jobId);
+          const effectiveJobId = String(ingestRes?.data?.jobId || jobId);
           remoteJobIdRef.current = effectiveJobId;
 
           // Create abort controller for this poll
@@ -1906,7 +1880,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
                 await new Promise((r) => setTimeout(r, REMOTE_POLL_DELAY_MS));
 
-                const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
+                const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
                 if (!statusRes?.success) {
                   consecutiveFailures++;
                   addLog(`Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES})`, LogLevel.WARN);
@@ -1920,25 +1894,25 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 throw new Error(st?.error || 'Remote processing failed');
               }
               if (st?.state === 'complete') {
-                uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading results', 95);
-                const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId);
-                if (!metaRes?.success || !metaRes.data) {
-                  throw new Error(metaRes?.error || 'Failed to download results');
-                }
-                const meta = metaRes.data;
-
-                // Save metadata locally and rewrite videoPath/videoFilename via saveRecordingExisting.
-                delete (meta as any).wordTimestampsFile;
-                const saveRes = await api.saveRecordingExisting(clientVideoPath, meta);
-                if (!saveRes?.success) {
-                  throw new Error(saveRes?.error || 'Failed to save results to recordings');
-                }
-
                 uploadQueueRef.current?.completeRemoteUpload(remoteQueueId, 'Complete');
                 remoteUploadIdRef.current = null;
                 remoteJobIdRef.current = null;
                 remoteYouTubePollAbortRef.current = null;
-                addLog('Remote processing complete. Results saved to your recordings.', LogLevel.SUCCESS);
+
+                try {
+                  const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
+                  const savedAs = metaRes?.success ? metaRes?.data?.videoFilename : null;
+                  if (savedAs) addLog(`Remote processing complete. Saved on server as: ${savedAs}`, LogLevel.SUCCESS);
+                  else addLog('Remote processing complete. Saved on server.', LogLevel.SUCCESS);
+                } catch {
+                  addLog('Remote processing complete. Saved on server.', LogLevel.SUCCESS);
+                }
+
+                try {
+                  window.dispatchEvent(new Event('remote-library-changed'));
+                } catch {
+                  // ignore
+                }
                 return;
               }
 
@@ -1992,33 +1966,11 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     try {
       const saved = localStorage.getItem('qwen_remote_config');
       const cfg = saved ? JSON.parse(saved) : null;
-      if (cfg?.mode === 'client' && cfg.remoteUrl) {
+      if (cfg?.mode === 'client' && cfg.remoteUrl && cfg.authToken) {
         const api = window.electronAPI as any;
-        if (!api?.sendVideoToRemoteServer) {
-          throw new Error('Electron API sendVideoToRemoteServer not available');
+        if (!api?.sendVideoToRemoteServerAuth || !api?.getRemoteJobStatus || !api?.getRemoteJobResult) {
+          throw new Error('Electron API remote upload not available');
         }
-
-        if (!api?.ingestVideoToRecordingsAs) {
-          throw new Error('Electron API ingestVideoToRecordingsAs not available');
-        }
-
-        const now = new Date();
-        const y = now.getFullYear();
-        const m = String(now.getMonth() + 1).padStart(2, '0');
-        const d = String(now.getDate()).padStart(2, '0');
-        const hh = String(now.getHours()).padStart(2, '0');
-        const mm = String(now.getMinutes()).padStart(2, '0');
-        const ss = String(now.getSeconds()).padStart(2, '0');
-        const rand = Math.random().toString(36).slice(2, 7);
-        const baseFilename = `lecture_${y}${m}${d}_${hh}${mm}${ss}_remote_${rand}`;
-
-        const ingest = await api.ingestVideoToRecordingsAs(source.value.path, baseFilename);
-        if (!ingest?.success || !ingest.videoPath || !ingest.videoFilename) {
-          throw new Error(ingest?.error || 'Failed to copy into recordings');
-        }
-        const clientVideoPath = String(ingest.videoPath);
-        const clientFileName = String(ingest.videoFilename);
-        remoteClientVideoPathRef.current = clientVideoPath;
 
         const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const remoteQueueId = uploadQueueRef.current.addRemoteUpload(jobId, source.value.size);
@@ -2029,10 +1981,11 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Uploading to remote server', 0);
         addLog('Uploading full video to remote server...', LogLevel.INFO);
-        const res = await api.sendVideoToRemoteServer(
+        const res = await api.sendVideoToRemoteServerAuth(
           String(cfg.remoteUrl),
-          clientVideoPath,
-          { displayName: clientFileName, jobId }
+          String(source.value.path),
+          { displayName: String(source.value.name || 'video'), jobId },
+          String(cfg.authToken)
         );
         if (!res?.success) {
           uploadQueueRef.current.failRemoteUpload(remoteQueueId, res?.error || 'Remote upload failed');
@@ -2075,7 +2028,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
               await new Promise((r) => setTimeout(r, REMOTE_POLL_DELAY_MS));
 
-              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
+              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
               if (!statusRes?.success) {
                 consecutiveFailures++;
                 addLog(`Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES})`, LogLevel.WARN);
@@ -2090,23 +2043,26 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             }
             if (st?.state === 'complete') {
               uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading results', 95);
-              const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId);
+              const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
               if (!metaRes?.success || !metaRes.data) {
                 throw new Error(metaRes?.error || 'Failed to download results');
               }
               const meta = metaRes.data;
 
-              delete (meta as any).wordTimestampsFile;
-              const saveRes = await api.saveRecordingExisting(clientVideoPath, meta);
-              if (!saveRes?.success) {
-                throw new Error(saveRes?.error || 'Failed to save results to recordings');
-              }
-
               uploadQueueRef.current?.completeRemoteUpload(remoteQueueId, 'Complete');
               remoteUploadIdRef.current = null;
               remoteJobIdRef.current = null;
               remoteFilePollAbortRef.current = null;
-              addLog('Remote processing complete. Results saved to your recordings.', LogLevel.SUCCESS);
+
+              const savedAs = meta?.videoFilename ? String(meta.videoFilename) : '';
+              if (savedAs) addLog(`Remote processing complete. Saved on server as: ${savedAs}`, LogLevel.SUCCESS);
+              else addLog('Remote processing complete. Saved on server.', LogLevel.SUCCESS);
+
+              try {
+                window.dispatchEvent(new Event('remote-library-changed'));
+              } catch {
+                // ignore
+              }
               return;
             }
 

@@ -219,14 +219,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendVideoToRemoteServer: async (serverUrl, filePath, displayName) => {
     return await ipcRenderer.invoke('remoteUpload:sendFile', serverUrl, filePath, displayName);
   },
-  getRemoteJobStatus: async (serverUrl, jobId) => {
-    return await ipcRenderer.invoke('remoteUpload:getStatus', serverUrl, jobId);
+  setRemoteUploadAuth: async (serverUrl, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:setAuth', serverUrl, authToken);
   },
-  getRemoteJobResult: async (serverUrl, jobId) => {
-    return await ipcRenderer.invoke('remoteUpload:getResult', serverUrl, jobId);
+  setRemoteInboxAuthToken: async (authToken) => {
+    return await ipcRenderer.invoke('inbox:set-auth-token', authToken);
   },
-  getRemoteJobTranscript: async (serverUrl, jobId) => {
-    return await ipcRenderer.invoke('remoteUpload:getTranscript', serverUrl, jobId);
+  sendVideoToRemoteServerAuth: async (serverUrl, filePath, displayName, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:sendFile', serverUrl, filePath, displayName, authToken);
+  },
+  getRemoteJobStatus: async (serverUrl, jobId, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:getStatus', serverUrl, jobId, authToken);
+  },
+  getRemoteJobResult: async (serverUrl, jobId, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:getResult', serverUrl, jobId, authToken);
+  },
+  getRemoteJobTranscript: async (serverUrl, jobId, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:getTranscript', serverUrl, jobId, authToken);
+  },
+  remoteLibraryList: async (serverUrl, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:libraryList', serverUrl, authToken);
+  },
+  remoteLibraryMeta: async (serverUrl, lectureId, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:libraryMeta', serverUrl, lectureId, authToken);
+  },
+  remoteLibraryWords: async (serverUrl, lectureId, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:libraryWords', serverUrl, lectureId, authToken);
+  },
+  remoteYouTubeIngest: async (serverUrl, url, jobId, authToken) => {
+    return await ipcRenderer.invoke('remoteUpload:youtubeIngest', serverUrl, url, jobId, authToken);
   },
   onRemoteUploadProgress: (callback) => {
     ipcRenderer.on('remoteUpload:progress', (event, payload) => callback(payload));

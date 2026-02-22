@@ -303,10 +303,12 @@ function processInlineFormatting(text: string, baseKey: number): React.ReactNode
 
 interface LectureDetailsProps {
   lectureId?: string;
+  lectureOrigin?: 'local' | 'remote';
+  remoteServerUrl?: string;
   onTitleUpdated?: (lectureId: string, title: string) => void;
 }
 
-const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, onTitleUpdated }) => {
+const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, lectureOrigin = 'local', remoteServerUrl, onTitleUpdated }) => {
   const [lectureData, setLectureData] = useState<LectureData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -410,23 +412,57 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, onTitleUpdat
 
       try {
         const electronAPI = (window as any).electronAPI;
-        if (!electronAPI?.getRecordingMetadata) {
-          console.error('electronAPI.getRecordingMetadata not available');
-          setIsLoading(false);
-          return;
+
+        console.log('[LectureDetails] Loading metadata for:', lectureId, 'origin=', lectureOrigin);
+
+        let meta: any = null;
+
+        if (lectureOrigin === 'remote') {
+          if (!electronAPI?.remoteLibraryMeta) {
+            console.error('electronAPI.remoteLibraryMeta not available');
+            setIsLoading(false);
+            return;
+          }
+
+          const raw = localStorage.getItem('qwen_remote_config');
+          const cfg = raw ? JSON.parse(raw) : null;
+          const serverUrl = String(remoteServerUrl || cfg?.remoteUrl || '').trim();
+          const token = String(cfg?.authToken || '').trim();
+          if (!serverUrl || !token) {
+            throw new Error('Remote library not configured (missing server URL or token)');
+          }
+
+          try {
+            await electronAPI.setRemoteUploadAuth?.(serverUrl, token);
+          } catch {
+            // ignore
+          }
+
+          const res = await electronAPI.remoteLibraryMeta(serverUrl, lectureId, token);
+          if (!res?.success || !res?.data?.metadata) {
+            throw new Error(res?.error || 'Failed to load remote lecture metadata');
+          }
+          meta = res.data.metadata;
+        } else {
+          if (!electronAPI?.getRecordingMetadata) {
+            console.error('electronAPI.getRecordingMetadata not available');
+            setIsLoading(false);
+            return;
+          }
+
+          // Try MP4 first, then fallback to WebM for older recordings
+          let result = await electronAPI.getRecordingMetadata(lectureId + '.mp4');
+          if (!result.success) {
+            console.log('[LectureDetails] MP4 metadata not found, trying WebM');
+            result = await electronAPI.getRecordingMetadata(lectureId + '.webm');
+          }
+
+          if (result.success && result.metadata) {
+            meta = result.metadata;
+          }
         }
 
-        console.log('[LectureDetails] Loading metadata for:', lectureId);
-        
-        // Try MP4 first, then fallback to WebM for older recordings
-        let result = await electronAPI.getRecordingMetadata(lectureId + '.mp4');
-        if (!result.success) {
-          console.log('[LectureDetails] MP4 metadata not found, trying WebM');
-          result = await electronAPI.getRecordingMetadata(lectureId + '.webm');
-        }
-        
-        if (result.success && result.metadata) {
-          const meta = result.metadata;
+        if (meta) {
           
           // Extract filename without extension - support both .mp4 and .webm
           const videoExtension = meta.videoFilename?.match(/\.(webm|mp4)$/)?.[0] || '.webm';
@@ -506,34 +542,47 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, onTitleUpdat
 
           // Load video if available
           if (meta.videoPath && meta.fileSize > 0) {
-            // Prefer streaming playback via custom protocol to avoid loading large files into renderer memory.
-            if (electronAPI?.getRecordingVideoPath) {
-              console.log('[LectureDetails] Loading video path...');
-              const videoPathResult = await electronAPI.getRecordingVideoPath(meta.videoFilename);
-              if (videoPathResult?.success && videoPathResult.path) {
-                // Use localhost as host for proper URL format
-                const normalizedPath = videoPathResult.path.replace(/\\/g, '/');
-                const url = `video://localhost/${normalizedPath}`;
-                setVideoUrl(url);
-                console.log('[LectureDetails] Video loaded via video:// protocol');
-              }
-            } else if (electronAPI?.getRecordingVideo) {
-              console.log('[LectureDetails] Loading video data...');
-              const videoResult = await electronAPI.getRecordingVideo(meta.videoFilename);
-              if (videoResult?.success && videoResult.data) {
-                // Convert base64 to blob URL (small recordings only).
-                const byteCharacters = atob(videoResult.data);
-                const byteNumbers = new Array(byteCharacters.length);
-                for (let i = 0; i < byteCharacters.length; i++) {
-                  byteNumbers[i] = byteCharacters.charCodeAt(i);
+            if (lectureOrigin === 'remote') {
+              const raw = localStorage.getItem('qwen_remote_config');
+              const cfg = raw ? JSON.parse(raw) : null;
+              const serverUrl = String(remoteServerUrl || cfg?.remoteUrl || '').trim();
+              const u = new URL(/^https?:\/\//i.test(serverUrl) ? serverUrl : `http://${serverUrl}`);
+              const port = u.port ? String(Number(u.port) + 1) : '7557';
+              u.port = port;
+              u.pathname = `/library/lectures/${encodeURIComponent(lectureId)}/video`;
+              u.search = '';
+              setVideoUrl(u.toString());
+              console.log('[LectureDetails] Video loaded via remote library URL');
+            } else {
+              // Prefer streaming playback via custom protocol to avoid loading large files into renderer memory.
+              if (electronAPI?.getRecordingVideoPath) {
+                console.log('[LectureDetails] Loading video path...');
+                const videoPathResult = await electronAPI.getRecordingVideoPath(meta.videoFilename);
+                if (videoPathResult?.success && videoPathResult.path) {
+                  // Use localhost as host for proper URL format
+                  const normalizedPath = videoPathResult.path.replace(/\\/g, '/');
+                  const url = `video://localhost/${normalizedPath}`;
+                  setVideoUrl(url);
+                  console.log('[LectureDetails] Video loaded via video:// protocol');
                 }
-                const byteArray = new Uint8Array(byteNumbers);
-                const blob = new Blob([byteArray], { type: videoResult.mimeType || 'video/webm' });
-                const url = URL.createObjectURL(blob);
-                setVideoUrl(url);
-                console.log('[LectureDetails] Video loaded as blob URL');
-              } else if (videoResult?.error) {
-                console.warn('[LectureDetails] Failed to load video data:', videoResult.error);
+              } else if (electronAPI?.getRecordingVideo) {
+                console.log('[LectureDetails] Loading video data...');
+                const videoResult = await electronAPI.getRecordingVideo(meta.videoFilename);
+                if (videoResult?.success && videoResult.data) {
+                  // Convert base64 to blob URL (small recordings only).
+                  const byteCharacters = atob(videoResult.data);
+                  const byteNumbers = new Array(byteCharacters.length);
+                  for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                  }
+                  const byteArray = new Uint8Array(byteNumbers);
+                  const blob = new Blob([byteArray], { type: videoResult.mimeType || 'video/webm' });
+                  const url = URL.createObjectURL(blob);
+                  setVideoUrl(url);
+                  console.log('[LectureDetails] Video loaded as blob URL');
+                } else if (videoResult?.error) {
+                  console.warn('[LectureDetails] Failed to load video data:', videoResult.error);
+                }
               }
             }
           }

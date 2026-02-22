@@ -931,6 +931,7 @@ export class UploadQueueManager {
         summaries,
         uploadedFileName: video.fileName,
         uploadedFileSize: video.fileSize,
+        origin: { kind: 'local' },
         recordedMimeType: recordedMimeType || 'video/webm'
       };
 

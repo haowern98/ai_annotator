@@ -18,6 +18,7 @@ interface Lecture {
   videoPath: string;
   lastModified: string;
   origin: 'local' | 'remote';
+  remoteServerUrl?: string;
 }
 
 interface RecordingMetadata {
@@ -32,6 +33,7 @@ interface RecordingMetadata {
   savedAt: string;
   fileSize: number;
   userTitle?: string | null;
+  origin?: { kind?: 'local' | 'remote'; serverUrl?: string; serverId?: string } | 'local' | 'remote' | null;
 }
 
 interface HistoryHomeProps {
@@ -44,7 +46,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [lectures, setLectures] = useState<Lecture[]>([]);
-  const [selectedLectureId, setSelectedLectureId] = useState<string | null>(null);
+  const [selectedLecture, setSelectedLecture] = useState<null | { id: string; origin: 'local' | 'remote'; remoteServerUrl?: string }>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [originFilterUi, setOriginFilterUi] = useState<'all' | 'local' | 'remote'>('all');
 
@@ -59,9 +61,12 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           return;
         }
 
-        const result = await electronAPI.listRecordings();
-        if (result.success && result.recordings) {
-          const formattedLectures: Lecture[] = result.recordings.map((rec: RecordingMetadata, index: number) => {
+        const formatLectureFromRecording = (
+          rec: RecordingMetadata,
+          index: number,
+          originOverride: 'local' | 'remote',
+          remoteServerUrl?: string
+        ): Lecture => {
             const rawVideoFilename =
               rec.videoFilename ||
               (typeof rec.videoPath === 'string' && rec.videoPath
@@ -91,7 +96,16 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               filename = `lecture_unknown_${index}`;
             }
 
-            const isRemote = /(^|_)remote(_|$)/i.test(filename) || filename.includes('_overlay_remote');
+            const isRemoteByName = /(^|_)remote(_|$)/i.test(filename) || filename.includes('_overlay_remote');
+            const originKindFromMeta = (() => {
+              const o: any = (rec as any).origin;
+              if (!o) return null;
+              if (typeof o === 'string') return o === 'remote' ? 'remote' : 'local';
+              if (typeof o === 'object' && typeof o.kind === 'string') return o.kind === 'remote' ? 'remote' : 'local';
+              return null;
+            })();
+            const inferredOrigin: 'local' | 'remote' = originKindFromMeta || (isRemoteByName ? 'remote' : 'local');
+            const originKind: 'local' | 'remote' = originOverride || inferredOrigin;
 
             const titleParts = filename.split('_');
             const dateStr = titleParts[1] || '';
@@ -165,14 +179,39 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               filePath: (rec.videoPath || '').replace(/\\\\/g, '/'),
               videoPath: rec.videoPath || '',
               lastModified,
-              origin: isRemote ? 'remote' : 'local',
+              origin: originKind,
+              remoteServerUrl,
             };
-          });
+        };
 
-          // Sort by date descending (newest first)
-          formattedLectures.sort((a, b) => b.id.localeCompare(a.id));
-          setLectures(formattedLectures);
+        const localResult = await electronAPI.listRecordings();
+        const localLectures: Lecture[] =
+          localResult.success && Array.isArray(localResult.recordings)
+            ? localResult.recordings.map((rec: RecordingMetadata, index: number) =>
+                formatLectureFromRecording(rec, index, 'local')
+              )
+            : [];
+
+        let remoteLectures: Lecture[] = [];
+        try {
+          const raw = localStorage.getItem('qwen_remote_config');
+          const cfg = raw ? JSON.parse(raw) : null;
+          if (cfg?.mode === 'client' && cfg.remoteUrl && cfg.authToken && electronAPI?.remoteLibraryList) {
+            const remoteRes = await electronAPI.remoteLibraryList(String(cfg.remoteUrl), String(cfg.authToken));
+            const recs = remoteRes?.success ? remoteRes?.data?.recordings : null;
+            if (Array.isArray(recs)) {
+              remoteLectures = recs.map((rec: RecordingMetadata, index: number) =>
+                formatLectureFromRecording(rec, index, 'remote', String(cfg.remoteUrl))
+              );
+            }
+          }
+        } catch (e) {
+          console.warn('[HistoryHome] Failed to load remote library:', (e as any)?.message || e);
         }
+
+        const merged = [...localLectures, ...remoteLectures];
+        merged.sort((a, b) => b.id.localeCompare(a.id));
+        setLectures(merged);
       } catch (err) {
         console.error('Failed to load recordings:', err);
       } finally {
@@ -181,6 +220,14 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
     };
 
     loadRecordings();
+
+    const onRemoteChanged = () => loadRecordings();
+    window.addEventListener('remote-library-changed', onRemoteChanged);
+    window.addEventListener('qwen-config-changed', onRemoteChanged);
+    return () => {
+      window.removeEventListener('remote-library-changed', onRemoteChanged);
+      window.removeEventListener('qwen-config-changed', onRemoteChanged);
+    };
   }, []);
 
   const filteredLectures = lectures.filter(lecture =>
@@ -197,12 +244,21 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
   const handleOpenLecture = (lectureId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setSelectedLectureId(lectureId);
+    const found = lectures.find((l) => l.id === lectureId) || null;
+    if (found) {
+      setSelectedLecture({ id: found.id, origin: found.origin, remoteServerUrl: found.remoteServerUrl });
+    } else {
+      setSelectedLecture({ id: lectureId, origin: 'local' });
+    }
     onNavigate?.('lecture-details');
   };
 
   const handleDelete = async (lecture: Lecture, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (lecture.origin === 'remote') {
+      console.warn('[HistoryHome] Delete not supported for remote lectures yet');
+      return;
+    }
 
     // Show native Electron confirmation dialog
     const electronAPI = (window as any).electronAPI;
@@ -248,7 +304,9 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
   if (currentView === 'lecture-details') {
     return (
       <LectureDetails
-        lectureId={selectedLectureId || undefined}
+        lectureId={selectedLecture?.id || undefined}
+        lectureOrigin={selectedLecture?.origin}
+        remoteServerUrl={selectedLecture?.remoteServerUrl}
         onTitleUpdated={(id, newTitle) => {
           setLectures((prev) =>
             prev.map((l) => (l.id === id ? { ...l, title: newTitle } : l))
