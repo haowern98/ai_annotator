@@ -196,8 +196,8 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
         try {
           const raw = localStorage.getItem('qwen_remote_config');
           const cfg = raw ? JSON.parse(raw) : null;
-          if (cfg?.mode === 'client' && cfg.remoteUrl && cfg.authToken && electronAPI?.remoteLibraryList) {
-            const remoteRes = await electronAPI.remoteLibraryList(String(cfg.remoteUrl), String(cfg.authToken));
+          if (cfg?.mode === 'client' && cfg.remoteUrl && electronAPI?.remoteLibraryList) {
+            const remoteRes = await electronAPI.remoteLibraryList(String(cfg.remoteUrl));
             const recs = remoteRes?.success ? remoteRes?.data?.recordings : null;
             if (Array.isArray(recs)) {
               remoteLectures = recs.map((rec: RecordingMetadata, index: number) =>

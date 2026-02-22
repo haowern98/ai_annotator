@@ -427,18 +427,11 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, lectureOrigi
           const raw = localStorage.getItem('qwen_remote_config');
           const cfg = raw ? JSON.parse(raw) : null;
           const serverUrl = String(remoteServerUrl || cfg?.remoteUrl || '').trim();
-          const token = String(cfg?.authToken || '').trim();
-          if (!serverUrl || !token) {
-            throw new Error('Remote library not configured (missing server URL or token)');
+          if (!serverUrl) {
+            throw new Error('Remote library not configured (missing server URL)');
           }
 
-          try {
-            await electronAPI.setRemoteUploadAuth?.(serverUrl, token);
-          } catch {
-            // ignore
-          }
-
-          const res = await electronAPI.remoteLibraryMeta(serverUrl, lectureId, token);
+          const res = await electronAPI.remoteLibraryMeta(serverUrl, lectureId);
           if (!res?.success || !res?.data?.metadata) {
             throw new Error(res?.error || 'Failed to load remote lecture metadata');
           }

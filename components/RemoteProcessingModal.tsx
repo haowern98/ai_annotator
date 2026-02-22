@@ -7,7 +7,6 @@ type Mode = 'server' | 'client' | 'webviewer';
 interface RemoteConfig {
   mode: 'local' | 'server' | 'client';
   remoteUrl?: string;
-  authToken?: string;
   lastConnected?: number;
 }
 
@@ -70,7 +69,6 @@ interface RemoteProcessingModalProps {
 const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, onClose, onSuccess }) => {
   const [mode, setMode] = useState<Mode>('server');
   const [serverUrl, setServerUrl] = useState('');
-  const [authToken, setAuthToken] = useState('');
   const [localIP, setLocalIP] = useState('Detecting...');
   const [publicIP, setPublicIP] = useState('Loading...');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
@@ -102,9 +100,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     const savedConfig = loadRemoteConfig();
     if (savedConfig?.mode === 'client' && savedConfig.remoteUrl) {
       setServerUrl(savedConfig.remoteUrl);
-    }
-    if (typeof savedConfig?.authToken === 'string') {
-      setAuthToken(savedConfig.authToken);
     }
 
     const savedWebViewer = loadWebViewerConfig();
@@ -227,35 +222,11 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     setIsStarting(true);
     
     try {
-      let token = String(authToken || '').trim();
-      if (!token) {
-        // Generate a stable token if one isn't set yet.
-        try {
-          const bytes = new Uint8Array(24);
-          window.crypto.getRandomValues(bytes);
-          token = btoa(String.fromCharCode(...bytes))
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=+$/g, '');
-          setAuthToken(token);
-        } catch {
-          token = `tok_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-          setAuthToken(token);
-        }
-      }
-
-      // Configure inbox auth token before starting the server.
-      try {
-        await window.electronAPI.setRemoteInboxAuthToken?.(token);
-      } catch {
-        // ignore
-      }
-
       const result = await window.electronAPI.startQwenRemote();
       
       if (result.success) {
         // Save server mode config
-        saveRemoteConfig({ mode: 'server', authToken: token, lastConnected: Date.now() });
+        saveRemoteConfig({ mode: 'server', lastConnected: Date.now() });
         setIsServerRunning(true);
         onClose();
       } else {
@@ -335,26 +306,13 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
       alert('Please enter a server URL');
       return;
     }
-    const token = String(authToken || '').trim();
-    if (!token) {
-      alert('Please enter the access token from the server');
-      return;
-    }
 
     // Save client mode config
     saveRemoteConfig({
       mode: 'client',
       remoteUrl: serverUrl,
-      authToken: token,
       lastConnected: Date.now()
     });
-
-    // Set cookie-based auth for the inbox origin so remote playback works.
-    try {
-      window.electronAPI?.setRemoteUploadAuth?.(serverUrl, token);
-    } catch {
-      // ignore
-    }
 
     onClose();
     onSuccess?.(); // Opens UploadLectureModal
@@ -660,55 +618,7 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                 </div>
               </div>
 
-              {/* Access Token */}
-              <div style={{ marginTop: '16px' }}>
-                <label style={{ display: 'block', fontSize: '13px', color: '#aaaaaa', marginBottom: '6px' }}>
-                  Access Token
-                </label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    type="text"
-                    value={authToken}
-                    readOnly
-                    placeholder="Generated on Start Server"
-                    style={{
-                      flex: 1,
-                      padding: '10px 12px',
-                      backgroundColor: '#1a1a1a',
-                      border: '1px solid #333333',
-                      borderRadius: '6px',
-                      color: '#ffffff',
-                      fontSize: '14px',
-                      fontFamily: 'monospace'
-                    }}
-                  />
-                  <button
-                    onClick={() => handleCopy(authToken, 'token')}
-                    disabled={!authToken}
-                    style={{
-                      padding: '10px 16px',
-                      backgroundColor: copiedField === 'token' ? '#10b981' : '#0E72ED',
-                      border: 'none',
-                      borderRadius: '6px',
-                      color: '#ffffff',
-                      cursor: !authToken ? 'not-allowed' : 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      fontSize: '13px',
-                      fontWeight: 500,
-                      opacity: !authToken ? 0.5 : 1,
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    {copiedField === 'token' ? <Check size={16} /> : <Copy size={16} />}
-                    {copiedField === 'token' ? 'Copied' : 'Copy'}
-                  </button>
-                </div>
-                <div style={{ marginTop: '6px', fontSize: '12px', color: '#888888' }}>
-                  Clients must enter this token to access videos and summaries on this PC.
-                </div>
-              </div>
+              {/* Access Token removed */}
             </div>
 
             {/* Port Forwarding Warning */}
@@ -774,32 +684,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                   value={serverUrl}
                   onChange={(e) => setServerUrl(e.target.value)}
                   placeholder="http://203.0.113.45:7556"
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    backgroundColor: '#1a1a1a',
-                    border: '1px solid #333333',
-                    borderRadius: '6px',
-                    color: '#ffffff',
-                    fontSize: '14px',
-                    fontFamily: 'monospace',
-                    outline: 'none'
-                  }}
-                  onFocus={(e) => e.target.style.borderColor = '#0E72ED'}
-                  onBlur={(e) => e.target.style.borderColor = '#333333'}
-                />
-              </div>
-
-              {/* Access Token Input */}
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '13px', color: '#aaaaaa', marginBottom: '6px' }}>
-                  Access Token
-                </label>
-                <input
-                  type="text"
-                  value={authToken}
-                  onChange={(e) => setAuthToken(e.target.value)}
-                  placeholder="Paste token from server"
                   style={{
                     width: '100%',
                     padding: '10px 12px',

@@ -4,23 +4,6 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const { spawn } = require('child_process');
 
-function parseCookies(cookieHeader) {
-  const raw = String(cookieHeader || '').trim();
-  if (!raw) return {};
-  const out = {};
-  raw.split(';').forEach((part) => {
-    const p = String(part || '').trim();
-    if (!p) return;
-    const idx = p.indexOf('=');
-    if (idx <= 0) return;
-    const k = p.slice(0, idx).trim();
-    const v = p.slice(idx + 1).trim();
-    if (!k) return;
-    out[k] = decodeURIComponent(v);
-  });
-  return out;
-}
-
 function readRequestBody(req, maxBytes = 2 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let total = 0;
@@ -42,21 +25,6 @@ function readRequestBody(req, maxBytes = 2 * 1024 * 1024) {
     req.on('error', (e) => reject(e));
     req.on('end', () => resolve(Buffer.concat(chunks)));
   });
-}
-
-function getAuthTokenFromReq(req) {
-  const header = req.headers['x-ai-annotator-token'];
-  const tokenFromHeader = String(Array.isArray(header) ? header[0] : header || '').trim();
-  if (tokenFromHeader) return tokenFromHeader;
-
-  const auth = req.headers['authorization'];
-  const rawAuth = String(Array.isArray(auth) ? auth[0] : auth || '').trim();
-  const m = rawAuth.match(/^Bearer\s+(.+)$/i);
-  if (m && m[1]) return String(m[1]).trim();
-
-  const cookies = parseCookies(req.headers['cookie']);
-  const tokenFromCookie = String(cookies.ai_annotator_token || '').trim();
-  return tokenFromCookie || '';
 }
 
 function generateFilename() {
@@ -302,12 +270,6 @@ function setupRemoteInboxHandlers(ipcMain, options) {
   // Used by clients to poll status and fetch final metadata JSON.
   const jobs = new Map();
 
-  let authToken = null;
-  const setAuthToken = (next) => {
-    const t = String(next || '').trim();
-    authToken = t ? t : null;
-  };
-
   const state = {
     running: false,
     port: defaultPort,
@@ -373,52 +335,7 @@ function setupRemoteInboxHandlers(ipcMain, options) {
           return;
         }
 
-        // Cookie-based login (so <video> playback does not need URL tokens).
-        // POST /auth/login { token }
-        if (method === 'POST' && (pathname === '/auth/login' || pathname === '/inbox/auth/login')) {
-          try {
-            if (!authToken) {
-              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ success: false, error: 'Auth token not configured on server' }));
-              return;
-            }
-
-            const body = await readRequestBody(req, 128 * 1024);
-            let parsed = null;
-            try {
-              parsed = JSON.parse(String(body || ''));
-            } catch {
-              // ignore
-            }
-            const provided = String(parsed?.token || '').trim();
-            if (!provided || provided !== authToken) {
-              res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
-              return;
-            }
-
-            res.writeHead(200, {
-              'Content-Type': 'application/json; charset=utf-8',
-              'Set-Cookie': `ai_annotator_token=${encodeURIComponent(authToken)}; Path=/; HttpOnly; SameSite=Lax`,
-            });
-            res.end(JSON.stringify({ success: true }));
-            return;
-          } catch (e) {
-            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
-            return;
-          }
-        }
-
-        // Require auth (header or cookie) for everything else (except health).
-        if (authToken) {
-          const got = getAuthTokenFromReq(req);
-          if (!got || got !== authToken) {
-            res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
-            return;
-          }
-        }
+        // Auth removed (remote inbox and library are currently unauthenticated).
 
         // Remote library (server is the source of truth): list and serve recordings from this PC.
         if (method === 'GET' && (pathname === '/library/lectures' || pathname === '/library/recordings')) {
@@ -1086,11 +1003,6 @@ function setupRemoteInboxHandlers(ipcMain, options) {
     return { success: true, status: { ...state } };
   });
 
-  ipcMain.handle('inbox:set-auth-token', async (_event, tokenRaw) => {
-    setAuthToken(tokenRaw);
-    return { success: true };
-  });
-
   // Renderer (server PC) updates job status while processing.
   ipcMain.handle('inbox:update-job', async (_event, jobIdRaw, partial) => {
     const jobId = String(jobIdRaw || '').trim();
@@ -1132,7 +1044,7 @@ function setupRemoteInboxHandlers(ipcMain, options) {
     return { success: true };
   });
 
-  return { start, stop, state, setAuthToken };
+  return { start, stop, state };
 }
 
 module.exports = { setupRemoteInboxHandlers };

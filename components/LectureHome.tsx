@@ -33,7 +33,6 @@ const REMOTE_OVERLAY_POLL_FAILURE_DELAY_MS = 1000; // Retry delay on failure
 
 type RemoteOverlaySessionCfg = {
   remoteUrl: string;
-  authToken: string;
   sessionId: string;
   baseFilename: string;
   recordingEnabled: boolean;
@@ -664,7 +663,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         remoteCfg = null;
       }
 
-      if (!(remoteCfg?.mode === 'client' && remoteCfg?.remoteUrl && remoteCfg?.authToken)) {
+      if (!(remoteCfg?.mode === 'client' && remoteCfg?.remoteUrl)) {
         const msg = 'Remote Overlay is only available in Remote Processing Client Mode (connected).';
         addLog(msg, LogLevel.WARN);
         setError(msg);
@@ -672,15 +671,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       }
 
       const remoteUrl = String(remoteCfg.remoteUrl || '').trim();
-      const authToken = String(remoteCfg.authToken || '').trim();
       if (!remoteUrl) {
         const msg = 'Missing remote server URL.';
-        addLog(msg, LogLevel.ERROR);
-        setError(msg);
-        return;
-      }
-      if (!authToken) {
-        const msg = 'Missing remote server access token.';
         addLog(msg, LogLevel.ERROR);
         setError(msg);
         return;
@@ -726,7 +718,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const sessionId = `overlay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       const sessionState: RemoteOverlaySessionState = {
-        cfg: { remoteUrl, authToken, sessionId, baseFilename, recordingEnabled },
+        cfg: { remoteUrl, sessionId, baseFilename, recordingEnabled },
         recordingsDir,
         captureQuality,
         localChunkPaths: [],
@@ -1254,7 +1246,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             }
 
             // Fetch status
-            const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId, cfg.authToken);
+            const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
             if (!st?.success) {
               consecutiveFailures++;
               addLog(`[RemoteOverlay] Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES}): jobId=${jobId}`, LogLevel.WARN);
@@ -1288,7 +1280,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               typeof api.getRemoteJobTranscript === 'function'
             ) {
               try {
-                const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId, cfg.authToken);
+                const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId);
                 if (tr?.success && tr?.data) {
                   const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
                   const offsetMs = meta.offsetMs;
@@ -1332,7 +1324,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
           if (queueId) uploadQueueRef.current?.setRemoteProgress(queueId, 'Downloading results', 95);
 
-          const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId, cfg.authToken);
+          const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
           if (!res?.success || !res?.data) return;
           addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
           const serverMeta = res.data;
@@ -1448,7 +1440,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             `[RemoteOverlay] Upload start: ${next.storedFileName} (jobId=${next.jobId})`,
             LogLevel.INFO
           );
-          const res = await api.sendVideoToRemoteServerAuth(cfg.remoteUrl, next.localPath, {
+          const res = await api.sendVideoToRemoteServer(cfg.remoteUrl, next.localPath, {
             displayName: next.storedFileName,
             jobId: next.jobId,
             sessionId: cfg.sessionId,
@@ -1456,7 +1448,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             chunkIndex: next.isManifest ? '' : String(next.chunkIndex),
             isManifest: Boolean(next.isManifest),
             recordingEnabled: String(cfg.recordingEnabled),
-          }, cfg.authToken);
+          });
           if (!res?.success) {
             throw new Error(res?.error || 'Remote upload failed');
           }
@@ -1817,7 +1809,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       try {
         const saved = localStorage.getItem('qwen_remote_config');
         const cfg = saved ? JSON.parse(saved) : null;
-        if (cfg?.mode === 'client' && cfg.remoteUrl && cfg.authToken) {
+        if (cfg?.mode === 'client' && cfg.remoteUrl) {
           if (!uploadQueueRef.current) {
             addLog('Upload queue not ready', LogLevel.ERROR);
             setError('Upload queue not ready yet. Try again in a moment.');
@@ -1839,7 +1831,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Requesting YouTube download', 0);
           addLog('Requesting remote YouTube download...', LogLevel.INFO);
 
-          const ingestRes = await api.remoteYouTubeIngest(String(cfg.remoteUrl), url, jobId, String(cfg.authToken));
+          const ingestRes = await api.remoteYouTubeIngest(String(cfg.remoteUrl), url, jobId);
           if (!ingestRes?.success) {
             uploadQueueRef.current.failRemoteUpload(remoteQueueId, ingestRes?.error || 'Remote YouTube ingest failed');
             remoteUploadIdRef.current = null;
@@ -1880,7 +1872,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
                 await new Promise((r) => setTimeout(r, REMOTE_POLL_DELAY_MS));
 
-                const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
+                const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
                 if (!statusRes?.success) {
                   consecutiveFailures++;
                   addLog(`Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES})`, LogLevel.WARN);
@@ -1900,7 +1892,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
                 remoteYouTubePollAbortRef.current = null;
 
                 try {
-                  const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
+                  const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId);
                   const savedAs = metaRes?.success ? metaRes?.data?.videoFilename : null;
                   if (savedAs) addLog(`Remote processing complete. Saved on server as: ${savedAs}`, LogLevel.SUCCESS);
                   else addLog('Remote processing complete. Saved on server.', LogLevel.SUCCESS);
@@ -1966,9 +1958,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     try {
       const saved = localStorage.getItem('qwen_remote_config');
       const cfg = saved ? JSON.parse(saved) : null;
-      if (cfg?.mode === 'client' && cfg.remoteUrl && cfg.authToken) {
+      if (cfg?.mode === 'client' && cfg.remoteUrl) {
         const api = window.electronAPI as any;
-        if (!api?.sendVideoToRemoteServerAuth || !api?.getRemoteJobStatus || !api?.getRemoteJobResult) {
+        if (!api?.sendVideoToRemoteServer || !api?.getRemoteJobStatus || !api?.getRemoteJobResult) {
           throw new Error('Electron API remote upload not available');
         }
 
@@ -1981,11 +1973,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
         uploadQueueRef.current.setRemoteProgress(remoteQueueId, 'Uploading to remote server', 0);
         addLog('Uploading full video to remote server...', LogLevel.INFO);
-        const res = await api.sendVideoToRemoteServerAuth(
+        const res = await api.sendVideoToRemoteServer(
           String(cfg.remoteUrl),
           String(source.value.path),
-          { displayName: String(source.value.name || 'video'), jobId },
-          String(cfg.authToken)
+          { displayName: String(source.value.name || 'video'), jobId }
         );
         if (!res?.success) {
           uploadQueueRef.current.failRemoteUpload(remoteQueueId, res?.error || 'Remote upload failed');
@@ -2028,7 +2019,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
               await new Promise((r) => setTimeout(r, REMOTE_POLL_DELAY_MS));
 
-              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
+              const statusRes = await api.getRemoteJobStatus(String(cfg.remoteUrl), effectiveJobId);
               if (!statusRes?.success) {
                 consecutiveFailures++;
                 addLog(`Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES})`, LogLevel.WARN);
@@ -2043,7 +2034,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             }
             if (st?.state === 'complete') {
               uploadQueueRef.current?.setRemoteProgress(remoteQueueId, 'Downloading results', 95);
-              const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId, String(cfg.authToken));
+              const metaRes = await api.getRemoteJobResult(String(cfg.remoteUrl), effectiveJobId);
               if (!metaRes?.success || !metaRes.data) {
                 throw new Error(metaRes?.error || 'Failed to download results');
               }
