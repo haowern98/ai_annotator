@@ -17,7 +17,10 @@ interface Lecture {
   filePath: string;
   videoPath: string;
   lastModified: string;
+  // Used for UI labeling/filtering (e.g. remote uploads should show as "Remote" even if stored locally on this PC).
   origin: 'local' | 'remote';
+  // Used to decide how LectureDetails loads the lecture assets.
+  storage: 'local' | 'remote';
   remoteServerUrl?: string;
 }
 
@@ -46,7 +49,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [lectures, setLectures] = useState<Lecture[]>([]);
-  const [selectedLecture, setSelectedLecture] = useState<null | { id: string; origin: 'local' | 'remote'; remoteServerUrl?: string }>(null);
+  const [selectedLecture, setSelectedLecture] = useState<null | { id: string; storage: 'local' | 'remote'; remoteServerUrl?: string }>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [originFilterUi, setOriginFilterUi] = useState<'all' | 'local' | 'remote'>('all');
 
@@ -64,7 +67,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
         const formatLectureFromRecording = (
           rec: RecordingMetadata,
           index: number,
-          originOverride: 'local' | 'remote',
+          originOverride?: 'local' | 'remote',
           remoteServerUrl?: string
         ): Lecture => {
             const rawVideoFilename =
@@ -106,6 +109,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
             })();
             const inferredOrigin: 'local' | 'remote' = originKindFromMeta || (isRemoteByName ? 'remote' : 'local');
             const originKind: 'local' | 'remote' = originOverride || inferredOrigin;
+            const storage: 'local' | 'remote' = remoteServerUrl ? 'remote' : 'local';
 
             const titleParts = filename.split('_');
             const dateStr = titleParts[1] || '';
@@ -180,6 +184,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               videoPath: rec.videoPath || '',
               lastModified,
               origin: originKind,
+              storage,
               remoteServerUrl,
             };
         };
@@ -188,7 +193,8 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
         const localLectures: Lecture[] =
           localResult.success && Array.isArray(localResult.recordings)
             ? localResult.recordings.map((rec: RecordingMetadata, index: number) =>
-                formatLectureFromRecording(rec, index, 'local')
+                // Do not override origin for local recordings; allow metadata/name inference to label remote uploads correctly.
+                formatLectureFromRecording(rec, index)
               )
             : [];
 
@@ -246,16 +252,16 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
     e.stopPropagation();
     const found = lectures.find((l) => l.id === lectureId) || null;
     if (found) {
-      setSelectedLecture({ id: found.id, origin: found.origin, remoteServerUrl: found.remoteServerUrl });
+      setSelectedLecture({ id: found.id, storage: found.storage, remoteServerUrl: found.remoteServerUrl });
     } else {
-      setSelectedLecture({ id: lectureId, origin: 'local' });
+      setSelectedLecture({ id: lectureId, storage: 'local' });
     }
     onNavigate?.('lecture-details');
   };
 
   const handleDelete = async (lecture: Lecture, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (lecture.origin === 'remote') {
+    if (lecture.storage === 'remote') {
       console.warn('[HistoryHome] Delete not supported for remote lectures yet');
       return;
     }
@@ -305,7 +311,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
     return (
       <LectureDetails
         lectureId={selectedLecture?.id || undefined}
-        lectureOrigin={selectedLecture?.origin}
+        lectureOrigin={selectedLecture?.storage}
         remoteServerUrl={selectedLecture?.remoteServerUrl}
         onTitleUpdated={(id, newTitle) => {
           setLectures((prev) =>

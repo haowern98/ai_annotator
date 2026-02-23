@@ -931,7 +931,8 @@ export class UploadQueueManager {
         summaries,
         uploadedFileName: video.fileName,
         uploadedFileSize: video.fileSize,
-        origin: { kind: 'local' },
+        // Mark recordings that arrived via the remote inbox (remoteJobId) as "remote" for UI labeling/filtering.
+        origin: { kind: video.remoteJobId ? 'remote' : 'local' },
         recordedMimeType: recordedMimeType || 'video/webm'
       };
 
