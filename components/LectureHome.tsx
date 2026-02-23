@@ -59,6 +59,7 @@ type RemoteOverlaySessionState = {
   recordingsDir: string;
   captureQuality: RecordingQuality;
   localChunkPaths: string[];
+  manifestChunks: Array<{ chunkIndex: number; storedFileName: string; durationMs: number }>;
   chunkMetaByJobId: Map<string, RemoteOverlayChunkMeta>;
   transcripts: Array<TranscriptEntry & { formattedTime?: string }>;
   summaries: any[];
@@ -722,6 +723,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         recordingsDir,
         captureQuality,
         localChunkPaths: [],
+        manifestChunks: [],
         chunkMetaByJobId: new Map(),
         transcripts: [],
         summaries: [],
@@ -1133,61 +1135,13 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         }
 
         try {
-          const cfg = session.cfg;
-          const transcripts = session.transcripts.map((t) => ({
-            text: t.text || '',
-            timestamp: t.formattedTime || `[${formatTimestamp(Number(t.timestampMs || 0))}]`,
-            timestampMs: Number(t.timestampMs || 0),
-          }));
-          const summaries = session.summaries.map((s: any) => ({
-            text: String(s?.text || ''),
-            windowLabel: String(s?.windowLabel || ''),
-          }));
-
-          const duration = Math.max(0, session.cumulativeMediaMs);
-          const outBase = cfg.baseFilename;
-
-          if (cfg.recordingEnabled) {
-            // Merge local chunks and save recording + metadata with the final lecture_* name.
-            if (!session.localChunkPaths || session.localChunkPaths.length === 0) {
-              throw new Error('No valid overlay chunks to merge (session aborted before any chunk could be aligned).');
-            }
-            const outPath = `${session.recordingsDir}\\${outBase}.webm`;
-            await electronAPI.concatWebm(session.localChunkPaths, outPath);
-            const meta = {
-              quality: session.captureQuality,
-              duration,
-              transcriptCount: transcripts.length,
-              summaryCount: summaries.length,
-              transcripts,
-              summaries,
-              recordedMimeType: 'video/webm',
-              uploadedFileName: `${outBase}.webm`,
-            };
-            const saveRes = await electronAPI.saveRecordingExisting(outPath, meta);
-            if (!saveRes?.success) throw new Error(saveRes?.error || 'Failed to save merged overlay recording');
-          } else {
-            // Metadata-only save with deterministic filename.
-            const metadataPath = `${session.recordingsDir}\\${outBase}.json`;
-            const meta = {
-              quality: null,
-              duration,
-              transcriptCount: transcripts.length,
-              summaryCount: summaries.length,
-              transcripts,
-              summaries,
-              uploadedFileName: `${outBase}.webm`,
-              recordedMimeType: 'video/webm',
-              videoFilename: `${outBase}.mp4`,
-              videoPath: '',
-              savedAt: new Date().toISOString(),
-              fileSize: 0,
-            };
-            await electronAPI.writeFile(metadataPath, JSON.stringify(meta, null, 2));
-          }
-          addLog(`[RemoteOverlay] Session saved to recordings: ${outBase}`, LogLevel.SUCCESS);
+          // Remote overlay (client mode) is server-source-of-truth: do not save/merge locally.
+          addLog(
+            `[RemoteOverlay] Session finalized. Saved on server as: ${session.cfg.baseFilename}${session.cfg.recordingEnabled ? '.webm' : ''}`,
+            LogLevel.SUCCESS
+          );
         } catch (e) {
-          addLog(`[RemoteOverlay] Failed to save session: ${e}`, LogLevel.ERROR);
+          addLog(`[RemoteOverlay] Failed to finalize session: ${e}`, LogLevel.ERROR);
         } finally {
           remoteOverlaySessionsRef.current.delete(sessionId);
           if (remoteOverlayCurrentSessionIdRef.current === sessionId) {
@@ -1604,6 +1558,11 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
           // Only include chunks in the session once we have a reliable duration (ffprobe).
           localChunkPaths.push(String(writeRes.videoPath));
+          sessionState.manifestChunks.push({
+            chunkIndex,
+            storedFileName,
+            durationMs,
+          });
           sessionState.chunkMetaByJobId.set(jobId, { offsetMs: chunkOffsetMs, durationMs });
           sessionState.cumulativeMediaMs = chunkOffsetMs + durationMs;
           remoteOverlayCumulativeMediaMsRef.current = sessionState.cumulativeMediaMs;
@@ -1626,7 +1585,8 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             localPath: String(writeRes.videoPath),
             storedFileName,
             jobId,
-            deleteLocalAfterUpload: !cfg.recordingEnabled,
+            // Remote overlay is server-source-of-truth: always delete local chunks after upload.
+            deleteLocalAfterUpload: true,
             remoteQueueId,
             fileSize: Number(writeRes.fileSize || 0),
           });
@@ -1648,14 +1608,19 @@ const LectureHome: React.FC<LectureHomeProps> = ({
 
           if (isFinal) {
             // enqueue manifest as last upload
-            const chunks = localChunkPaths.map((p, idx) => ({
-              chunkIndex: idx + 1,
-              storedFileName: `${cfg.baseFilename}_chunk_${String(idx + 1).padStart(4, '0')}.webm`,
-            }));
+            const chunks = sessionState.manifestChunks
+              .slice()
+              .sort((a, b) => a.chunkIndex - b.chunkIndex)
+              .map((c) => ({
+                chunkIndex: c.chunkIndex,
+                storedFileName: c.storedFileName,
+                durationMs: c.durationMs,
+              }));
             const manifestObj = {
               sessionId: cfg.sessionId,
               baseFilename: cfg.baseFilename,
               recordingEnabled: cfg.recordingEnabled,
+              quality: sessionState.captureQuality,
               chunks,
             };
             const manifestRes = await electronAPI.writeRecordingManifest(cfg.baseFilename, manifestObj);

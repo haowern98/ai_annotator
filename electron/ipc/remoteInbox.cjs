@@ -885,44 +885,173 @@ function setupRemoteInboxHandlers(ipcMain, options) {
                   const raw = await fsp.readFile(targetPath, 'utf8');
                   const manifest = JSON.parse(raw);
                   const enabled = Boolean(manifest && manifest.recordingEnabled);
-                  console.log('[RemoteInbox] Manifest received', { overlayBase, enabled });
-                  if (!enabled) return;
+                  const quality = manifest && typeof manifest.quality === 'string' ? manifest.quality : null;
+                  console.log('[RemoteInbox] Manifest received', { overlayBase, enabled, quality: quality || undefined });
 
                   const base = sanitizeBaseFilename(manifest.baseFilename || overlayBase);
                   const chunks = Array.isArray(manifest.chunks) ? manifest.chunks : [];
                   const ordered = chunks
-                    .map((c) => ({ idx: Number(c.chunkIndex), name: String(c.storedFileName || '') }))
+                    .map((c) => ({
+                      idx: Number(c.chunkIndex),
+                      name: String(c.storedFileName || ''),
+                      durationMs: Number(c.durationMs),
+                    }))
                     .filter((c) => Number.isFinite(c.idx) && c.idx > 0)
                     .sort((a, b) => a.idx - b.idx);
 
                   const inputPaths = ordered.map((c) => path.join(recordingsDir, c.name));
                   if (inputPaths.length === 0) throw new Error('Manifest has no chunk list');
 
-                  // Ensure all inputs exist (quick wait loop).
-                  const deadline = Date.now() + 5000;
-                  while (Date.now() < deadline) {
-                    let missing = false;
+                  let mergedVideoPath = '';
+                  if (enabled) {
+                    // Ensure all inputs exist (quick wait loop).
+                    const deadline = Date.now() + 5000;
+                    while (Date.now() < deadline) {
+                      let missing = false;
+                      for (const p of inputPaths) {
+                        try {
+                          await fsp.stat(p);
+                        } catch {
+                          missing = true;
+                          break;
+                        }
+                      }
+                      if (!missing) break;
+                      await new Promise((r) => setTimeout(r, 200));
+                    }
+
                     for (const p of inputPaths) {
+                      await fsp.stat(p);
+                    }
+
+                    const outPath = path.join(recordingsDir, `${base}.webm`);
+                    mergedVideoPath = outPath;
+                    setState({ lastError: null, fileName: `${base}.webm` });
+                    console.log('[RemoteInbox] Merging chunks', { base, outPath, count: inputPaths.length });
+                    await concatWebmFiles(recordingsDir, inputPaths, outPath);
+                    console.log('[RemoteInbox] Merge complete', { outPath });
+                  }
+
+                  // Build a single lecture metadata JSON from the processed chunk results.
+                  // This makes the server the source of truth (one combined lecture entry per overlay session).
+                  const formatTimestamp = (ms) => {
+                    const totalSeconds = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+                    const minutes = Math.floor(totalSeconds / 60);
+                    const seconds = totalSeconds % 60;
+                    return `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}]`;
+                  };
+
+                  const parseBracketTimestampMs = (s) => {
+                    const m = String(s || '').match(/\[(\d+):(\d+)\]/);
+                    if (!m) return null;
+                    const mm = Number(m[1]);
+                    const ss = Number(m[2]);
+                    if (!Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+                    return (mm * 60 + ss) * 1000;
+                  };
+
+                  const offsetWindowLabel = (label, offsetMs) => {
+                    const str = String(label || '');
+                    const matches = [...str.matchAll(/\[(\d+):(\d+)\]/g)];
+                    if (matches.length < 2) return str;
+                    const startMs = parseBracketTimestampMs(matches[0][0]);
+                    const endMs = parseBracketTimestampMs(matches[1][0]);
+                    if (startMs === null || endMs === null) return str;
+                    return `${formatTimestamp(startMs + offsetMs)}-${formatTimestamp(endMs + offsetMs)}`;
+                  };
+
+                  const waitForFile = async (p, timeoutMs) => {
+                    const deadline = Date.now() + timeoutMs;
+                    let delay = 250;
+                    while (Date.now() < deadline) {
                       try {
                         await fsp.stat(p);
+                        return true;
                       } catch {
-                        missing = true;
-                        break;
+                        // ignore
                       }
+                      await new Promise((r) => setTimeout(r, delay));
+                      delay = Math.min(5000, Math.round(delay * 1.25));
                     }
-                    if (!missing) break;
-                    await new Promise((r) => setTimeout(r, 200));
+                    return false;
+                  };
+
+                  // Prefer durations from manifest (client ffprobe); fall back to 0 if missing.
+                  const orderedWithDur = ordered.map((c) => ({
+                    ...c,
+                    durationMs: Number.isFinite(c.durationMs) && c.durationMs > 0 ? Math.round(c.durationMs) : 0,
+                  }));
+
+                  const combinedTranscripts = [];
+                  const combinedSummaries = [];
+                  let cumulativeMs = 0;
+
+                  // Wait for all chunk metadata JSONs to exist, then combine.
+                  // Chunk metadata filenames are derived from the stored chunk filenames.
+                  const maxWaitMs = 6 * 60 * 60 * 1000; // 6 hours (long queue tolerance)
+
+                  for (const c of orderedWithDur) {
+                    const baseName = path.basename(c.name).replace(/\.(webm|mp4)$/i, '');
+                    const metaPath = path.join(recordingsDir, `${baseName}.json`);
+                    const ok = await waitForFile(metaPath, maxWaitMs);
+                    if (!ok) {
+                      throw new Error(`Timeout waiting for chunk metadata: ${metaPath}`);
+                    }
+                    const meta = await readJsonFile(metaPath);
+                    const offsetMs = cumulativeMs;
+                    cumulativeMs += Math.max(0, Number(c.durationMs) || 0);
+
+                    const tx = Array.isArray(meta?.transcripts) ? meta.transcripts : [];
+                    for (const t of tx) {
+                      const relMs = Number(t?.timestampMs || 0);
+                      const absMs = offsetMs + (Number.isFinite(relMs) ? relMs : 0);
+                      combinedTranscripts.push({
+                        text: String(t?.text || ''),
+                        timestampMs: absMs,
+                        timestamp: formatTimestamp(absMs),
+                      });
+                    }
+
+                    const sums = Array.isArray(meta?.summaries) ? meta.summaries : [];
+                    for (const s of sums) {
+                      combinedSummaries.push({
+                        text: String(s?.text || ''),
+                        windowLabel: offsetWindowLabel(s?.windowLabel, offsetMs),
+                      });
+                    }
                   }
 
-                  for (const p of inputPaths) {
-                    await fsp.stat(p);
+                  combinedTranscripts.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+
+                  const outMetaPath = path.join(recordingsDir, `${base}.json`);
+                  let fileSize = 0;
+                  if (enabled && mergedVideoPath) {
+                    try {
+                      const stOut = await fsp.stat(mergedVideoPath);
+                      fileSize = Number(stOut.size || 0);
+                    } catch {
+                      fileSize = 0;
+                    }
                   }
 
-                  const outPath = path.join(recordingsDir, `${base}.webm`);
-                  setState({ lastError: null, fileName: `${base}.webm` });
-                  console.log('[RemoteInbox] Merging chunks', { base, outPath, count: inputPaths.length });
-                  await concatWebmFiles(recordingsDir, inputPaths, outPath);
-                  console.log('[RemoteInbox] Merge complete', { outPath });
+                  const fullMeta = {
+                    quality: quality || (enabled ? 'original' : null),
+                    duration: Math.max(0, cumulativeMs),
+                    transcriptCount: combinedTranscripts.length,
+                    summaryCount: combinedSummaries.length,
+                    transcripts: combinedTranscripts,
+                    summaries: combinedSummaries,
+                    uploadedFileName: `${base}.webm`,
+                    origin: { kind: 'remote' },
+                    recordedMimeType: 'video/webm',
+                    videoFilename: enabled ? `${base}.webm` : `${base}.webm`,
+                    videoPath: enabled ? mergedVideoPath : '',
+                    savedAt: new Date().toISOString(),
+                    fileSize: enabled ? fileSize : 0,
+                  };
+
+                  await fsp.writeFile(outMetaPath, JSON.stringify(fullMeta, null, 2), 'utf8');
+                  console.log('[RemoteInbox] Overlay session metadata saved', { base, outMetaPath, enabled });
                 } catch (e) {
                   setState({ lastError: String(e.message || e) });
                   console.error('[RemoteInbox] Merge failed', e);
