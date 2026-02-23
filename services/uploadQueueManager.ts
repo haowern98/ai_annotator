@@ -92,6 +92,14 @@ export class UploadQueueManager {
   private prefetchLoopTimer: ReturnType<typeof setInterval> | null = null;
   private prefetchLoopVideoId: string | null = null;
 
+  public setQwenClient(client: QwenHttpClient): void {
+    this.qwenClient = client;
+  }
+
+  public setAutoIndexOnComplete(enabled: boolean): void {
+    this.autoIndexOnComplete = Boolean(enabled);
+  }
+
   private startPrefetchLoop(currentVideo: QueuedVideo) {
     if (this.prefetchLoopVideoId === currentVideo.id && this.prefetchLoopTimer) return;
     this.stopPrefetchLoop();

@@ -35,6 +35,7 @@ export default function App() {
   const uploadQueueRef = useRef<UploadQueueManager | null>(null);
   const [uploadQueue, setUploadQueue] = useState<QueuedVideo[]>([]);
   const uploadParakeetRef = useRef<ParakeetBatchTranscriber | null>(null);
+  const uploadQwenRef = useRef<QwenHttpClient | null>(null);
 
   // Navigation state for browser-like back/forward
   const [navigation, setNavigation] = useState<NavigationState>({
@@ -156,56 +157,102 @@ export default function App() {
     window.addEventListener('web-viewer-config-changed', onWebViewerConfigChanged);
 
     const uploadParakeet = new ParakeetBatchTranscriber(addLog);
-    
-    // Load remote processing config
-    let qwenUrl = 'http://127.0.0.1:7556';
-    let isRemoteQwen = false;
-    try {
-      const remoteConfig = localStorage.getItem('qwen_remote_config');
-      if (remoteConfig) {
-        const config = JSON.parse(remoteConfig);
-        if (config.mode === 'client' && config.remoteUrl) {
-          qwenUrl = config.remoteUrl;
-          isRemoteQwen = true;
-          console.log(`[Upload Queue] Using remote Qwen server: ${qwenUrl}`);
-        }
-      }
-    } catch (e) {
-      console.warn('[Upload Queue] Failed to load remote config, using local server');
-    }
-    
-    const uploadQwen = new QwenHttpClient(qwenUrl);
     uploadParakeetRef.current = uploadParakeet;
 
-    const initUploadClients = async () => {
-      try {
-        await uploadParakeet.connect({
-          onReady: () => console.log('[Upload Queue] Parakeet worker ready'),
-          onError: (err) => console.error(`[Upload Queue] Parakeet error: ${err}`),
-        });
+    let disposed = false;
+    let qwenConnectNonce = 0;
 
+    const readRemoteConfig = (): { qwenUrl: string; isRemoteQwen: boolean } => {
+      let qwenUrl = 'http://127.0.0.1:7556';
+      let isRemoteQwen = false;
+      try {
+        const remoteConfig = localStorage.getItem('qwen_remote_config');
+        if (remoteConfig) {
+          const config = JSON.parse(remoteConfig);
+          if (config?.mode === 'client' && config.remoteUrl) {
+            qwenUrl = String(config.remoteUrl);
+            isRemoteQwen = true;
+            console.log(`[Upload Queue] Using remote Qwen server: ${qwenUrl}`);
+          }
+        }
+      } catch (e) {
+        console.warn('[Upload Queue] Failed to load remote config, using local server');
+      }
+      return { qwenUrl, isRemoteQwen };
+    };
+
+    const computeAutoIndexOnComplete = (qwenUrl: string, isRemoteQwen: boolean): boolean => {
+      // Auto-indexing (embeddings) is local-mode only for v1 (batch uploads only).
+      return !isRemoteQwen && /^(http:\/\/)?(127\.0\.0\.1|localhost)(:\d+)?/i.test(qwenUrl);
+    };
+
+    const ensureParakeetConnected = async () => {
+      await uploadParakeet.connect({
+        onReady: () => console.log('[Upload Queue] Parakeet worker ready'),
+        onError: (err) => console.error(`[Upload Queue] Parakeet error: ${err}`),
+      });
+    };
+
+    const reconnectQwenForConfig = async () => {
+      const myNonce = ++qwenConnectNonce;
+      const { qwenUrl, isRemoteQwen } = readRemoteConfig();
+
+      // Disconnect previous client to stop health-check spam.
+      try {
+        uploadQwenRef.current?.disconnect?.();
+      } catch {
+        // ignore
+      }
+
+      const uploadQwen = new QwenHttpClient(qwenUrl);
+      uploadQwenRef.current = uploadQwen;
+
+      try {
         await uploadQwen.connect({
           onReady: () => console.log('[Upload Queue] Qwen worker ready'),
           onError: (err) => console.error(`[Upload Queue] Qwen error: ${err}`),
           onProgress: (msg) => console.log(`[Upload Queue] ${msg}`),
         });
+      } catch (error) {
+        console.error('[Upload Queue] Failed to (re)connect Qwen:', error);
+        return;
+      }
 
-        // Auto-indexing (embeddings) is local-mode only for v1 (batch uploads only).
-        const autoIndexOnComplete = !isRemoteQwen && /^(http:\/\/)?(127\.0\.0\.1|localhost)(:\d+)?/i.test(qwenUrl);
+      if (disposed) return;
+      if (myNonce !== qwenConnectNonce) return;
 
+      const autoIndexOnComplete = computeAutoIndexOnComplete(qwenUrl, isRemoteQwen);
+
+      if (!uploadQueueRef.current) {
         uploadQueueRef.current = new UploadQueueManager(uploadParakeet, uploadQwen, () => false, {
           onQueueUpdate: (queue) => setUploadQueue(queue),
           onVideoComplete: (video) => console.log(`Upload complete: ${video.fileName}`),
           onVideoError: (video, err) => console.error(`Upload failed: ${video.fileName} - ${err}`),
         }, { autoIndexOnComplete });
-
         console.log('[Upload Queue] Upload queue manager initialized');
+      } else {
+        uploadQueueRef.current.setQwenClient(uploadQwen);
+        uploadQueueRef.current.setAutoIndexOnComplete(autoIndexOnComplete);
+      }
+    };
+
+    const initUploadClients = async () => {
+      try {
+        await ensureParakeetConnected();
+        await reconnectQwenForConfig();
       } catch (error) {
         console.error('[Upload Queue] Failed to initialize:', error);
       }
     };
 
     initUploadClients();
+
+    const onQwenConfigChanged = () => {
+      // Qwen process can restart when switching server/client/local modes.
+      // Reconnect so Upload Queue continues without requiring an app restart.
+      void reconnectQwenForConfig();
+    };
+    window.addEventListener('qwen-config-changed', onQwenConfigChanged);
 
     // In server mode, accept full-video uploads via the Electron main-process inbox.
     // When a file arrives, enqueue it for local processing (same pipeline as local path/YouTube uploads).
@@ -258,9 +305,16 @@ export default function App() {
     }
 
     return () => {
+      disposed = true;
+      window.removeEventListener('qwen-config-changed', onQwenConfigChanged);
       window.removeEventListener('web-viewer-config-changed', onWebViewerConfigChanged);
       try {
         (window.electronAPI as any)?.removeInboxListeners?.();
+      } catch {
+        // ignore
+      }
+      try {
+        uploadQwenRef.current?.disconnect?.();
       } catch {
         // ignore
       }
