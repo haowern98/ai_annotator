@@ -128,6 +128,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
   // Cumulative recorded media timeline in milliseconds (used for transcript alignment).
   const remoteOverlayCumulativeMediaMsRef = React.useRef<number>(0);
   const remoteOverlayCanvasStreamRef = React.useRef<MediaStream | null>(null);
+  const remoteOverlayAudioOnlyStreamRef = React.useRef<MediaStream | null>(null);
   const remoteOverlayMimeTypeRef = React.useRef<string>('video/webm');
   const remoteOverlayActiveChunkRecorderRef = React.useRef<{
     recorder: MediaRecorder;
@@ -778,7 +779,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           // @ts-ignore - Electron-specific
           mandatory: {
             chromeMediaSource: 'desktop',
-            chromeMediaSourceId: selectedSourceId,
+            // Do NOT include chromeMediaSourceId for audio. This is system-wide output audio.
           },
         },
         video: {
@@ -809,9 +810,72 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       }
 
       // Setup a rolling chunk recorder (always records for upload; "recordingEnabled" only controls final merge + retention).
-      const startChunkRecorder = () => {
+      const ensureCanvasStreamHasSystemAudio = async (canvasStream: MediaStream) => {
+        const hasLiveAudio = canvasStream
+          .getAudioTracks()
+          .some((t) => t && t.readyState === 'live');
+        if (hasLiveAudio) return;
+
+        // Clear any ended/stale audio tracks.
+        for (const t of canvasStream.getAudioTracks()) {
+          try {
+            canvasStream.removeTrack(t);
+          } catch {
+            // ignore
+          }
+        }
+
+        // Try to re-use a live audio track from the original desktop stream first.
+        const sourceLiveTrack = stream
+          .getAudioTracks()
+          .find((t) => t && t.readyState === 'live');
+        if (sourceLiveTrack) {
+          canvasStream.addTrack(sourceLiveTrack);
+          addLog('[RemoteOverlay] Re-attached system audio track from desktop stream', LogLevel.INFO);
+          return;
+        }
+
+        // Fall back to reacquiring system audio (system-wide output) and attaching it.
+        try {
+          if (remoteOverlayAudioOnlyStreamRef.current) {
+            try {
+              remoteOverlayAudioOnlyStreamRef.current.getTracks().forEach((t) => t.stop());
+            } catch {
+              // ignore
+            }
+            remoteOverlayAudioOnlyStreamRef.current = null;
+          }
+
+          const audioOnly = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              // @ts-ignore - Electron-specific
+              mandatory: {
+                chromeMediaSource: 'desktop',
+              },
+            },
+            video: false,
+          } as any);
+          remoteOverlayAudioOnlyStreamRef.current = audioOnly;
+
+          const audioTrack = audioOnly.getAudioTracks?.()[0] || null;
+          if (!audioTrack || audioTrack.readyState !== 'live') {
+            throw new Error('No live system audio track available');
+          }
+          canvasStream.addTrack(audioTrack);
+          addLog('[RemoteOverlay] Re-acquired and attached system audio track', LogLevel.INFO);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(`System audio capture not available: ${msg}`);
+        }
+      };
+
+      const startChunkRecorder = async () => {
         const s = remoteOverlayCanvasStreamRef.current;
         if (!s) throw new Error('Missing canvas stream');
+        await ensureCanvasStreamHasSystemAudio(s);
+        if (!s.getAudioTracks || s.getAudioTracks().length === 0) {
+          throw new Error('System audio track missing from recording stream');
+        }
         const mimeType = String(remoteOverlayMimeTypeRef.current || 'video/webm');
 
         const blobs: Blob[] = [];
@@ -963,8 +1027,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         drawFrame();
 
         const canvasStream = recordingCanvas.captureStream(30);
-        const audioTracks = stream.getAudioTracks();
-        audioTracks.forEach((track) => canvasStream.addTrack(track));
+        await ensureCanvasStreamHasSystemAudio(canvasStream);
 
         const supportedMimeTypes = [
           'video/webm;codecs="vp9,opus"',
@@ -983,7 +1046,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         remoteOverlayCanvasStreamRef.current = canvasStream;
         remoteOverlayMimeTypeRef.current = mimeType;
 
-        startChunkRecorder();
+        await startChunkRecorder();
       };
 
       // Create overlay window FIRST
@@ -1600,9 +1663,12 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           // Start the next chunk recorder immediately unless we're stopping.
           if (!isFinal) {
             try {
-              startChunkRecorder();
+              await startChunkRecorder();
             } catch (e) {
-              addLog(`[RemoteOverlay] Failed to start next chunk recorder: ${e}`, LogLevel.ERROR);
+              const msg = e instanceof Error ? e.message : String(e);
+              addLog(`[RemoteOverlay] Failed to start next chunk recorder: ${msg}`, LogLevel.ERROR);
+              setError(msg);
+              stopRemoteOverlaySession();
             }
           }
 
@@ -1697,6 +1763,15 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             // ignore
           }
           mediaStreamRef.current = null;
+        }
+
+        if (remoteOverlayAudioOnlyStreamRef.current) {
+          try {
+            remoteOverlayAudioOnlyStreamRef.current.getTracks().forEach((t) => t.stop());
+          } catch {
+            // ignore
+          }
+          remoteOverlayAudioOnlyStreamRef.current = null;
         }
 
         remoteOverlayActiveRef.current = false;
