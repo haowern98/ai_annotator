@@ -237,6 +237,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   remoteLibraryWords: async (serverUrl, lectureId) => {
     return await ipcRenderer.invoke('remoteUpload:libraryWords', serverUrl, lectureId);
   },
+  remoteLibrarySetTitle: async (serverUrl, lectureId, title) => {
+    return await ipcRenderer.invoke('remoteUpload:librarySetTitle', serverUrl, lectureId, title);
+  },
+  remoteLibraryDelete: async (serverUrl, lectureId) => {
+    return await ipcRenderer.invoke('remoteUpload:libraryDelete', serverUrl, lectureId);
+  },
   remoteYouTubeIngest: async (serverUrl, url, jobId) => {
     return await ipcRenderer.invoke('remoteUpload:youtubeIngest', serverUrl, url, jobId);
   },

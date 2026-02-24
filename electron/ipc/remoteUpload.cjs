@@ -90,6 +90,32 @@ function httpPostJson(urlObj, payload, headers = null) {
   });
 }
 
+function httpDeleteJson(urlObj, headers = null) {
+  const client = urlObj.protocol === 'https:' ? https : http;
+  return new Promise((resolve) => {
+    const req = client.request(
+      urlObj,
+      { method: 'DELETE', headers: headers || undefined },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { text += String(chunk || ''); });
+        res.on('end', () => {
+          let parsed = null;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            // ignore
+          }
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode, body: text, json: parsed });
+        });
+      }
+    );
+    req.on('error', (err) => resolve({ ok: false, statusCode: 0, body: err.message || String(err), json: null }));
+    req.end();
+  });
+}
+
 function setupRemoteUploadHandlers(ipcMain, options) {
   const { sendToRenderer, inboxPort = 7557 } = options || {};
 
@@ -292,6 +318,34 @@ function setupRemoteUploadHandlers(ipcMain, options) {
     const url = new URL(`/library/lectures/${encodeURIComponent(lectureId)}/words`, base);
     const res = await httpGetJson(url, null);
     if (!res.ok) return { success: false, error: `Library words failed (${res.statusCode})`, detail: res.body };
+    return { success: true, data: res.json };
+  });
+
+  ipcMain.handle('remoteUpload:librarySetTitle', async (_event, serverUrlRaw, lectureIdRaw, titleRaw) => {
+    const serverUrl = normalizeServerUrl(serverUrlRaw);
+    const lectureId = String(lectureIdRaw || '').trim();
+    const title = String(titleRaw || '').trim();
+    if (!serverUrl) return { success: false, error: 'Missing serverUrl' };
+    if (!lectureId) return { success: false, error: 'Missing lectureId' };
+    if (!title) return { success: false, error: 'Missing title' };
+
+    const base = deriveInboxBase(serverUrl, inboxPort);
+    const url = new URL(`/library/lectures/${encodeURIComponent(lectureId)}/title`, base);
+    const res = await httpPostJson(url, { title }, null);
+    if (!res.ok) return { success: false, error: `Library set title failed (${res.statusCode})`, detail: res.json || res.body };
+    return { success: true, data: res.json };
+  });
+
+  ipcMain.handle('remoteUpload:libraryDelete', async (_event, serverUrlRaw, lectureIdRaw) => {
+    const serverUrl = normalizeServerUrl(serverUrlRaw);
+    const lectureId = String(lectureIdRaw || '').trim();
+    if (!serverUrl) return { success: false, error: 'Missing serverUrl' };
+    if (!lectureId) return { success: false, error: 'Missing lectureId' };
+
+    const base = deriveInboxBase(serverUrl, inboxPort);
+    const url = new URL(`/library/lectures/${encodeURIComponent(lectureId)}`, base);
+    const res = await httpDeleteJson(url, null);
+    if (!res.ok) return { success: false, error: `Library delete failed (${res.statusCode})`, detail: res.json || res.body };
     return { success: true, data: res.json };
   });
 

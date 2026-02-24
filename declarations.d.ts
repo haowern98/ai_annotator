@@ -115,6 +115,8 @@ interface ElectronAPI {
   remoteLibraryList: (serverUrl: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
   remoteLibraryMeta: (serverUrl: string, lectureId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
   remoteLibraryWords: (serverUrl: string, lectureId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibrarySetTitle: (serverUrl: string, lectureId: string, title: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibraryDelete: (serverUrl: string, lectureId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
   remoteYouTubeIngest: (serverUrl: string, url: string, jobId: string | null) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
   onRemoteUploadProgress: (callback: (payload: any) => void) => void;
   onRemoteUploadComplete: (callback: (payload: any) => void) => void;

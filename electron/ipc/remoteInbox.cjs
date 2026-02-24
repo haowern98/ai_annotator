@@ -87,6 +87,53 @@ async function readJsonFile(filePath) {
   return JSON.parse(content);
 }
 
+function baseNameNoExt(p) {
+  const b = path.basename(String(p || ''));
+  return b.replace(/\.(json|webm|mp4)$/i, '');
+}
+
+function jobMatchesLectureId(job, lectureId) {
+  const id = String(lectureId || '').trim();
+  if (!id) return false;
+
+  const overlayBase = String(job?.overlayBase || '').trim();
+  if (overlayBase && overlayBase === id) return true;
+
+  const metadataPath = String(job?.metadataPath || '').trim();
+  if (metadataPath && baseNameNoExt(metadataPath) === id) return true;
+
+  const savedVideoPath = String(job?.savedVideoPath || '').trim();
+  if (savedVideoPath) {
+    const bn = path.basename(savedVideoPath);
+    if (baseNameNoExt(bn) === id) return true;
+    if (bn.startsWith(`${id}_chunk_`) || bn === `${id}_manifest.json`) return true;
+  }
+
+  const storedFileName = String(job?.storedFileName || '').trim();
+  if (storedFileName) {
+    if (baseNameNoExt(storedFileName) === id) return true;
+    if (storedFileName.startsWith(`${id}_chunk_`) || storedFileName === `${id}_manifest.json`) return true;
+  }
+
+  return false;
+}
+
+function isTerminalJobState(stateRaw) {
+  const s = String(stateRaw || '').trim().toLowerCase();
+  return s === 'complete' || s === 'error';
+}
+
+async function safeRemovePath(targetPath) {
+  const p = String(targetPath || '').trim();
+  if (!p) return false;
+  try {
+    await fsp.rm(p, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function serveVideoWithRange(req, res, filePath) {
   const st = await fsp.stat(filePath);
   const fileSize = st.size;
@@ -336,6 +383,121 @@ function setupRemoteInboxHandlers(ipcMain, options) {
         }
 
         // Auth removed (remote inbox and library are currently unauthenticated).
+
+        // Remote library mutations: set title (display-only) and delete lecture.
+        if (pathname.startsWith('/library/lectures/')) {
+          const rest = pathname.slice('/library/lectures/'.length);
+          const parts = rest.split('/').filter(Boolean);
+          const lectureId = decodeURIComponent(parts[0] || '').trim().replace(/\.(json|webm|mp4)$/i, '');
+          const sub = parts[1] || '';
+
+          // POST /library/lectures/:lectureId/title { title }
+          if (lectureId && method === 'POST' && sub === 'title') {
+            try {
+              const body = await readRequestBody(req, 64 * 1024);
+              const parsed = JSON.parse(String(body || ''));
+              const title = sanitizeTitle(parsed?.title);
+              if (!title) {
+                res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ success: false, error: 'Missing title' }));
+                return;
+              }
+
+              const metadataPath = path.join(recordingsDir, `${lectureId}.json`);
+              try {
+                await fsp.stat(metadataPath);
+              } catch {
+                res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ success: false, error: 'Lecture not found' }));
+                return;
+              }
+
+              const metaPath = metaPathForId(recordingsDir, lectureId);
+              await fsp.writeFile(metaPath, JSON.stringify({ title }, null, 2), 'utf8');
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+              res.end(JSON.stringify({ success: true }));
+              return;
+            } catch (e) {
+              res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+              return;
+            }
+          }
+
+          // DELETE /library/lectures/:lectureId
+          if (lectureId && method === 'DELETE' && !sub) {
+            try {
+              // Block deletion while processing.
+              for (const job of jobs.values()) {
+                if (!jobMatchesLectureId(job, lectureId)) continue;
+                if (!isTerminalJobState(job?.state)) {
+                  res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+                  res.end(JSON.stringify({ success: false, error: "Can't delete while processing" }));
+                  return;
+                }
+              }
+
+              const metadataPath = path.join(recordingsDir, `${lectureId}.json`);
+              let metadata = null;
+              try {
+                metadata = await readJsonFile(metadataPath);
+              } catch {
+                res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ success: false, error: 'Lecture not found' }));
+                return;
+              }
+
+              const targets = new Set();
+              targets.add(path.join(recordingsDir, `${lectureId}.json`));
+              targets.add(path.join(recordingsDir, `${lectureId}_words.json`));
+              targets.add(metaPathForId(recordingsDir, lectureId));
+              targets.add(path.join(recordingsDir, `${lectureId}.mp4`));
+              targets.add(path.join(recordingsDir, `${lectureId}.webm`));
+              targets.add(path.join(recordingsDir, `${lectureId}_manifest.json`));
+              targets.add(path.join(recordingsDir, `${lectureId}_index`));
+
+              const idxDir = String(metadata?.embeddingIndex?.indexDir || '').trim();
+              if (idxDir) {
+                try {
+                  const resolvedRecordings = path.resolve(recordingsDir);
+                  const resolvedIdx = path.resolve(idxDir);
+                  if (resolvedIdx.startsWith(resolvedRecordings)) targets.add(resolvedIdx);
+                } catch {
+                  // ignore
+                }
+              }
+
+              // Remove overlay chunk artifacts (if any).
+              try {
+                const files = await fsp.readdir(recordingsDir);
+                for (const name of files) {
+                  if (!name) continue;
+                  if (name.startsWith(`${lectureId}_chunk_`)) {
+                    targets.add(path.join(recordingsDir, name));
+                  } else if (name.startsWith(`${lectureId}_`) && /\.(mp4|webm)$/i.test(name)) {
+                    targets.add(path.join(recordingsDir, name));
+                  }
+                }
+              } catch {
+                // ignore
+              }
+
+              let removedCount = 0;
+              for (const p of targets) {
+                const ok = await safeRemovePath(p);
+                if (ok) removedCount += 1;
+              }
+
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+              res.end(JSON.stringify({ success: true, removedCount }));
+              return;
+            } catch (e) {
+              res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ success: false, error: String(e.message || e) }));
+              return;
+            }
+          }
+        }
 
         // Remote library (server is the source of truth): list and serve recordings from this PC.
         if (method === 'GET' && (pathname === '/library/lectures' || pathname === '/library/recordings')) {

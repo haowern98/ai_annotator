@@ -261,11 +261,6 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
   const handleDelete = async (lecture: Lecture, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (lecture.storage === 'remote') {
-      console.warn('[HistoryHome] Delete not supported for remote lectures yet');
-      return;
-    }
-
     // Show native Electron confirmation dialog
     const electronAPI = (window as any).electronAPI;
     if (!electronAPI?.showMessageBox) {
@@ -290,6 +285,50 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
     // Perform deletion
     try {
+      if (lecture.storage === 'remote') {
+        if (!electronAPI?.remoteLibraryDelete) {
+          await electronAPI.showMessageBox({
+            type: 'error',
+            buttons: ['OK'],
+            title: 'Delete failed',
+            message: 'remoteLibraryDelete not available',
+          });
+          return;
+        }
+        const serverUrl = String(lecture.remoteServerUrl || '').trim();
+        if (!serverUrl) {
+          await electronAPI.showMessageBox({
+            type: 'error',
+            buttons: ['OK'],
+            title: 'Delete failed',
+            message: 'Missing remote server URL for this lecture',
+          });
+          return;
+        }
+        const deleteResult = await electronAPI.remoteLibraryDelete(serverUrl, lecture.id);
+        if (deleteResult?.success) {
+          setLectures((prev) => prev.filter((l) => l.id !== lecture.id));
+          try {
+            window.dispatchEvent(new Event('remote-library-changed'));
+          } catch {
+            // ignore
+          }
+          return;
+        }
+
+        const detailErr =
+          typeof deleteResult?.detail === 'string'
+            ? deleteResult.detail
+            : (deleteResult?.detail?.error || deleteResult?.detail?.message || null);
+        await electronAPI.showMessageBox({
+          type: 'error',
+          buttons: ['OK'],
+          title: 'Delete failed',
+          message: String(detailErr || deleteResult?.error || 'Failed to delete remote lecture'),
+        });
+        return;
+      }
+
       // Use the actual videoFilename from metadata for proper deletion
       const deleteResult = await electronAPI.deleteRecording(lecture.id);
       

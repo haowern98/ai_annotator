@@ -832,13 +832,34 @@ const LectureDetails: React.FC<LectureDetailsProps> = ({ lectureId, lectureOrigi
     setTitleError(null);
     try {
       const electronAPI = (window as any).electronAPI;
-      if (!electronAPI?.setRecordingTitle) {
-        setTitleError('setRecordingTitle not available');
-        return;
+      let res: any = null;
+      if (lectureOrigin === 'remote') {
+        if (!electronAPI?.remoteLibrarySetTitle) {
+          setTitleError('remoteLibrarySetTitle not available');
+          return;
+        }
+        const raw = localStorage.getItem('qwen_remote_config');
+        const cfg = raw ? JSON.parse(raw) : null;
+        const serverUrl = String(remoteServerUrl || cfg?.remoteUrl || '').trim();
+        if (!serverUrl) {
+          setTitleError('Remote library not configured (missing server URL)');
+          return;
+        }
+        res = await electronAPI.remoteLibrarySetTitle(serverUrl, lectureId, next);
+      } else {
+        if (!electronAPI?.setRecordingTitle) {
+          setTitleError('setRecordingTitle not available');
+          return;
+        }
+        res = await electronAPI.setRecordingTitle(lectureId, next);
       }
-      const res = await electronAPI.setRecordingTitle(lectureId, next);
+
       if (!res?.success) {
-        setTitleError(String(res?.error || 'Failed to save title'));
+        const detailErr =
+          typeof res?.detail === 'string'
+            ? res.detail
+            : (res?.detail?.error || res?.detail?.message || null);
+        setTitleError(String(detailErr || res?.error || 'Failed to save title'));
         return;
       }
       setLectureData((prev) => (prev ? { ...prev, title: next } : prev));
