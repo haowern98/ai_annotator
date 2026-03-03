@@ -32,7 +32,8 @@ const REMOTE_OVERLAY_POLL_DELAY_MS = 1500; // For overlay chunks
 const REMOTE_OVERLAY_POLL_FAILURE_DELAY_MS = 1000; // Retry delay on failure
 
 type RemoteOverlaySessionCfg = {
-  remoteUrl: string;
+  processingMode: 'remote' | 'local';
+  remoteUrl?: string;
   sessionId: string;
   baseFilename: string;
   recordingEnabled: boolean;
@@ -61,6 +62,7 @@ type RemoteOverlaySessionState = {
   localChunkPaths: string[];
   manifestChunks: Array<{ chunkIndex: number; storedFileName: string; durationMs: number }>;
   chunkMetaByJobId: Map<string, RemoteOverlayChunkMeta>;
+  localQueueIdByJobId: Map<string, string>;
   transcripts: Array<TranscriptEntry & { formattedTime?: string }>;
   summaries: any[];
   pendingUploadsCount: number;
@@ -159,6 +161,54 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }, []);
 
+  const parseTimeToSeconds = React.useCallback((s: string): number | null => {
+    const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m) return null;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const c = m[3] ? Number(m[3]) : null;
+    if (!Number.isFinite(a) || !Number.isFinite(b) || (c !== null && !Number.isFinite(c))) return null;
+    if (c === null) return a * 60 + b;
+    return a * 3600 + b * 60 + c;
+  }, []);
+
+  const extractRangeFromLabel = React.useCallback((label: string): { startSec: number; endSec: number } | null => {
+    const matches = String(label || '').match(/(\d{1,2}:\d{2}(?::\d{2})?)/g);
+    if (!matches || matches.length < 2) return null;
+    const a = parseTimeToSeconds(matches[0]);
+    const b = parseTimeToSeconds(matches[1]);
+    if (a === null || b === null) return null;
+    return { startSec: a, endSec: b };
+  }, [parseTimeToSeconds]);
+
+  const formatRangeLabel = React.useCallback((orig: string, startMs: number, endMs: number): string => {
+    const start = formatTimestamp(startMs);
+    const end = formatTimestamp(endMs);
+    if (String(orig || '').startsWith('Topics:')) return `Topics: ${start}-${end}`;
+    if (/\[.*\]/.test(String(orig || ''))) return `[${start}]-[${end}]`;
+    return `${start}-${end}`;
+  }, [formatTimestamp]);
+
+  const pushOverlayUpdates = React.useCallback((session: RemoteOverlaySessionState) => {
+    const electronAPI = window.electronAPI as any;
+    if (electronAPI?.updateLectureTranscript) {
+      electronAPI.updateLectureTranscript(
+        JSON.stringify({
+          transcripts: session.transcripts,
+          current: null,
+        })
+      );
+    }
+    if (electronAPI?.updateLectureSummary) {
+      electronAPI.updateLectureSummary(
+        JSON.stringify({
+          summaries: session.summaries,
+          isGenerating: false,
+        })
+      );
+    }
+  }, []);
+
   const stopRemoteOverlaySession = React.useCallback(() => {
     try {
       remoteOverlayStopFnRef.current?.();
@@ -177,6 +227,119 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       default: console.log(`${prefix} ${message}`);
     }
   }, []);
+
+  const finalizeOverlaySessionIfReady = React.useCallback(async (sessionId: string) => {
+    const session = remoteOverlaySessionsRef.current.get(sessionId);
+    if (!session) return;
+    if (!session.closing) return;
+    if (session.pendingUploadsCount > 0) return;
+    if (session.pendingResultJobIds.size > 0) return;
+    if (
+      remoteOverlayUploadInFlightRef.current &&
+      remoteOverlayCurrentUploadSessionIdRef.current === sessionId
+    ) {
+      return;
+    }
+
+    const cfg = session.cfg;
+    const electronAPI = window.electronAPI as any;
+
+    const buildMetadata = () => {
+      const transcripts = (session.transcripts || []).map((t) => ({
+        text: String((t as any).text || '').trim(),
+        timestamp: `[${formatTimestamp(Number((t as any).timestampMs || 0))}]`,
+        timestampMs: Number((t as any).timestampMs || 0),
+      }));
+      const summaries = (session.summaries || []).map((s: any) => ({
+        text: String(s?.text || '').trim(),
+        windowLabel: String(s?.windowLabel || ''),
+      }));
+
+      return {
+        quality: cfg.recordingEnabled ? session.captureQuality : null,
+        duration: Math.max(0, Number(session.cumulativeMediaMs || 0)),
+        transcriptCount: transcripts.length,
+        summaryCount: summaries.length,
+        transcripts,
+        summaries,
+        origin: { kind: 'local' },
+        recordedMimeType: 'video/webm',
+      };
+    };
+
+    try {
+      if (cfg.processingMode === 'remote') {
+        // Remote overlay (client mode) is server-source-of-truth: do not save/merge locally.
+        addLog(
+          `[RemoteOverlay] Session finalized. Saved on server as: ${cfg.baseFilename}${cfg.recordingEnabled ? '.webm' : ''}`,
+          LogLevel.SUCCESS
+        );
+        return;
+      }
+
+      const meta = buildMetadata();
+
+      if (cfg.recordingEnabled) {
+        const inputPaths = session.localChunkPaths.slice();
+        const outPath = `${String(session.recordingsDir).replace(/[\\/]+$/, '')}/${cfg.baseFilename}.webm`;
+
+        if (!inputPaths.length) {
+          throw new Error('No chunk files to finalize');
+        }
+
+        addLog(`[RemoteOverlay] Finalizing local overlay: concatenating ${inputPaths.length} chunks...`, LogLevel.INFO);
+        const concatRes = await electronAPI.concatWebm(inputPaths, outPath);
+        if (!concatRes?.success || !concatRes?.outputPath) {
+          throw new Error(concatRes?.error || 'Failed to concat WebM chunks');
+        }
+
+        const saveRes = await electronAPI.saveRecordingExisting(String(concatRes.outputPath), meta);
+        if (!saveRes?.success) {
+          throw new Error(saveRes?.error || 'Failed to save local overlay metadata');
+        }
+
+        addLog(`[RemoteOverlay] Session finalized locally: ${saveRes.filename}`, LogLevel.SUCCESS);
+
+        // Cleanup chunk artifacts (keep final merged video + metadata).
+        for (const p of inputPaths) {
+          try {
+            await electronAPI.deleteFile(p);
+          } catch {
+            // ignore
+          }
+        }
+      } else {
+        // Metadata-only save (no final video). Ensure LectureDetails doesn't try to load a video.
+        const metadataPath = `${String(session.recordingsDir).replace(/[\\/]+$/, '')}/${cfg.baseFilename}.json`;
+        const payload = {
+          ...meta,
+          videoFilename: '',
+          videoPath: '',
+          savedAt: new Date().toISOString(),
+          fileSize: 0,
+        };
+        await electronAPI.writeFile(metadataPath, JSON.stringify(payload, null, 2));
+        addLog(`[RemoteOverlay] Session finalized locally (no recording): ${cfg.baseFilename}.json`, LogLevel.SUCCESS);
+
+        // Privacy/storage: delete chunks when no final recording is kept.
+        for (const p of session.localChunkPaths) {
+          try {
+            await electronAPI.deleteFile(p);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } catch (e) {
+      addLog(`[RemoteOverlay] Failed to finalize session: ${e}`, LogLevel.ERROR);
+    } finally {
+      remoteOverlaySessionsRef.current.delete(sessionId);
+      if (remoteOverlayCurrentSessionIdRef.current === sessionId) {
+        remoteOverlayConfigRef.current = null;
+        remoteOverlayCurrentSessionIdRef.current = null;
+      }
+    }
+  }, [addLog, formatTimestamp]);
 
   // Initialize session manager only
   React.useEffect(() => {
@@ -656,7 +819,9 @@ const LectureHome: React.FC<LectureHomeProps> = ({
     const electronAPI = window.electronAPI as any;
 
     try {
-      // Remote overlay session only (requires remote client mode).
+      // Overlay sessions can run in:
+      // - Remote client mode (send 3-minute chunks to remote inbox server for processing)
+      // - Local mode (enqueue 3-minute chunks into the local Upload Queue for processing)
       let remoteCfg: any = null;
       try {
         const saved = localStorage.getItem('qwen_remote_config');
@@ -665,19 +830,10 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         remoteCfg = null;
       }
 
-      if (!(remoteCfg?.mode === 'client' && remoteCfg?.remoteUrl)) {
-        const msg = 'Remote Overlay is only available in Remote Processing Client Mode (connected).';
-        addLog(msg, LogLevel.WARN);
-        setError(msg);
-        return;
-      }
-
-      const remoteUrl = String(remoteCfg.remoteUrl || '').trim();
-      if (!remoteUrl) {
-        const msg = 'Missing remote server URL.';
-        addLog(msg, LogLevel.ERROR);
-        setError(msg);
-        return;
+      const remoteUrl = remoteCfg?.mode === 'client' ? String(remoteCfg.remoteUrl || '').trim() : '';
+      const processingMode: 'remote' | 'local' = remoteUrl ? 'remote' : 'local';
+      if (remoteCfg?.mode === 'client' && !remoteUrl) {
+        addLog('Remote client mode is not connected; starting overlay in local processing mode.', LogLevel.WARN);
       }
 
       // Step 1: Show recording confirmation modal
@@ -720,12 +876,13 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       const sessionId = `overlay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       const sessionState: RemoteOverlaySessionState = {
-        cfg: { remoteUrl, sessionId, baseFilename, recordingEnabled },
+        cfg: { processingMode, remoteUrl: remoteUrl || undefined, sessionId, baseFilename, recordingEnabled },
         recordingsDir,
         captureQuality,
         localChunkPaths: [],
         manifestChunks: [],
         chunkMetaByJobId: new Map(),
+        localQueueIdByJobId: new Map(),
         transcripts: [],
         summaries: [],
         pendingUploadsCount: 0,
@@ -1137,83 +1294,6 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       sessionStartTimeRef.current = Date.now();
       stopProcessedRef.current = false;  // Reset stop flag for new session
 
-      const parseTimeToSeconds = (s: string): number | null => {
-        const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-        if (!m) return null;
-        const a = Number(m[1]);
-        const b = Number(m[2]);
-        const c = m[3] ? Number(m[3]) : null;
-        if (!Number.isFinite(a) || !Number.isFinite(b) || (c !== null && !Number.isFinite(c))) return null;
-        if (c === null) return a * 60 + b;
-        return a * 3600 + b * 60 + c;
-      };
-
-      const extractRangeFromLabel = (label: string): { startSec: number; endSec: number } | null => {
-        const matches = String(label || '').match(/(\d{1,2}:\d{2}(?::\d{2})?)/g);
-        if (!matches || matches.length < 2) return null;
-        const a = parseTimeToSeconds(matches[0]);
-        const b = parseTimeToSeconds(matches[1]);
-        if (a === null || b === null) return null;
-        return { startSec: a, endSec: b };
-      };
-
-      const formatRangeLabel = (orig: string, startMs: number, endMs: number): string => {
-        const start = formatTimestamp(startMs);
-        const end = formatTimestamp(endMs);
-        if (String(orig || '').startsWith('Topics:')) return `Topics: ${start}-${end}`;
-        if (/\[.*\]/.test(String(orig || ''))) return `[${start}]-[${end}]`;
-        return `${start}-${end}`;
-      };
-
-      const pushOverlayUpdates = (session: RemoteOverlaySessionState) => {
-        if (electronAPI?.updateLectureTranscript) {
-          electronAPI.updateLectureTranscript(
-            JSON.stringify({
-              transcripts: session.transcripts,
-              current: null,
-            })
-          );
-        }
-        if (electronAPI?.updateLectureSummary) {
-          electronAPI.updateLectureSummary(
-            JSON.stringify({
-              summaries: session.summaries,
-              isGenerating: false,
-            })
-          );
-        }
-      };
-
-      const tryFinalizeClientSave = async (sessionId: string) => {
-        const session = remoteOverlaySessionsRef.current.get(sessionId);
-        if (!session) return;
-        if (!session.closing) return;
-        if (session.pendingUploadsCount > 0) return;
-        if (session.pendingResultJobIds.size > 0) return;
-        if (
-          remoteOverlayUploadInFlightRef.current &&
-          remoteOverlayCurrentUploadSessionIdRef.current === sessionId
-        ) {
-          return;
-        }
-
-        try {
-          // Remote overlay (client mode) is server-source-of-truth: do not save/merge locally.
-          addLog(
-            `[RemoteOverlay] Session finalized. Saved on server as: ${session.cfg.baseFilename}${session.cfg.recordingEnabled ? '.webm' : ''}`,
-            LogLevel.SUCCESS
-          );
-        } catch (e) {
-          addLog(`[RemoteOverlay] Failed to finalize session: ${e}`, LogLevel.ERROR);
-        } finally {
-          remoteOverlaySessionsRef.current.delete(sessionId);
-          if (remoteOverlayCurrentSessionIdRef.current === sessionId) {
-            remoteOverlayConfigRef.current = null;
-            remoteOverlayCurrentSessionIdRef.current = null;
-          }
-        }
-      };
-
       const pollAndApplyResult = async (jobId: string, mySessionId: string) => {
         const session = remoteOverlaySessionsRef.current.get(mySessionId);
         if (!session) {
@@ -1221,6 +1301,14 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           return;
         }
         const cfg = session.cfg;
+        const remoteUrl = String(cfg.remoteUrl || '').trim();
+        if (!remoteUrl) {
+          const msg = 'Missing remoteUrl for remote overlay polling';
+          addLog(`[RemoteOverlay] ${msg}`, LogLevel.ERROR);
+          const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
+          if (queueId) uploadQueueRef.current?.failRemoteUpload(queueId, msg);
+          return;
+        }
 
         const api = window.electronAPI as any;
         const meta = session.chunkMetaByJobId.get(jobId) || { offsetMs: 0, durationMs: 0 };
@@ -1263,7 +1351,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             }
 
             // Fetch status
-            const st = await api.getRemoteJobStatus(cfg.remoteUrl, jobId);
+            const st = await api.getRemoteJobStatus(remoteUrl, jobId);
             if (!st?.success) {
               consecutiveFailures++;
               addLog(`[RemoteOverlay] Poll status failed (${consecutiveFailures}/${REMOTE_POLL_MAX_CONSECUTIVE_FAILURES}): jobId=${jobId}`, LogLevel.WARN);
@@ -1297,7 +1385,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
               typeof api.getRemoteJobTranscript === 'function'
             ) {
               try {
-                const tr = await api.getRemoteJobTranscript(cfg.remoteUrl, jobId);
+                const tr = await api.getRemoteJobTranscript(remoteUrl, jobId);
                 if (tr?.success && tr?.data) {
                   const raw = Array.isArray(tr.data) ? tr.data : Array.isArray(tr.data?.transcripts) ? tr.data.transcripts : [];
                   const offsetMs = meta.offsetMs;
@@ -1341,7 +1429,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           const queueId = remoteOverlayChunkQueueIdRef.current.get(jobId);
           if (queueId) uploadQueueRef.current?.setRemoteProgress(queueId, 'Downloading results', 95);
 
-          const res = await api.getRemoteJobResult(cfg.remoteUrl, jobId);
+          const res = await api.getRemoteJobResult(remoteUrl, jobId);
           if (!res?.success || !res?.data) return;
           addLog(`[RemoteOverlay] Result received: jobId=${jobId}`, LogLevel.SUCCESS);
           const serverMeta = res.data;
@@ -1412,7 +1500,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         } finally {
           session.pollAbortControllers.delete(jobId);
           session.pendingResultJobIds.delete(jobId);
-          void tryFinalizeClientSave(mySessionId);
+          void finalizeOverlaySessionIfReady(mySessionId);
         }
       };
 
@@ -1457,7 +1545,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             `[RemoteOverlay] Upload start: ${next.storedFileName} (jobId=${next.jobId})`,
             LogLevel.INFO
           );
-          const res = await api.sendVideoToRemoteServer(cfg.remoteUrl, next.localPath, {
+          const res = await api.sendVideoToRemoteServer(remoteUrl, next.localPath, {
             displayName: next.storedFileName,
             jobId: next.jobId,
             sessionId: cfg.sessionId,
@@ -1511,7 +1599,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           remoteOverlayCurrentUploadQueueIdRef.current = '';
           remoteOverlayCurrentUploadSessionIdRef.current = null;
           session.pendingUploadsCount = Math.max(0, session.pendingUploadsCount - 1);
-          void tryFinalizeClientSave(next.sessionId);
+          void finalizeOverlaySessionIfReady(next.sessionId);
           void processNextUpload();
         }
       };
@@ -1630,35 +1718,63 @@ const LectureHome: React.FC<LectureHomeProps> = ({
           sessionState.cumulativeMediaMs = chunkOffsetMs + durationMs;
           remoteOverlayCumulativeMediaMsRef.current = sessionState.cumulativeMediaMs;
 
-          let remoteQueueId = '';
-          try {
-            remoteQueueId = uploadQueueRef.current?.addRemoteUpload(storedFileName, Number(writeRes.fileSize || 0)) || '';
-          } catch {
-            remoteQueueId = '';
-          }
-          if (remoteQueueId) {
-            remoteOverlayChunkQueueIdRef.current.set(jobId, remoteQueueId);
-          }
+          if (cfg.processingMode === 'remote') {
+            let remoteQueueId = '';
+            try {
+              remoteQueueId = uploadQueueRef.current?.addRemoteUpload(storedFileName, Number(writeRes.fileSize || 0)) || '';
+            } catch {
+              remoteQueueId = '';
+            }
+            if (remoteQueueId) {
+              remoteOverlayChunkQueueIdRef.current.set(jobId, remoteQueueId);
+            }
 
-          remoteOverlayPendingUploadsRef.current.push({
-            sessionId,
-            chunkIndex,
-            chunkStartMs: chunkStartWallMs,
-            chunkEndMs: chunkEndWallMs,
-            localPath: String(writeRes.videoPath),
-            storedFileName,
-            jobId,
-            // Remote overlay is server-source-of-truth: always delete local chunks after upload.
-            deleteLocalAfterUpload: true,
-            remoteQueueId,
-            fileSize: Number(writeRes.fileSize || 0),
-          });
-          sessionState.pendingUploadsCount += 1;
+            remoteOverlayPendingUploadsRef.current.push({
+              sessionId,
+              chunkIndex,
+              chunkStartMs: chunkStartWallMs,
+              chunkEndMs: chunkEndWallMs,
+              localPath: String(writeRes.videoPath),
+              storedFileName,
+              jobId,
+              // Remote overlay is server-source-of-truth: always delete local chunks after upload.
+              deleteLocalAfterUpload: true,
+              remoteQueueId,
+              fileSize: Number(writeRes.fileSize || 0),
+            });
+            sessionState.pendingUploadsCount += 1;
+          } else {
+            // Local overlay: enqueue chunk into local Upload Queue (no per-chunk recording save).
+            let queueId = '';
+            try {
+              queueId =
+                uploadQueueRef.current?.addVideoPathWithOptions(
+                  String(writeRes.videoPath),
+                  storedFileName,
+                  Number(writeRes.fileSize || 0),
+                  { saveToRecordings: false }
+                ) || '';
+            } catch {
+              queueId = '';
+            }
+            if (!queueId) {
+              const msg = `Failed to enqueue local overlay chunk for processing: ${storedFileName}`;
+              addLog(`[RemoteOverlay] ${msg}`, LogLevel.ERROR);
+              setError(msg);
+              stopRemoteOverlaySession();
+              return;
+            }
+            sessionState.localQueueIdByJobId.set(jobId, queueId);
+            sessionState.pendingResultJobIds.add(jobId);
+            addLog(`[RemoteOverlay] Enqueued local chunk: ${storedFileName} (queueId=${queueId})`, LogLevel.INFO);
+          }
 
           remoteOverlayChunkIndexRef.current += 1;
           remoteOverlayChunkStartMsRef.current = chunkEndWallMs;
 
-          void processNextUpload();
+          if (cfg.processingMode === 'remote') {
+            void processNextUpload();
+          }
 
           // Start the next chunk recorder immediately unless we're stopping.
           if (!isFinal) {
@@ -1672,7 +1788,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
             }
           }
 
-          if (isFinal) {
+          if (isFinal && cfg.processingMode === 'remote') {
             // enqueue manifest as last upload
             const chunks = sessionState.manifestChunks
               .slice()
@@ -1777,7 +1893,7 @@ const LectureHome: React.FC<LectureHomeProps> = ({
         remoteOverlayActiveRef.current = false;
 
         setIsRunning(false);
-        void tryFinalizeClientSave(sessionId);
+        void finalizeOverlaySessionIfReady(sessionId);
       };
 
       // Install stop handler for overlay control events
@@ -1819,6 +1935,167 @@ const LectureHome: React.FC<LectureHomeProps> = ({
       remoteOverlayConfigRef.current = null;
     }
   };
+
+  // Local overlay processing: watch the Upload Queue for local overlay chunk completions (and prefetched transcripts)
+  // and apply results into the overlay session state. This keeps FIFO/prefetch logic entirely inside UploadQueueManager.
+  React.useEffect(() => {
+    const electronAPI = window.electronAPI as any;
+    if (!electronAPI?.readFile) return;
+
+    const sessions = remoteOverlaySessionsRef.current;
+    if (!sessions.size) return;
+
+    const queueById = new Map<string, QueuedVideo>();
+    for (const v of uploadQueue) queueById.set(v.id, v);
+
+    let cancelled = false;
+
+    const run = async () => {
+      for (const [sessionId, session] of sessions.entries()) {
+        if (cancelled) return;
+        if (session.cfg.processingMode !== 'local') continue;
+
+        for (const [jobId, queueId] of session.localQueueIdByJobId.entries()) {
+          if (cancelled) return;
+          const video = queueById.get(queueId);
+          if (!video) continue;
+
+          const meta = session.chunkMetaByJobId.get(jobId) || { offsetMs: 0, durationMs: 0 };
+          const offsetMs = Number(meta.offsetMs || 0);
+          const durationMs = Number(meta.durationMs || 0);
+          const isSessionActive = remoteOverlayCurrentSessionIdRef.current === sessionId;
+
+          const applyTranscriptFromPath = async (transcriptPath: string, idPrefix: string) => {
+            const rawJson = await electronAPI.readFile(transcriptPath);
+            const raw = JSON.parse(rawJson);
+            const arr = Array.isArray(raw) ? raw : Array.isArray(raw?.transcripts) ? raw.transcripts : [];
+            for (let i = 0; i < arr.length; i++) {
+              const t = arr[i] || {};
+              const startSec = Number((t.start ?? t.timestamp ?? t.timestamp_s ?? t.time_start) ?? 0);
+              const text = String(t.text || t.segment || '').trim();
+              if (!text) continue;
+              const tsMs = offsetMs + Math.max(0, startSec * 1000);
+              session.transcripts.push({
+                id: `t_${jobId}_${idPrefix}_${i}`,
+                text,
+                timestampMs: tsMs,
+                isFinal: true,
+                formattedTime: `[${formatTimestamp(tsMs)}]`,
+              });
+            }
+            session.transcripts.sort((a, b) => a.timestampMs - b.timestampMs);
+          };
+
+          // If transcript is prefetched, apply immediately (even while the previous item is in VLM).
+          if (video.prefetchedTranscriptPath && !session.appliedTranscriptJobIds.has(jobId)) {
+            try {
+              await applyTranscriptFromPath(String(video.prefetchedTranscriptPath), 'early');
+              session.appliedTranscriptJobIds.add(jobId);
+              if (isSessionActive) {
+                pushOverlayUpdates(session);
+                addLog(`[RemoteOverlay] Transcript applied (prefetch): jobId=${jobId}`, LogLevel.INFO);
+              }
+            } catch (e) {
+              addLog(`[RemoteOverlay] Transcript prefetch apply failed: ${e}`, LogLevel.WARN);
+            }
+          }
+
+          // Apply final results once processing completes.
+          if (video.status === 'complete' && video.result) {
+            try {
+              // Avoid duplicating transcripts if they were already applied from prefetch.
+              if (!session.appliedTranscriptJobIds.has(jobId)) {
+                await applyTranscriptFromPath(String(video.result.transcriptPath), 'final');
+                session.appliedTranscriptJobIds.add(jobId);
+              }
+
+              const batches = Array.isArray(video.result.batches) ? video.result.batches : [];
+              for (let i = 0; i < batches.length; i++) {
+                const b: any = batches[i] || {};
+                const text = String(b.description || '').trim();
+                if (!text) continue;
+
+                const origLabel =
+                  String(b.window_label || '').trim() ||
+                  (Number.isFinite(b.time_start) && Number.isFinite(b.time_end)
+                    ? `Topics: ${formatTimestamp(b.time_start * 1000)}-${formatTimestamp(b.time_end * 1000)}`
+                    : `Window ${String(b.batch_id ?? i)}`);
+
+                const range = extractRangeFromLabel(origLabel);
+                const startMs = offsetMs + (range ? range.startSec * 1000 : 0);
+                const endMs = offsetMs + (range ? range.endSec * 1000 : durationMs || startMs);
+
+                session.summaries.push({
+                  id: `s_${jobId}_${i}`,
+                  text,
+                  timestampMs: startMs,
+                  windowStart: startMs / 1000,
+                  windowEnd: endMs / 1000,
+                  windowLabel: formatRangeLabel(origLabel, startMs, endMs),
+                });
+              }
+
+              session.summaries.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+
+              if (isSessionActive) {
+                pushOverlayUpdates(session);
+                addLog(
+                  `[RemoteOverlay] Overlay updated (local): transcripts=${session.transcripts.length} summaries=${session.summaries.length}`,
+                  LogLevel.INFO
+                );
+              } else {
+                addLog(`[RemoteOverlay] Result processed in background (local): jobId=${jobId}`, LogLevel.INFO);
+              }
+
+              // Cleanup per-chunk transcript artifacts (UploadQueueManager skips deleting for saveToRecordings=false).
+              try {
+                await electronAPI.deleteFile(String(video.result.transcriptPath));
+              } catch {
+                // ignore
+              }
+              try {
+                await electronAPI.deleteFile(String(video.result.transcriptPath).replace(/\\.json$/i, '_words.json'));
+              } catch {
+                // ignore
+              }
+              if (video.prefetchedTranscriptPath && String(video.prefetchedTranscriptPath) !== String(video.result.transcriptPath)) {
+                try {
+                  await electronAPI.deleteFile(String(video.prefetchedTranscriptPath));
+                } catch {
+                  // ignore
+                }
+                try {
+                  await electronAPI.deleteFile(String(video.prefetchedTranscriptPath).replace(/\\.json$/i, '_words.json'));
+                } catch {
+                  // ignore
+                }
+              }
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              addLog(`[RemoteOverlay] Local chunk processing apply failed: ${msg} (jobId=${jobId})`, LogLevel.ERROR);
+              if (isSessionActive) setError(msg);
+            } finally {
+              session.pendingResultJobIds.delete(jobId);
+              session.localQueueIdByJobId.delete(jobId);
+              void finalizeOverlaySessionIfReady(sessionId);
+            }
+          } else if (video.status === 'error' || video.status === 'cancelled') {
+            const msg = String(video.error || 'Local processing failed');
+            addLog(`[RemoteOverlay] Local chunk error: ${msg} (jobId=${jobId})`, LogLevel.ERROR);
+            if (isSessionActive) setError(msg);
+            session.pendingResultJobIds.delete(jobId);
+            session.localQueueIdByJobId.delete(jobId);
+            void finalizeOverlaySessionIfReady(sessionId);
+          }
+        }
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [uploadQueue, addLog, extractRangeFromLabel, finalizeOverlaySessionIfReady, formatRangeLabel, formatTimestamp, pushOverlayUpdates]);
 
   const handleUploadDetails = () => {
     if (isRunning) {

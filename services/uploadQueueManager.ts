@@ -29,6 +29,9 @@ export interface QueuedVideo {
   fileName: string;
   fileSize: number;
   status: VideoStatus;
+  // If false, do not persist this item as a standalone recording in `.recordings`.
+  // Used by Lecture overlay local chunk processing (chunks are merged into a single final lecture).
+  saveToRecordings?: boolean;
   // Server-side source classification (used for scheduling policies).
   sourceType?: 'overlay' | 'batch';
   // If set, this queued item corresponds to a remote upload job (server mode),
@@ -287,6 +290,18 @@ export class UploadQueueManager {
    * This avoids loading huge files into renderer memory.
    */
   public addVideoPath(filePath: string, displayName?: string, size?: number): string {
+    return this.addVideoPathWithOptions(filePath, displayName, size, {});
+  }
+
+  /**
+   * Add a local filesystem video path to queue (already on disk), with options.
+   */
+  public addVideoPathWithOptions(
+    filePath: string,
+    displayName: string | undefined,
+    size: number | undefined,
+    options: { saveToRecordings?: boolean } = {}
+  ): string {
     const p = String(filePath || '').trim();
     if (!p) {
       throw new Error('Missing file path');
@@ -302,6 +317,7 @@ export class UploadQueueManager {
       fileName,
       fileSize,
       sourceType: String(fileName).includes('_overlay_remote_chunk_') ? 'overlay' : 'batch',
+      saveToRecordings: options.saveToRecordings !== false,
       status: 'pending',
       progress: {
         phase: 'Pending',
@@ -770,7 +786,11 @@ export class UploadQueueManager {
     video.endTime = Date.now();
     video.result = { frames, transcriptPath, batches };
 
-    await this.saveUploadToRecordings(video, transcriptPath, batches);
+    if (video.saveToRecordings !== false) {
+      await this.saveUploadToRecordings(video, transcriptPath, batches);
+    } else {
+      this.log(`[Upload Queue] Skipping save-to-recordings for: ${video.fileName}`, LogLevel.INFO);
+    }
 
     video.status = 'complete';
     video.progress.percentage = 100;
