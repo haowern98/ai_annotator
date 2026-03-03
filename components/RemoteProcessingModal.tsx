@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Server, Monitor, Wifi, Globe, Copy, Lightbulb, Check, X, Plug2, Smartphone } from 'lucide-react';
+import { Server, Monitor, Wifi, Globe, Copy, Lightbulb, Check, X, Plug2 } from 'lucide-react';
 import { QwenHttpClient } from '../services/qwenHttpClient';
 
-type Mode = 'server' | 'client' | 'webviewer';
+type Mode = 'server' | 'client';
 
 interface RemoteConfig {
   mode: 'local' | 'server' | 'client';
@@ -11,11 +11,6 @@ interface RemoteConfig {
 }
 
 const REMOTE_CONFIG_KEY = 'qwen_remote_config';
-const WEB_VIEWER_CONFIG_KEY = 'web_viewer_config';
-
-interface WebViewerConfig {
-  enabled: boolean;
-}
 
 const saveRemoteConfig = (config: RemoteConfig) => {
   try {
@@ -39,26 +34,6 @@ const loadRemoteConfig = (): RemoteConfig | null => {
   return null;
 };
 
-const saveWebViewerConfig = (config: WebViewerConfig) => {
-  try {
-    localStorage.setItem(WEB_VIEWER_CONFIG_KEY, JSON.stringify(config));
-    window.dispatchEvent(new Event('web-viewer-config-changed'));
-  } catch (e) {
-    console.error('Failed to save web viewer config:', e);
-  }
-};
-
-const loadWebViewerConfig = (): WebViewerConfig | null => {
-  try {
-    const saved = localStorage.getItem(WEB_VIEWER_CONFIG_KEY);
-    if (saved) {
-      return JSON.parse(saved);
-    }
-  } catch (e) {
-    console.error('Failed to load web viewer config:', e);
-  }
-  return null;
-};
 
 interface RemoteProcessingModalProps {
   isOpen: boolean;
@@ -76,9 +51,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
   const [isStarting, setIsStarting] = useState(false);
   const [latency, setLatency] = useState<number | null>(null);
   const [isServerRunning, setIsServerRunning] = useState(false);
-  const [isWebViewerEnabled, setIsWebViewerEnabled] = useState(false);
-  const [isWebViewerBusy, setIsWebViewerBusy] = useState(false);
-  const [webViewerStatus, setWebViewerStatus] = useState<{ running: boolean; port: number; lastError?: string | null } | null>(null);
 
   // Load saved config and detect IPs on mount
   useEffect(() => {
@@ -101,30 +73,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
     if (savedConfig?.mode === 'client' && savedConfig.remoteUrl) {
       setServerUrl(savedConfig.remoteUrl);
     }
-
-    const savedWebViewer = loadWebViewerConfig();
-    if (typeof savedWebViewer?.enabled === 'boolean') {
-      setIsWebViewerEnabled(savedWebViewer.enabled);
-    }
-
-    const checkWebViewer = async () => {
-      if (window.electronAPI?.getWebViewerStatus) {
-        try {
-          const result = await window.electronAPI.getWebViewerStatus();
-          if (result?.success) {
-            setWebViewerStatus({
-              running: Boolean(result.running),
-              port: Number(result.port || 7558),
-              lastError: (result as any).lastError ?? null,
-            });
-          }
-        } catch {
-          // ignore
-        }
-      }
-    };
-
-    checkWebViewer();
 
     // Detect local and public IPs
     const detectIPs = async () => {
@@ -225,6 +173,13 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
       const result = await window.electronAPI.startQwenRemote();
       
       if (result.success) {
+        // Web viewer is automatically enabled in server mode.
+        try {
+          await window.electronAPI?.startWebViewer?.(7558);
+        } catch (e) {
+          console.warn('[WebViewer] Failed to start:', e);
+        }
+
         // Save server mode config
         saveRemoteConfig({ mode: 'server', lastConnected: Date.now() });
         setIsServerRunning(true);
@@ -255,6 +210,13 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
       const result = await window.electronAPI.startQwenLocal();
       
       if (result.success) {
+        // Web viewer is tied to server mode; stop it when leaving server mode.
+        try {
+          await window.electronAPI?.stopWebViewer?.();
+        } catch (e) {
+          console.warn('[WebViewer] Failed to stop:', e);
+        }
+
         // Clear server mode config (back to local)
         saveRemoteConfig({ mode: 'local' });
         setIsServerRunning(false);
@@ -285,6 +247,13 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
       const result = await window.electronAPI.startQwenLocal();
 
       if (result.success) {
+        // Ensure web viewer is OFF outside server mode.
+        try {
+          await window.electronAPI?.stopWebViewer?.();
+        } catch {
+          // ignore
+        }
+
         saveRemoteConfig({ mode: 'local' });
         setConnectionStatus('idle');
         setLatency(null);
@@ -307,6 +276,13 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
       return;
     }
 
+    // Ensure web viewer is OFF outside server mode.
+    try {
+      void window.electronAPI?.stopWebViewer?.();
+    } catch {
+      // ignore
+    }
+
     // Save client mode config
     saveRemoteConfig({
       mode: 'client',
@@ -316,53 +292,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
 
     onClose();
     onSuccess?.(); // Opens UploadLectureModal
-  };
-
-  const handleToggleWebViewer = async () => {
-    if (isWebViewerBusy) return;
-
-    const nextEnabled = !isWebViewerEnabled;
-    setIsWebViewerEnabled(nextEnabled);
-    saveWebViewerConfig({ enabled: nextEnabled });
-
-    if (!window.electronAPI?.startWebViewer || !window.electronAPI?.stopWebViewer) {
-      setWebViewerStatus((prev) => prev || { running: false, port: 7558, lastError: 'Electron API not available' });
-      return;
-    }
-
-    setIsWebViewerBusy(true);
-    try {
-      const result = nextEnabled
-        ? await window.electronAPI.startWebViewer(7558)
-        : await window.electronAPI.stopWebViewer();
-
-      if (!result?.success) {
-        const errMsg = String((result as any)?.error || 'Failed to update web viewer');
-        setWebViewerStatus((prev) => ({
-          running: prev?.running ?? false,
-          port: prev?.port ?? 7558,
-          lastError: errMsg,
-        }));
-        alert(errMsg);
-      }
-
-      if (window.electronAPI?.getWebViewerStatus) {
-        try {
-          const s = await window.electronAPI.getWebViewerStatus();
-          if (s?.success) {
-            setWebViewerStatus({
-              running: Boolean(s.running),
-              port: Number(s.port || 7558),
-              lastError: (s as any).lastError ?? null,
-            });
-          }
-        } catch {
-          // ignore
-        }
-      }
-    } finally {
-      setIsWebViewerBusy(false);
-    }
   };
 
   return (
@@ -463,34 +392,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
               </div>
               <div style={{ fontSize: '13px', color: '#888888', marginLeft: '30px' }}>
                 Connect to another PC
-              </div>
-            </button>
-
-            {/* Web Viewer Button */}
-            <button
-              onClick={() => setMode('webviewer')}
-              style={{
-                flex: 1,
-                padding: '16px',
-                backgroundColor: mode === 'webviewer' ? 'rgba(14, 114, 237, 0.15)' : '#1a1a1a',
-                border: mode === 'webviewer' ? '1px solid #0E72ED' : '1px solid #333333',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                transition: 'all 0.2s',
-                position: 'relative'
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
-                <Smartphone size={20} color={mode === 'webviewer' ? '#0E72ED' : '#888888'} />
-                <span style={{ fontSize: '15px', fontWeight: 600, color: mode === 'webviewer' ? '#ffffff' : '#aaaaaa' }}>
-                  Web Viewer Mode
-                </span>
-                {mode === 'webviewer' && (
-                  <Check size={16} color="#0E72ED" style={{ marginLeft: 'auto' }} />
-                )}
-              </div>
-              <div style={{ fontSize: '13px', color: '#888888', marginLeft: '30px' }}>
-                Browse this PC's recordings
               </div>
             </button>
           </div>
@@ -776,185 +677,6 @@ const RemoteProcessingModal: React.FC<RemoteProcessingModalProps> = ({ isOpen, o
                     </div>
                     <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.5' }}>
                       Audio transcription runs locally on this PC. Only video frames are sent to the remote server for processing (~144MB per hour of video).
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Web Viewer Mode Content */}
-        {mode === 'webviewer' && (
-          <>
-            <div style={{ padding: '0 24px 20px 24px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                <Smartphone size={18} color="#888888" />
-                <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600, color: '#ffffff' }}>
-                  Web Viewer
-                </h3>
-              </div>
-
-              <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.5', marginBottom: '16px' }}>
-                Enable a browser-based viewer for recordings stored on this PC. Uses TCP port{' '}
-                <span style={{ fontFamily: 'monospace' }}>7558</span>.
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '16px' }}>
-                <div>
-                  <div style={{ fontSize: '14px', fontWeight: 600, color: '#ffffff', marginBottom: '4px' }}>
-                    Enabled
-                  </div>
-                  <div style={{ fontSize: '13px', color: '#888888' }}>
-                    Persists across app restarts
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleToggleWebViewer}
-                  disabled={isWebViewerBusy}
-                  aria-pressed={isWebViewerEnabled}
-                  style={{
-                    width: '52px',
-                    height: '28px',
-                    padding: 0,
-                    border: '1px solid #333333',
-                    borderRadius: '999px',
-                    backgroundColor: isWebViewerEnabled ? 'rgba(14, 114, 237, 0.35)' : '#1a1a1a',
-                    cursor: isWebViewerBusy ? 'not-allowed' : 'pointer',
-                    position: 'relative',
-                    transition: 'all 0.2s',
-                    opacity: isWebViewerBusy ? 0.6 : 1
-                  }}
-                >
-                  <div
-                    style={{
-                      width: '22px',
-                      height: '22px',
-                      borderRadius: '50%',
-                      backgroundColor: isWebViewerEnabled ? '#0E72ED' : '#666666',
-                      position: 'absolute',
-                      top: '2px',
-                      left: isWebViewerEnabled ? '27px' : '3px',
-                      transition: 'all 0.2s'
-                    }}
-                  />
-                </button>
-              </div>
-
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '13px', color: '#aaaaaa', marginBottom: '6px' }}>
-                  URL (LAN / Tailscale)
-                </label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    type="text"
-                    value={localIP && !['Detecting...', 'Not detected'].includes(localIP) ? `http://${localIP}:7558` : 'Not available'}
-                    readOnly
-                    style={{
-                      flex: 1,
-                      padding: '10px 12px',
-                      backgroundColor: '#1a1a1a',
-                      border: '1px solid #333333',
-                      borderRadius: '6px',
-                      color: '#ffffff',
-                      fontSize: '14px',
-                      fontFamily: 'monospace'
-                    }}
-                  />
-                  <button
-                    onClick={() => handleCopy(`http://${localIP}:7558`, 'webviewer_local')}
-                    disabled={!localIP || ['Detecting...', 'Not detected'].includes(localIP)}
-                    style={{
-                      padding: '10px 16px',
-                      backgroundColor: copiedField === 'webviewer_local' ? '#10b981' : '#0E72ED',
-                      border: 'none',
-                      borderRadius: '6px',
-                      color: '#ffffff',
-                      cursor: (!localIP || ['Detecting...', 'Not detected'].includes(localIP)) ? 'not-allowed' : 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      fontSize: '13px',
-                      fontWeight: 500,
-                      opacity: (!localIP || ['Detecting...', 'Not detected'].includes(localIP)) ? 0.5 : 1,
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    {copiedField === 'webviewer_local' ? <Check size={16} /> : <Copy size={16} />}
-                    {copiedField === 'webviewer_local' ? 'Copied' : 'Copy'}
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '13px', color: '#aaaaaa', marginBottom: '6px' }}>
-                  URL (This PC)
-                </label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    type="text"
-                    value="http://localhost:7558"
-                    readOnly
-                    style={{
-                      flex: 1,
-                      padding: '10px 12px',
-                      backgroundColor: '#1a1a1a',
-                      border: '1px solid #333333',
-                      borderRadius: '6px',
-                      color: '#ffffff',
-                      fontSize: '14px',
-                      fontFamily: 'monospace'
-                    }}
-                  />
-                  <button
-                    onClick={() => handleCopy('http://localhost:7558', 'webviewer_localhost')}
-                    style={{
-                      padding: '10px 16px',
-                      backgroundColor: copiedField === 'webviewer_localhost' ? '#10b981' : '#0E72ED',
-                      border: 'none',
-                      borderRadius: '6px',
-                      color: '#ffffff',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      fontSize: '13px',
-                      fontWeight: 500,
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    {copiedField === 'webviewer_localhost' ? <Check size={16} /> : <Copy size={16} />}
-                    {copiedField === 'webviewer_localhost' ? 'Copied' : 'Copy'}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ padding: '0 24px 20px 24px' }}>
-              <div
-                style={{
-                  padding: '16px',
-                  backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                  border: '1px solid rgba(245, 158, 11, 0.3)',
-                  borderRadius: '8px'
-                }}
-              >
-                <div style={{ display: 'flex', gap: '12px' }}>
-                  <Lightbulb size={20} color="#F59E0B" style={{ flexShrink: 0, marginTop: '2px' }} />
-                  <div style={{ fontSize: '13px', color: '#cccccc', lineHeight: '1.5' }}>
-                    <div style={{ marginBottom: '8px' }}>
-                      Status:{' '}
-                      <span style={{ color: webViewerStatus?.running ? '#10b981' : '#aaaaaa', fontWeight: 600 }}>
-                        {webViewerStatus ? (webViewerStatus.running ? 'Running' : 'Stopped') : 'Unknown'}
-                      </span>
-                      {webViewerStatus?.lastError ? (
-                        <span style={{ color: '#ef4444' }}> — {webViewerStatus.lastError}</span>
-                      ) : null}
-                    </div>
-                    <div>
-                      Open the URL above on your phone/tablet/laptop (LAN or Tailscale). If it isn’t reachable, allow inbound TCP port{' '}
-                      <span style={{ fontFamily: 'monospace' }}>7558</span> in Windows Firewall.
                     </div>
                   </div>
                 </div>

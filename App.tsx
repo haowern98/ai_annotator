@@ -120,41 +120,14 @@ export default function App() {
 
     const api = window.electronAPI as any;
 
-    // Web Viewer autostart (port 7558) - independent from remote client/server mode.
-    const WEB_VIEWER_CONFIG_KEY = 'web_viewer_config';
-    const readWebViewerEnabled = () => {
+    // Web Viewer is tied strictly to Server Mode. On app startup, enforce it OFF.
+    if (api?.stopWebViewer) {
       try {
-        const raw = localStorage.getItem(WEB_VIEWER_CONFIG_KEY);
-        if (!raw) return false;
-        const parsed = JSON.parse(raw);
-        return Boolean(parsed?.enabled);
+        void api.stopWebViewer();
       } catch {
-        return false;
+        // ignore
       }
-    };
-
-    const applyWebViewerEnabled = async (enabled: boolean) => {
-      if (!api?.startWebViewer || !api?.stopWebViewer) return;
-      try {
-        if (enabled) {
-          const res = await api.startWebViewer(7558);
-          if (!res?.success) console.warn('[WebViewer] start failed:', res?.error || res);
-        } else {
-          const res = await api.stopWebViewer();
-          if (!res?.success) console.warn('[WebViewer] stop failed:', res?.error || res);
-        }
-      } catch (e) {
-        console.warn('[WebViewer] apply failed:', e);
-      }
-    };
-
-    // Start/stop on launch based on persisted renderer config.
-    void applyWebViewerEnabled(readWebViewerEnabled());
-
-    const onWebViewerConfigChanged = () => {
-      void applyWebViewerEnabled(readWebViewerEnabled());
-    };
-    window.addEventListener('web-viewer-config-changed', onWebViewerConfigChanged);
+    }
 
     const uploadParakeet = new ParakeetBatchTranscriber(addLog);
     uploadParakeetRef.current = uploadParakeet;
@@ -307,7 +280,6 @@ export default function App() {
     return () => {
       disposed = true;
       window.removeEventListener('qwen-config-changed', onQwenConfigChanged);
-      window.removeEventListener('web-viewer-config-changed', onWebViewerConfigChanged);
       try {
         (window.electronAPI as any)?.removeInboxListeners?.();
       } catch {
