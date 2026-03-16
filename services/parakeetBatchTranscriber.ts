@@ -223,10 +223,61 @@ export default class ParakeetBatchTranscriber {
       }
     }
 
+    const isMissingWordTimestampsError = (err: unknown): boolean => {
+      const msg = err instanceof Error ? err.message : String(err);
+      const normalized = msg.toLowerCase();
+      return (
+        normalized.includes('word timestamps not available from model output') ||
+        normalized.includes('word-level timestamps not available from model output') ||
+        normalized.includes('word level timestamps not available from model output')
+      );
+    };
+
+    const isNoAudioStreamError = (raw: unknown): boolean => {
+      const msg = raw instanceof Error ? raw.message : String(raw);
+      const normalized = msg.toLowerCase();
+      // Common ffmpeg messages when input has no audio stream or mapping yields no packets.
+      return (
+        normalized.includes('output file does not contain any stream') ||
+        normalized.includes('matches no streams') ||
+        normalized.includes('stream specifier') && normalized.includes('matches no streams') ||
+        normalized.includes('no audio') && normalized.includes('stream')
+      );
+    };
+
+    const writeEmptyTranscript = async (duration_s: number | null) => {
+      const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify([], null, 2));
+      if (!okSeg) throw new Error('Failed to write transcript segments');
+
+      const wordsPath = outputPath.replace(/\.json$/i, '_words.json');
+      const okWords = await window.electronAPI.writeFile(
+        wordsPath,
+        JSON.stringify({ duration_s, text: '', words: [] }, null, 2)
+      );
+      if (!okWords) throw new Error('Failed to write transcript word timestamps');
+    };
+
     this.log('[Parakeet Batch] Extracting audio with ffmpeg...', LogLevel.INFO);
     const audioResult = await window.electronAPI.extractAudioFromVideo(tempVideoPath);
     if (!audioResult.success || !audioResult.audioPath) {
-      throw new Error(`Audio extraction failed: ${audioResult.error || 'Unknown error'}`);
+      const raw = audioResult.error || 'Unknown error';
+      if (isNoAudioStreamError(raw)) {
+        this.log('[Parakeet Batch] No audio stream detected; using empty transcript.', LogLevel.WARN);
+        try {
+          await writeEmptyTranscript(null);
+          onProgress?.(0);
+          return;
+        } finally {
+          try {
+            if (shouldCleanupVideo) {
+              await window.electronAPI.deleteFile(tempVideoPath);
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+      throw new Error(`Audio extraction failed: ${raw}`);
     }
 
     this.log(
@@ -323,7 +374,26 @@ export default class ParakeetBatchTranscriber {
     const shouldChunk = wavDurationSeconds !== null && wavDurationSeconds > 300;
     if (!shouldChunk) {
       try {
-        const { segments, words, text, duration_s } = await runBatch(audioResult.audioPath);
+        let segments: ParakeetBatchTranscriptSegment[] = [];
+        let words: ParakeetWordTimestamp[] = [];
+        let text = '';
+        let duration_s: number | null = wavDurationSeconds;
+
+        try {
+          const res = await runBatch(audioResult.audioPath);
+          segments = res.segments;
+          words = res.words;
+          text = res.text;
+          duration_s = typeof res.duration_s === 'number' ? res.duration_s : duration_s;
+        } catch (err) {
+          if (isMissingWordTimestampsError(err)) {
+            this.log('[Parakeet Batch] No word timestamps available; using empty transcript.', LogLevel.WARN);
+            await writeEmptyTranscript(duration_s);
+            onProgress?.(0);
+            return;
+          }
+          throw err;
+        }
 
         const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
         if (!okSeg) throw new Error('Failed to write transcript segments');
@@ -346,7 +416,26 @@ export default class ParakeetBatchTranscriber {
     if (!window.electronAPI.extractWavSegment) {
       // Fall back to single-pass if the IPC handler isn't available.
       try {
-        const { segments, words, text, duration_s } = await runBatch(audioResult.audioPath);
+        let segments: ParakeetBatchTranscriptSegment[] = [];
+        let words: ParakeetWordTimestamp[] = [];
+        let text = '';
+        let duration_s: number | null = wavDurationSeconds;
+
+        try {
+          const res = await runBatch(audioResult.audioPath);
+          segments = res.segments;
+          words = res.words;
+          text = res.text;
+          duration_s = typeof res.duration_s === 'number' ? res.duration_s : duration_s;
+        } catch (err) {
+          if (isMissingWordTimestampsError(err)) {
+            this.log('[Parakeet Batch] No word timestamps available; using empty transcript.', LogLevel.WARN);
+            await writeEmptyTranscript(duration_s);
+            onProgress?.(0);
+            return;
+          }
+          throw err;
+        }
 
         const okSeg = await window.electronAPI.writeFile(outputPath, JSON.stringify(segments, null, 2));
         if (!okSeg) throw new Error('Failed to write transcript segments');
@@ -391,7 +480,24 @@ export default class ParakeetBatchTranscriber {
         }
 
         try {
-          const { segments, words } = await runBatch(chunkRes.audioPath);
+          let segments: ParakeetBatchTranscriptSegment[] = [];
+          let words: ParakeetWordTimestamp[] = [];
+          try {
+            const res = await runBatch(chunkRes.audioPath);
+            segments = res.segments;
+            words = res.words;
+          } catch (err) {
+            if (isMissingWordTimestampsError(err)) {
+              this.log(
+                `[Parakeet Batch] No word timestamps available at ~${chunkStart.toFixed(1)}s; using empty transcript for this chunk.`,
+                LogLevel.WARN
+              );
+              segments = [];
+              words = [];
+            } else {
+              throw err;
+            }
+          }
 
           const localCutoff = chunkIndex === 0 ? -Infinity : overlapSeconds;
 

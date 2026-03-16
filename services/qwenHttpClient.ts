@@ -109,9 +109,63 @@ export class QwenHttpClient {
   private isConnectedFlag: boolean = false;
   private callbacks: QwenClientCallbacks | null = null;
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private connectInFlight: Promise<void> | null = null;
+  private manuallyDisconnected: boolean = false;
+  private consecutiveHealthFailures: number = 0;
+  private emittedLostConnection: boolean = false;
 
   constructor(baseUrl: string = 'http://127.0.0.1:7556') {
     this.baseUrl = baseUrl;
+  }
+
+  private async fetchHealth(timeoutMs: number = 3000): Promise<{ ok: boolean; status?: any }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${this.baseUrl}/health`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) return { ok: false };
+
+      // Some failures return HTML or empty responses; guard JSON parsing.
+      const text = await response.text();
+      try {
+        const data = JSON.parse(text);
+        return { ok: true, status: data?.status, };
+      } catch {
+        return { ok: false };
+      }
+    } catch {
+      return { ok: false };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async ensureConnected(): Promise<void> {
+    if (this.isConnectedFlag) return;
+    if (this.manuallyDisconnected) throw new Error('Not connected to qwen_worker');
+
+    // If a connect is already happening, wait for it.
+    if (this.connectInFlight) {
+      await this.connectInFlight;
+      if (!this.isConnectedFlag) throw new Error('Not connected to qwen_worker');
+      return;
+    }
+
+    // Best-effort probe: recover from false disconnect states without requiring App-level reconnect.
+    const health = await this.fetchHealth(2000);
+    if (!health.ok || health.status !== 'healthy') {
+      throw new Error('Not connected to qwen_worker');
+    }
+
+    this.isConnectedFlag = true;
+    this.consecutiveHealthFailures = 0;
+    this.emittedLostConnection = false;
+    this.startHealthCheck();
   }
 
   /**
@@ -119,33 +173,43 @@ export class QwenHttpClient {
    */
   async connect(callbacks?: QwenClientCallbacks): Promise<void> {
     this.callbacks = callbacks || null;
-    
-    try {
-      // Health check
-      const response = await fetch(`${this.baseUrl}/health`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
+    this.manuallyDisconnected = false;
 
-      if (!response.ok) {
-        throw new Error(`Health check failed: ${response.status}`);
-      }
+    if (this.connectInFlight) {
+      await this.connectInFlight;
+      if (!this.isConnectedFlag) throw new Error('Not connected to qwen_worker');
+      return;
+    }
 
-      const data = await response.json();
-      
-      if (data.status === 'healthy') {
+    this.connectInFlight = (async () => {
+      try {
+        const health = await this.fetchHealth(5000);
+        if (this.manuallyDisconnected) {
+          throw new Error('Connection cancelled');
+        }
+        if (!health.ok) {
+          throw new Error('Health check failed');
+        }
+        if (health.status !== 'healthy') {
+          throw new Error('Service not healthy');
+        }
+
         this.isConnectedFlag = true;
+        this.consecutiveHealthFailures = 0;
+        this.emittedLostConnection = false;
         this.callbacks?.onReady?.();
         this.startHealthCheck();
-      } else {
-        throw new Error('Service not healthy');
+      } catch (error) {
+        this.isConnectedFlag = false;
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+        this.callbacks?.onError?.(`Failed to connect to qwen_worker: ${errorMsg}`);
+        throw error;
+      } finally {
+        this.connectInFlight = null;
       }
-    } catch (error) {
-      this.isConnectedFlag = false;
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      this.callbacks?.onError?.(`Failed to connect to qwen_worker: ${errorMsg}`);
-      throw error;
-    }
+    })();
+
+    await this.connectInFlight;
   }
 
   /**
@@ -159,9 +223,7 @@ export class QwenHttpClient {
     transcripts: QwenTranscript[],
     systemPrompt?: string
   ): Promise<QwenAnalysisResponse> {
-    if (!this.isConnectedFlag) {
-      throw new Error('Not connected to qwen_worker');
-    }
+    await this.ensureConnected();
 
     try {
       this.callbacks?.onProgress?.('Preparing video data...');
@@ -224,9 +286,7 @@ export class QwenHttpClient {
     transcripts: QwenTranscript[],
     systemPrompt?: string
   ): Promise<QwenAnalysisResponse> {
-    if (!this.isConnectedFlag) {
-      throw new Error('Not connected to qwen_worker');
-    }
+    await this.ensureConnected();
 
     try {
       this.callbacks?.onProgress?.('Preparing keyframe data...');
@@ -313,9 +373,7 @@ export class QwenHttpClient {
       previous_context?: Record<string, any> | null;
     } = {}
   ): Promise<QwenSequentialResponse> {
-    if (!this.isConnectedFlag) {
-      throw new Error('Not connected to qwen_worker');
-    }
+    await this.ensureConnected();
 
     try {
       const startMs = Date.now();
@@ -393,6 +451,8 @@ export class QwenHttpClient {
   disconnect(): void {
     this.stopHealthCheck();
     this.isConnectedFlag = false;
+    this.manuallyDisconnected = true;
+    this.connectInFlight = null;
     this.callbacks = null;
   }
 
@@ -407,27 +467,36 @@ export class QwenHttpClient {
    * Start periodic health checks
    */
   private startHealthCheck(): void {
+    if (this.healthCheckInterval) return;
     // Check every 30 seconds
     this.healthCheckInterval = setInterval(async () => {
+      if (this.manuallyDisconnected) return;
       try {
-        const response = await fetch(`${this.baseUrl}/health`, {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        
-        if (!response.ok) {
-          throw new Error('Health check failed');
-        }
-        
-        const data = await response.json();
-        if (data.status !== 'healthy') {
+        const health = await this.fetchHealth(3000);
+        if (!health.ok || health.status !== 'healthy') {
           throw new Error('Service unhealthy');
         }
+
+        // Recovered
+        const wasDisconnected = !this.isConnectedFlag;
+        this.isConnectedFlag = true;
+        this.consecutiveHealthFailures = 0;
+        if (wasDisconnected) {
+          this.emittedLostConnection = false;
+          this.callbacks?.onReady?.();
+        }
       } catch (error) {
-        console.error('[QwenHttpClient] Health check failed:', error);
-        this.isConnectedFlag = false;
-        this.callbacks?.onError?.('Lost connection to qwen_worker');
-        this.stopHealthCheck();
+        this.consecutiveHealthFailures += 1;
+        if (this.consecutiveHealthFailures === 1) {
+          console.warn('[QwenHttpClient] Health check failed:', error);
+        }
+        if (this.consecutiveHealthFailures >= 3) {
+          this.isConnectedFlag = false;
+          if (!this.emittedLostConnection) {
+            this.emittedLostConnection = true;
+            this.callbacks?.onError?.('Lost connection to qwen_worker');
+          }
+        }
       }
     }, 30000);
   }
@@ -452,9 +521,7 @@ export class QwenHttpClient {
     transcriptPath: string,
     onWindowProgress?: (window: number, totalWindows: number) => void
   ): Promise<QwenBatchResult[]> {
-    if (!this.isConnectedFlag) {
-      throw new Error('Not connected to qwen_worker');
-    }
+    await this.ensureConnected();
 
     // Read transcripts from file using Electron API
     let allTranscripts: Array<{ start: number; end: number; text: string; is_final: boolean }>;

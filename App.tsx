@@ -170,15 +170,9 @@ export default function App() {
       const myNonce = ++qwenConnectNonce;
       const { qwenUrl, isRemoteQwen } = readRemoteConfig();
 
-      // Disconnect previous client to stop health-check spam.
-      try {
-        uploadQwenRef.current?.disconnect?.();
-      } catch {
-        // ignore
-      }
-
+      // Swap clients safely: keep the previous client alive until the new one is confirmed connected.
+      const prevQwen = uploadQwenRef.current;
       const uploadQwen = new QwenHttpClient(qwenUrl);
-      uploadQwenRef.current = uploadQwen;
 
       try {
         await uploadQwen.connect({
@@ -191,8 +185,22 @@ export default function App() {
         return;
       }
 
-      if (disposed) return;
-      if (myNonce !== qwenConnectNonce) return;
+      if (disposed) {
+        try {
+          uploadQwen.disconnect?.();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      if (myNonce !== qwenConnectNonce) {
+        try {
+          uploadQwen.disconnect?.();
+        } catch {
+          // ignore
+        }
+        return;
+      }
 
       const autoIndexOnComplete = computeAutoIndexOnComplete(qwenUrl, isRemoteQwen);
 
@@ -206,6 +214,13 @@ export default function App() {
       } else {
         uploadQueueRef.current.setQwenClient(uploadQwen);
         uploadQueueRef.current.setAutoIndexOnComplete(autoIndexOnComplete);
+      }
+
+      uploadQwenRef.current = uploadQwen;
+      try {
+        prevQwen?.disconnect?.();
+      } catch {
+        // ignore
       }
     };
 
