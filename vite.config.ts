@@ -9,6 +9,9 @@ export default defineConfig(({ mode }) => {
       server: {
         host: '0.0.0.0',
         port: 5173,
+        watch: {
+          ignored: ['**/.recordings/**'],
+        },
       },
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
@@ -26,6 +29,7 @@ export default defineConfig(({ mode }) => {
             main: path.resolve(__dirname, 'index.html'),
             overlay: path.resolve(__dirname, 'overlay.html'),
             'lecture-overlay': path.resolve(__dirname, 'lecture-overlay.html'),
+            webviewer: path.resolve(__dirname, 'webviewer.html'),
           },
         },
       },

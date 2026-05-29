@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, ChevronDown, ChevronUp, ExternalLink, Trash2, BookOpen, Calendar, Clock, FileText, BarChart3 } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, ExternalLink, Trash2, BookOpen, Calendar, Clock, FileText, BarChart3, Monitor, Server, List } from 'lucide-react';
 import { NavigationView } from '../types';
 import LectureDetails from './LectureDetails.tsx';
 
@@ -17,6 +17,11 @@ interface Lecture {
   filePath: string;
   videoPath: string;
   lastModified: string;
+  // Used for UI labeling/filtering (e.g. remote uploads should show as "Remote" even if stored locally on this PC).
+  origin: 'local' | 'remote';
+  // Used to decide how LectureDetails loads the lecture assets.
+  storage: 'local' | 'remote';
+  remoteServerUrl?: string;
 }
 
 interface RecordingMetadata {
@@ -30,6 +35,8 @@ interface RecordingMetadata {
   videoPath: string;
   savedAt: string;
   fileSize: number;
+  userTitle?: string | null;
+  origin?: { kind?: 'local' | 'remote'; serverUrl?: string; serverId?: string } | 'local' | 'remote' | null;
 }
 
 interface HistoryHomeProps {
@@ -42,8 +49,9 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [lectures, setLectures] = useState<Lecture[]>([]);
-  const [selectedLectureId, setSelectedLectureId] = useState<string | null>(null);
+  const [selectedLecture, setSelectedLecture] = useState<null | { id: string; storage: 'local' | 'remote'; remoteServerUrl?: string }>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [originFilterUi, setOriginFilterUi] = useState<'all' | 'local' | 'remote'>('all');
 
   // Load recordings from IPC
   useEffect(() => {
@@ -56,12 +64,53 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           return;
         }
 
-        const result = await electronAPI.listRecordings();
-        if (result.success && result.recordings) {
-          const formattedLectures: Lecture[] = result.recordings.map((rec: RecordingMetadata) => {
+        const formatLectureFromRecording = (
+          rec: RecordingMetadata,
+          index: number,
+          originOverride?: 'local' | 'remote',
+          remoteServerUrl?: string
+        ): Lecture => {
+            const rawVideoFilename =
+              rec.videoFilename ||
+              (typeof rec.videoPath === 'string' && rec.videoPath
+                ? rec.videoPath.split(/[\\/]/).pop() || ''
+                : '') ||
+              '';
+
             // Extract filename without extension - support both .mp4 and .webm
-            const videoExtension = rec.videoFilename?.match(/\.(webm|mp4)$/)?.[0] || '.webm';
-            const filename = rec.videoFilename.replace(/\.(webm|mp4)$/, '');
+            const videoExtension = rawVideoFilename.match(/\.(webm|mp4)$/)?.[0] || '.webm';
+            let filename = rawVideoFilename ? rawVideoFilename.replace(/\.(webm|mp4)$/, '') : '';
+
+            // If the filename isn't in the expected lecture_YYYYMMDD_HHMMSS format, fall back to savedAt.
+            if ((!filename || filename.split('_')[1]?.length !== 8) && rec.savedAt) {
+              const d = new Date(rec.savedAt);
+              if (!Number.isNaN(d.getTime())) {
+                const yyyy = String(d.getFullYear());
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mi = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                filename = filename || `lecture_${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
+              }
+            }
+
+            if (!filename) {
+              filename = `lecture_unknown_${index}`;
+            }
+
+            const isRemoteByName = /(^|_)remote(_|$)/i.test(filename) || filename.includes('_overlay_remote');
+            const originKindFromMeta = (() => {
+              const o: any = (rec as any).origin;
+              if (!o) return null;
+              if (typeof o === 'string') return o === 'remote' ? 'remote' : 'local';
+              if (typeof o === 'object' && typeof o.kind === 'string') return o.kind === 'remote' ? 'remote' : 'local';
+              return null;
+            })();
+            const inferredOrigin: 'local' | 'remote' = originKindFromMeta || (isRemoteByName ? 'remote' : 'local');
+            const originKind: 'local' | 'remote' = originOverride || inferredOrigin;
+            const storage: 'local' | 'remote' = remoteServerUrl ? 'remote' : 'local';
+
             const titleParts = filename.split('_');
             const dateStr = titleParts[1] || '';
             const timeStr = titleParts[2] || '';
@@ -122,7 +171,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
             return {
               id: filename,
-              title: `Lecture ${formattedDate}`,
+              title: rec.userTitle ? String(rec.userTitle) : `Lecture ${formattedDate}`,
               date: formattedDate,
               time: formattedTime,
               duration: formattedDuration,
@@ -131,16 +180,44 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               recordingEnabled: rec.videoPath && rec.fileSize > 0, // Recording exists if we have video file
               quality: qualityDisplay,
               fileSize: `${fileSizeMB} MB`,
-              filePath: rec.videoPath.replace(/\\\\/g, '/'),
-              videoPath: rec.videoPath,
-              lastModified
+              filePath: (rec.videoPath || '').replace(/\\\\/g, '/'),
+              videoPath: rec.videoPath || '',
+              lastModified,
+              origin: originKind,
+              storage,
+              remoteServerUrl,
             };
-          });
+        };
 
-          // Sort by date descending (newest first)
-          formattedLectures.sort((a, b) => b.id.localeCompare(a.id));
-          setLectures(formattedLectures);
+        const localResult = await electronAPI.listRecordings();
+        const localLectures: Lecture[] =
+          localResult.success && Array.isArray(localResult.recordings)
+            ? localResult.recordings.map((rec: RecordingMetadata, index: number) =>
+                // Do not override origin for local recordings; allow metadata/name inference to label remote uploads correctly.
+                formatLectureFromRecording(rec, index)
+              )
+            : [];
+
+        let remoteLectures: Lecture[] = [];
+        try {
+          const raw = localStorage.getItem('qwen_remote_config');
+          const cfg = raw ? JSON.parse(raw) : null;
+          if (cfg?.mode === 'client' && cfg.remoteUrl && electronAPI?.remoteLibraryList) {
+            const remoteRes = await electronAPI.remoteLibraryList(String(cfg.remoteUrl));
+            const recs = remoteRes?.success ? remoteRes?.data?.recordings : null;
+            if (Array.isArray(recs)) {
+              remoteLectures = recs.map((rec: RecordingMetadata, index: number) =>
+                formatLectureFromRecording(rec, index, 'remote', String(cfg.remoteUrl))
+              );
+            }
+          }
+        } catch (e) {
+          console.warn('[HistoryHome] Failed to load remote library:', (e as any)?.message || e);
         }
+
+        const merged = [...localLectures, ...remoteLectures];
+        merged.sort((a, b) => b.id.localeCompare(a.id));
+        setLectures(merged);
       } catch (err) {
         console.error('Failed to load recordings:', err);
       } finally {
@@ -149,6 +226,14 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
     };
 
     loadRecordings();
+
+    const onRemoteChanged = () => loadRecordings();
+    window.addEventListener('remote-library-changed', onRemoteChanged);
+    window.addEventListener('qwen-config-changed', onRemoteChanged);
+    return () => {
+      window.removeEventListener('remote-library-changed', onRemoteChanged);
+      window.removeEventListener('qwen-config-changed', onRemoteChanged);
+    };
   }, []);
 
   const filteredLectures = lectures.filter(lecture =>
@@ -156,19 +241,26 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
     lecture.date.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const visibleLectures =
+    originFilterUi === 'all' ? filteredLectures : filteredLectures.filter((l) => l.origin === originFilterUi);
+
   const toggleExpand = (id: string) => {
     setExpandedId(expandedId === id ? null : id);
   };
 
   const handleOpenLecture = (lectureId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setSelectedLectureId(lectureId);
+    const found = lectures.find((l) => l.id === lectureId) || null;
+    if (found) {
+      setSelectedLecture({ id: found.id, storage: found.storage, remoteServerUrl: found.remoteServerUrl });
+    } else {
+      setSelectedLecture({ id: lectureId, storage: 'local' });
+    }
     onNavigate?.('lecture-details');
   };
 
   const handleDelete = async (lecture: Lecture, e: React.MouseEvent) => {
     e.stopPropagation();
-
     // Show native Electron confirmation dialog
     const electronAPI = (window as any).electronAPI;
     if (!electronAPI?.showMessageBox) {
@@ -193,6 +285,50 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
     // Perform deletion
     try {
+      if (lecture.storage === 'remote') {
+        if (!electronAPI?.remoteLibraryDelete) {
+          await electronAPI.showMessageBox({
+            type: 'error',
+            buttons: ['OK'],
+            title: 'Delete failed',
+            message: 'remoteLibraryDelete not available',
+          });
+          return;
+        }
+        const serverUrl = String(lecture.remoteServerUrl || '').trim();
+        if (!serverUrl) {
+          await electronAPI.showMessageBox({
+            type: 'error',
+            buttons: ['OK'],
+            title: 'Delete failed',
+            message: 'Missing remote server URL for this lecture',
+          });
+          return;
+        }
+        const deleteResult = await electronAPI.remoteLibraryDelete(serverUrl, lecture.id);
+        if (deleteResult?.success) {
+          setLectures((prev) => prev.filter((l) => l.id !== lecture.id));
+          try {
+            window.dispatchEvent(new Event('remote-library-changed'));
+          } catch {
+            // ignore
+          }
+          return;
+        }
+
+        const detailErr =
+          typeof deleteResult?.detail === 'string'
+            ? deleteResult.detail
+            : (deleteResult?.detail?.error || deleteResult?.detail?.message || null);
+        await electronAPI.showMessageBox({
+          type: 'error',
+          buttons: ['OK'],
+          title: 'Delete failed',
+          message: String(detailErr || deleteResult?.error || 'Failed to delete remote lecture'),
+        });
+        return;
+      }
+
       // Use the actual videoFilename from metadata for proper deletion
       const deleteResult = await electronAPI.deleteRecording(lecture.id);
       
@@ -211,7 +347,18 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
 
   // Show lecture details if navigated to that view
   if (currentView === 'lecture-details') {
-    return <LectureDetails lectureId={selectedLectureId || undefined} />;
+    return (
+      <LectureDetails
+        lectureId={selectedLecture?.id || undefined}
+        lectureOrigin={selectedLecture?.storage}
+        remoteServerUrl={selectedLecture?.remoteServerUrl}
+        onTitleUpdated={(id, newTitle) => {
+          setLectures((prev) =>
+            prev.map((l) => (l.id === id ? { ...l, title: newTitle } : l))
+          );
+        }}
+      />
+    );
   }
 
   return (
@@ -332,9 +479,60 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           </div>
 
           {/* Lecture Count */}
-          <div style={{ marginBottom: '16px', color: '#8a8a8a', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Calendar size={16} color="#0E72ED" />
-            Recent Lectures ({filteredLectures.length})
+          <div style={{
+            marginBottom: '16px',
+            color: '#8a8a8a',
+            fontSize: '14px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Calendar size={16} color="#0E72ED" />
+              Recent Lectures ({visibleLectures.length})
+            </div>
+
+            {/* Origin filter */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#8a8a8a' }}>
+              <span style={{ color: '#8a8a8a' }}>View:</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                {(['all', 'local', 'remote'] as const).map((k) => {
+                  const selected = originFilterUi === k;
+                  const label = k === 'all' ? 'All' : k === 'local' ? 'Local' : 'Remote';
+                  const Icon = k === 'all' ? List : k === 'local' ? Monitor : Server;
+                  const iconColor = selected ? '#0E72ED' : '#8a8a8a';
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setOriginFilterUi(k);
+                      }}
+                      style={{
+                        padding: '6px 10px',
+                        backgroundColor: selected ? '#1a1a1a' : 'transparent',
+                        border: `1px solid ${selected ? '#0E72ED' : '#333333'}`,
+                        borderRadius: '8px',
+                        color: selected ? '#0E72ED' : '#8a8a8a',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        lineHeight: 1,
+                        transition: 'all 0.15s',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <Icon size={14} color={iconColor} />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* Loading State */}
@@ -352,7 +550,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
               <div style={{ fontSize: '18px', fontWeight: 600, color: '#ffffff' }}>Loading Lectures...</div>
               <div style={{ fontSize: '14px' }}>Please wait while we fetch your recordings</div>
             </div>
-          ) : filteredLectures.length === 0 ? (
+          ) : visibleLectures.length === 0 ? (
             <div style={{
               flex: 1,
               display: 'flex',
@@ -372,7 +570,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {filteredLectures.map((lecture) => (
+              {visibleLectures.map((lecture) => (
                 <div
                   key={lecture.id}
                   style={{
@@ -435,7 +633,26 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
                         </span>
                       </div>
                     </div>
-                    <div style={{ color: '#8a8a8a', marginLeft: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#8a8a8a', marginLeft: '16px' }}>
+                      <div
+                        title={lecture.origin === 'remote' ? 'Remote recording' : 'Local recording'}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '4px 10px',
+                          borderRadius: '999px',
+                          border: '1px solid #333333',
+                          backgroundColor: '#1f1f1f',
+                          color: '#8a8a8a',
+                          fontSize: '12px',
+                          lineHeight: 1,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {lecture.origin === 'remote' ? <Server size={12} color="#8a8a8a" /> : <Monitor size={12} color="#8a8a8a" />}
+                        <span>{lecture.origin === 'remote' ? 'Remote' : 'Local'}</span>
+                      </div>
                       {expandedId === lecture.id ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
                     </div>
                   </div>
@@ -556,7 +773,7 @@ const HistoryHome: React.FC<HistoryHomeProps> = ({ currentView, onNavigate }) =>
           )}
 
           {/* Load More Button */}
-          {filteredLectures.length > 0 && (
+          {visibleLectures.length > 0 && (
             <button
               style={{
                 marginTop: '16px',

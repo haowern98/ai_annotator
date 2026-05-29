@@ -50,8 +50,83 @@ interface ElectronAPI {
   whisperTranscribe: (audioBuffer: ArrayBuffer, options: any) => Promise<any>;
   whisperDispose: () => Promise<void>;
 
+  // Network detection API
+  getLocalIP: () => Promise<{success: boolean; ip?: string; error?: string}>;
+  getPublicIP: () => Promise<{success: boolean; ip?: string; error?: string}>;
+
+  // Qwen control API
+  startQwenRemote: () => Promise<{success: boolean; error?: string}>;
+  startQwenLocal: () => Promise<{success: boolean; error?: string}>;
+  stopQwen: () => Promise<{success: boolean; message?: string; error?: string}>;
+  getServerMode: () => Promise<{success: boolean; isServerMode: boolean}>;
+
   // Screen Analysis
   sendAnalysisQuestion: (question: string) => Promise<any>;
+
+  // Recording API
+  initRecording: () => Promise<{success: boolean; path?: string; error?: string}>;
+  saveRecording: (videoData: ArrayBuffer | string | null, metadata: any) => Promise<any>;
+  saveRecordingExisting: (videoPath: string, metadata: any) => Promise<any>;
+  listRecordings: () => Promise<any>;
+  deleteRecording: (videoFilename: string) => Promise<any>;
+  getRecordingMetadata: (videoFilename: string) => Promise<any>;
+  getRecordingVideo: (videoFilename: string) => Promise<{success: boolean; data?: string; mimeType?: string; error?: string}>;
+  getRecordingVideoPath: (videoFilename: string) => Promise<{success: boolean; path?: string; mimeType?: string; error?: string}>;
+  pickVideoFile: () => Promise<{success: boolean; canceled?: boolean; path?: string; name?: string; size?: number; error?: string}>;
+  ingestVideoToRecordings: (sourcePath: string) => Promise<{success: boolean; videoPath?: string; filename?: string; videoFilename?: string; fileSize?: number; error?: string}>;
+
+  // File + video utils (Upload Queue / batch processing)
+  getUserDataPath: () => Promise<string>;
+  writeBinary: (filePath: string, base64: string) => Promise<boolean>;
+  readBinary: (filePath: string) => Promise<string>;
+  writeFile: (filePath: string, content: string) => Promise<boolean>;
+  readFile: (filePath: string) => Promise<string>;
+  copyFile: (srcPath: string, dstPath: string) => Promise<boolean>;
+  renameFile: (srcPath: string, dstPath: string) => Promise<boolean>;
+  deleteFile: (filePath: string) => Promise<boolean>;
+  extractAudioFromVideo: (videoPath: string) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
+  extractWavSegment: (wavPath: string, startSeconds: number, durationSeconds: number) => Promise<{success: boolean; audioPath?: string; size?: number; error?: string}>;
+  convertVideoToWebM: (videoPath: string) => Promise<{success: boolean; outputPath?: string; size?: number; error?: string}>;
+  getVideoDurationMs: (videoPath: string) => Promise<{success: boolean; durationMs?: number; error?: string}>;
+
+  // Web viewer (browser UI on port 7558)
+  startWebViewer: (portOverride?: number) => Promise<{success: boolean; port?: number; error?: string; running?: boolean}>;
+  stopWebViewer: () => Promise<{success: boolean; error?: string}>;
+  getWebViewerStatus: () => Promise<{success: boolean; running: boolean; port: number; lastError?: string | null}>;
+  getWebViewerTranscodeJobs: () => Promise<{success: boolean; jobs?: any[]; error?: string}>;
+  cancelWebViewerTranscode: (lectureId: string) => Promise<{success: boolean; error?: string}>;
+  onWebViewerTranscode: (callback: (payload: any) => void) => void;
+  removeWebViewerTranscodeListeners: () => void;
+
+  // Embedding index (local RAG; runs in main process)
+  indexLectureEmbeddings: (metadataPath: string, opts?: { includeFrames?: boolean }) => Promise<any>;
+  onEmbeddingIndexProgress: (callback: (payload: any) => void) => void;
+  removeEmbeddingIndexProgressListeners: () => void;
+  embedLectureQuery: (query: string) => Promise<{ success: boolean; emb_f32_b64?: string; error?: string }>;
+
+  // Remote full-video upload (client/server inbox)
+  getInboxStatus: () => Promise<{success: boolean; status?: any; error?: string}>;
+  onInboxActivity: (callback: (activity: any) => void) => void;
+  onInboxFileReceived: (callback: (payload: any) => void) => void;
+  sendVideoToRemoteServer: (serverUrl: string, filePath: string, displayName?: any) => Promise<{success: boolean; jobId?: string; error?: string}>;
+  getRemoteJobStatus: (serverUrl: string, jobId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  getRemoteJobResult: (serverUrl: string, jobId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  getRemoteJobTranscript: (serverUrl: string, jobId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibraryList: (serverUrl: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibraryMeta: (serverUrl: string, lectureId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibraryWords: (serverUrl: string, lectureId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibrarySetTitle: (serverUrl: string, lectureId: string, title: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteLibraryDelete: (serverUrl: string, lectureId: string) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  remoteYouTubeIngest: (serverUrl: string, url: string, jobId: string | null) => Promise<{success: boolean; data?: any; error?: string; detail?: any}>;
+  onRemoteUploadProgress: (callback: (payload: any) => void) => void;
+  onRemoteUploadComplete: (callback: (payload: any) => void) => void;
+  onRemoteUploadError: (callback: (payload: any) => void) => void;
+
+  // YouTube downloader (runs python yt_dlp in .venv)
+  downloadYouTube: (
+    url: string,
+    onProgress?: (data: any) => void
+  ) => Promise<{success: boolean; file_path?: string; file_name?: string; title?: string; duration_s?: number; size?: number; error?: string}>;
 }
 
 declare global {

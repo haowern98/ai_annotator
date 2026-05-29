@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Starting…</title>
+    <style>
+      :root {
+        --bg: #242424;
+        --panel: #1a1a1a;
+        --border: #333333;
+        --muted: #8a8a8a;
+        --text: #ffffff;
+        --accent: #0e72ed; /* match UploadProgressModal progress color */
+        --danger: #ef4444;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+
+      body {
+        background: var(--bg);
+        color: var(--text);
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .card {
+        width: 520px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--bg);
+        overflow: hidden;
+      }
+
+      .header {
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .title {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .content {
+        padding: 16px 20px 20px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .row {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 12px;
+      }
+
+      .rowTop {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+
+      .label {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        padding-left: 10px;
+      }
+
+      .percent {
+        font-size: 12px;
+        color: var(--muted);
+        min-width: 44px;
+        text-align: right;
+      }
+
+      .bar {
+        height: 6px;
+        background: #2a2a2a;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+
+      .fill {
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        transition: width 0.25s ease;
+      }
+
+      .errorText {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="header">
+        <div class="title">Starting…</div>
+        <div class="hint">Loading services</div>
+      </div>
+
+      <div class="content">
+        <div class="row">
+          <div class="rowTop">
+            <div class="label">Parakeet</div>
+            <div id="parakeetStatus" class="status">Waiting…</div>
+            <div id="parakeetPercent" class="percent">0%</div>
+          </div>
+          <div class="bar">
+            <div id="parakeetFill" class="fill"></div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="rowTop">
+            <div class="label">Qwen</div>
+            <div id="qwenStatus" class="status">Waiting…</div>
+            <div id="qwenPercent" class="percent">0%</div>
+          </div>
+          <div class="bar">
+            <div id="qwenFill" class="fill"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const clamp = (n) => Math.max(0, Math.min(100, n));
+      const setRow = (prefix, state) => {
+        const fill = document.getElementById(prefix + "Fill");
+        const percent = document.getElementById(prefix + "Percent");
+        const status = document.getElementById(prefix + "Status");
+
+        const p = clamp(state.progress ?? 0);
+        fill.style.width = `${p}%`;
+        percent.textContent = `${Math.round(p)}%`;
+
+        status.textContent = state.status ?? "Waiting…";
+        status.classList.toggle("errorText", Boolean(state.isError));
+        percent.classList.toggle("errorText", Boolean(state.isError));
+      };
+
+      window.splashAPI?.onUpdate?.((update) => {
+        if (update?.parakeet) setRow("parakeet", update.parakeet);
+        if (update?.qwen) setRow("qwen", update.qwen);
+      });
+    </script>
+  </body>
+</html>
+

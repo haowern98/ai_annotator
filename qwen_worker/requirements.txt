@@ -1,0 +1,9 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+opencv-python>=4.8.0
+yt-dlp>=2023.10.13
+pillow>=10.0.0
+numpy>=1.24.0
+huggingface_hub>=0.17.0
+scenedetect[opencv]>=0.6.2
+scikit-image>=0.21.0

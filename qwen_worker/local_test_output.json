@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "source": "lecture_segment_a29fded4-bb56-4420-a438-7c6cb6af4926.webm",
+    "duration": -9223372036854776.0,
+    "process_time": 4.91,
+    "global_summary": "",
+    "scene_count": 1,
+    "models": {
+      "vlm": "C:\\Users\\Wu Family Computer\\Downloads\\Qwen3VL-8B-Instruct-Q4_L_M\\Qwen3VL-8B-Instruct-Q4_K_M.gguf"
+    },
+    "skipped": {
+      "audio": true,
+      "visual": false
+    },
+    "params": {
+      "keyframes_per_scene": 1,
+      "enable_audio_features": true,
+      "generate_summary": false,
+      "vlm_max_tokens_scene": 1220,
+      "vlm_max_tokens_summary": 580,
+      "ram_mode": "ram-"
+    },
+    "timings": {
+      "total_process_time": 4.909,
+      "total_request_time": 5.0,
+      "vlm": {
+        "model": "C:\\Users\\Wu Family Computer\\Downloads\\Qwen3VL-8B-Instruct-Q4_L_M\\Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+        "load_time": 0.0,
+        "inference_time": 0.0
+      },
+      "ram_mode": "ram-"
+    }
+  },
+  "segments": [
+    {
+      "scene_id": 1,
+      "start": 0.0,
+      "end": 0.95,
+      "scene_title": "",
+      "scene_summary": "",
+      "audio_transcript": "",
+      "audio_features": {},
+      "visual_description": "",
+      "visual_tags": {},
+      "emotion": {},
+      "artifacts": {}
+    }
+  ],
+  "txt_filename": null
+}

@@ -80,7 +80,7 @@ declare global {
       updateOverlayTranscript: (transcript: any) => Promise<any>;
       updateOverlayReply: (reply: any) => Promise<any>;
       overlayControl: (command: string) => Promise<any>;
-      overlayExists: () => Promise<boolean>;
+      overlayExists: () => Promise<{ exists: boolean }>;
       onTranscriptUpdate: (callback: (...args: any[]) => void) => void;
       onReplyUpdate: (callback: (...args: any[]) => void) => void;
       onOverlayControl: (callback: (...args: any[]) => void) => void;
@@ -101,6 +101,32 @@ declare global {
       whisperInitialize: (modelName: string) => Promise<{ success: boolean; error?: string }>;
       whisperTranscribe: (audioBuffer: number[] | Uint8Array | ArrayBuffer, options?: any) => Promise<{ success: boolean; text?: string; error?: string; elapsed?: number }>;
       whisperDispose: () => Promise<{ success: boolean }>;
+
+      // Recording API (History / lecture saves)
+      initRecording: () => Promise<any>;
+      saveRecording: (videoData: any, metadata: any) => Promise<any>;
+      listRecordings: () => Promise<any>;
+      deleteRecording: (videoFilename: string) => Promise<any>;
+      getRecordingMetadata: (videoFilename: string) => Promise<any>;
+      getRecordingVideo: (videoFilename: string) => Promise<any>;
+      getRecordingVideoPath: (videoFilename: string) => Promise<any>;
+
+      // File + video utils (Upload Queue / batch processing)
+      getUserDataPath: () => Promise<string>;
+      writeBinary: (filePath: string, base64: string) => Promise<boolean>;
+      readBinary: (filePath: string) => Promise<string>;
+      writeFile: (filePath: string, content: string) => Promise<boolean>;
+      readFile: (filePath: string) => Promise<string>;
+      deleteFile: (filePath: string) => Promise<boolean>;
+      extractAudioFromVideo: (videoPath: string) => Promise<{ success: boolean; audioPath?: string; size?: number; error?: string }>;
+      extractWavSegment: (wavPath: string, startSeconds: number, durationSeconds: number) => Promise<{ success: boolean; audioPath?: string; size?: number; error?: string }>;
+      convertVideoToWebM: (videoPath: string) => Promise<{ success: boolean; outputPath?: string; size?: number; error?: string }>;
+
+      // YouTube downloader (Python yt_dlp in .venv)
+      downloadYouTube: (
+        url: string,
+        onProgress?: (data: any) => void
+      ) => Promise<{ success: boolean; file_path?: string; file_name?: string; title?: string; duration_s?: number; size?: number; error?: string }>;
     };
   }
 }

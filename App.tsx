@@ -10,6 +10,9 @@ import InterviewHome from './components/InterviewHome';
 import LectureHome from './components/LectureHome';
 import HistoryHome from './components/HistoryHome';
 import { ScreenSourcePicker } from './components/ScreenSourcePicker';
+import { UploadQueueManager, QueuedVideo } from './services/uploadQueueManager';
+import ParakeetBatchTranscriber from './services/parakeetBatchTranscriber';
+import { QwenHttpClient } from './services/qwenHttpClient';
 import config from './config.json';
 
 const VIDEO_MODE_CONFIG = {
@@ -27,6 +30,12 @@ export default function App() {
   const [geminiService, setGeminiService] = useState<GeminiService | null>(null);
   const [selectedMode, setSelectedMode] = useState<string>('Lecture Mode');
   const [sidebarMode, setSidebarMode] = useState<'lecture' | 'interview' | 'history'>('lecture');
+
+  // Upload queue state (app-level to persist across navigation)
+  const uploadQueueRef = useRef<UploadQueueManager | null>(null);
+  const [uploadQueue, setUploadQueue] = useState<QueuedVideo[]>([]);
+  const uploadParakeetRef = useRef<ParakeetBatchTranscriber | null>(null);
+  const uploadQwenRef = useRef<QwenHttpClient | null>(null);
 
   // Navigation state for browser-like back/forward
   const [navigation, setNavigation] = useState<NavigationState>({
@@ -92,6 +101,215 @@ export default function App() {
       message,
     }]);
   }, []);
+
+  // Initialize upload queue on mount
+  useEffect(() => {
+    // Clear server mode on app startup (doesn't persist across restarts)
+    try {
+      const remoteConfig = localStorage.getItem('qwen_remote_config');
+      if (remoteConfig) {
+        const config = JSON.parse(remoteConfig);
+        if (config.mode === 'server') {
+          console.log('[App] Clearing server mode from previous session');
+          localStorage.setItem('qwen_remote_config', JSON.stringify({ mode: 'local' }));
+        }
+      }
+    } catch (e) {
+      console.error('[App] Failed to clear server mode:', e);
+    }
+
+    const api = window.electronAPI as any;
+
+    // Web Viewer is tied strictly to Server Mode. On app startup, enforce it OFF.
+    if (api?.stopWebViewer) {
+      try {
+        void api.stopWebViewer();
+      } catch {
+        // ignore
+      }
+    }
+
+    const uploadParakeet = new ParakeetBatchTranscriber(addLog);
+    uploadParakeetRef.current = uploadParakeet;
+
+    let disposed = false;
+    let qwenConnectNonce = 0;
+
+    const readRemoteConfig = (): { qwenUrl: string; isRemoteQwen: boolean } => {
+      let qwenUrl = 'http://127.0.0.1:7556';
+      let isRemoteQwen = false;
+      try {
+        const remoteConfig = localStorage.getItem('qwen_remote_config');
+        if (remoteConfig) {
+          const config = JSON.parse(remoteConfig);
+          if (config?.mode === 'client' && config.remoteUrl) {
+            qwenUrl = String(config.remoteUrl);
+            isRemoteQwen = true;
+            console.log(`[Upload Queue] Using remote Qwen server: ${qwenUrl}`);
+          }
+        }
+      } catch (e) {
+        console.warn('[Upload Queue] Failed to load remote config, using local server');
+      }
+      return { qwenUrl, isRemoteQwen };
+    };
+
+    const computeAutoIndexOnComplete = (qwenUrl: string, isRemoteQwen: boolean): boolean => {
+      // Auto-indexing (embeddings) is local-mode only for v1 (batch uploads only).
+      return !isRemoteQwen && /^(http:\/\/)?(127\.0\.0\.1|localhost)(:\d+)?/i.test(qwenUrl);
+    };
+
+    const ensureParakeetConnected = async () => {
+      await uploadParakeet.connect({
+        onReady: () => console.log('[Upload Queue] Parakeet worker ready'),
+        onError: (err) => console.error(`[Upload Queue] Parakeet error: ${err}`),
+      });
+    };
+
+    const reconnectQwenForConfig = async () => {
+      const myNonce = ++qwenConnectNonce;
+      const { qwenUrl, isRemoteQwen } = readRemoteConfig();
+
+      // Swap clients safely: keep the previous client alive until the new one is confirmed connected.
+      const prevQwen = uploadQwenRef.current;
+      const uploadQwen = new QwenHttpClient(qwenUrl);
+
+      try {
+        await uploadQwen.connect({
+          onReady: () => console.log('[Upload Queue] Qwen worker ready'),
+          onError: (err) => console.error(`[Upload Queue] Qwen error: ${err}`),
+          onProgress: (msg) => console.log(`[Upload Queue] ${msg}`),
+        });
+      } catch (error) {
+        console.error('[Upload Queue] Failed to (re)connect Qwen:', error);
+        return;
+      }
+
+      if (disposed) {
+        try {
+          uploadQwen.disconnect?.();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      if (myNonce !== qwenConnectNonce) {
+        try {
+          uploadQwen.disconnect?.();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      const autoIndexOnComplete = computeAutoIndexOnComplete(qwenUrl, isRemoteQwen);
+
+      if (!uploadQueueRef.current) {
+        uploadQueueRef.current = new UploadQueueManager(uploadParakeet, uploadQwen, () => false, {
+          onQueueUpdate: (queue) => setUploadQueue(queue),
+          onVideoComplete: (video) => console.log(`Upload complete: ${video.fileName}`),
+          onVideoError: (video, err) => console.error(`Upload failed: ${video.fileName} - ${err}`),
+        }, { autoIndexOnComplete });
+        console.log('[Upload Queue] Upload queue manager initialized');
+      } else {
+        uploadQueueRef.current.setQwenClient(uploadQwen);
+        uploadQueueRef.current.setAutoIndexOnComplete(autoIndexOnComplete);
+      }
+
+      uploadQwenRef.current = uploadQwen;
+      try {
+        prevQwen?.disconnect?.();
+      } catch {
+        // ignore
+      }
+    };
+
+    const initUploadClients = async () => {
+      try {
+        await ensureParakeetConnected();
+        await reconnectQwenForConfig();
+      } catch (error) {
+        console.error('[Upload Queue] Failed to initialize:', error);
+      }
+    };
+
+    initUploadClients();
+
+    const onQwenConfigChanged = () => {
+      // Qwen process can restart when switching server/client/local modes.
+      // Reconnect so Upload Queue continues without requiring an app restart.
+      void reconnectQwenForConfig();
+    };
+    window.addEventListener('qwen-config-changed', onQwenConfigChanged);
+
+    // In server mode, accept full-video uploads via the Electron main-process inbox.
+    // When a file arrives, enqueue it for local processing (same pipeline as local path/YouTube uploads).
+    const handleInboxFile = async (payload: any) => {
+      try {
+        if (payload?.isManifest) return;
+        const videoPath = String(payload?.videoPath || '').trim();
+        if (!videoPath) return;
+        const fileName = String(payload?.storedFileName || payload?.fileName || 'remote_upload');
+        const fileSize = Number(payload?.fileSize || 0);
+        const jobId = String(payload?.jobId || '').trim();
+        const deleteSourceAfterComplete = payload?.recordingEnabled === false;
+
+        // Remote overlay chunks (MediaRecorder WebM) often lack duration metadata for HTML5 seeking.
+        // Remux in-place before enqueueing so the existing frame extraction pipeline can seek reliably.
+        if (
+          typeof fileName === 'string' &&
+          fileName.includes('_overlay_remote_chunk_') &&
+          fileName.toLowerCase().endsWith('.webm') &&
+          api?.remuxVideoInPlace
+        ) {
+          try {
+            console.log('[Upload Queue] Remuxing overlay chunk for seeking:', fileName);
+            await api.remuxVideoInPlace(videoPath);
+          } catch (e) {
+            console.warn('[Upload Queue] Remux overlay chunk failed (continuing):', e);
+          }
+        }
+        if (jobId && (window.electronAPI as any)?.updateInboxJob) {
+          (window.electronAPI as any).updateInboxJob(jobId, {
+            state: 'processing',
+            phase: 'Queued for processing',
+            progressPercent: 0,
+          });
+        }
+        if (jobId && uploadQueueRef.current?.addVideoPathRemoteJob) {
+          uploadQueueRef.current.addVideoPathRemoteJob(videoPath, fileName, fileSize, jobId, {
+            deleteSourceAfterComplete,
+          });
+        } else {
+          uploadQueueRef.current?.addVideoPath(videoPath, fileName, fileSize);
+        }
+      } catch (e) {
+        console.warn('[Upload Queue] Failed to enqueue inbox file:', e);
+      }
+    };
+
+    if (api?.onInboxFileReceived) {
+      api.onInboxFileReceived(handleInboxFile);
+    }
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('qwen-config-changed', onQwenConfigChanged);
+      try {
+        (window.electronAPI as any)?.removeInboxListeners?.();
+      } catch {
+        // ignore
+      }
+      try {
+        uploadQwenRef.current?.disconnect?.();
+      } catch {
+        // ignore
+      }
+      if (uploadQueueRef.current) {
+        uploadQueueRef.current = null;
+      }
+    };
+  }, [addLog]);
 
   useEffect(() => {
     statusRef.current = status;
@@ -403,6 +621,9 @@ export default function App() {
         {sidebarMode === 'lecture' ? (
           <LectureHome 
             onSidebarModeChange={handleSidebarModeChange}
+            uploadQueueRef={uploadQueueRef}
+            uploadQueue={uploadQueue}
+            uploadParakeetRef={uploadParakeetRef}
           />
         ) : sidebarMode === 'history' ? (
           <HistoryHome 

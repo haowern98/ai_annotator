@@ -1,0 +1,4 @@
+websockets==13.1
+torch>=2.2.0
+nemo_toolkit[asr]>=2.0.0
+

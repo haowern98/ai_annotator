@@ -4,6 +4,11 @@ const { applyToolWindowStyle, setDisplayAffinity, isWindows } = require('./windo
 
 let lectureOverlayWindow = null;
 
+// Toggle: set to true to allow remote desktop tools (e.g. RustDesk) to capture
+// the lecture overlay window. Set to false to hide the overlay from most OS-level
+// screen capture mechanisms (restores previous behavior).
+const ALLOW_REMOTE_CAPTURE = true;
+
 /**
  * Create lecture overlay window that floats on top
  * Positioned at center-top of the screen (separate from Interview overlay)
@@ -80,10 +85,12 @@ function createLectureOverlayWindow() {
   }
 
   // Prevent screen capture from including the overlay
-  try {
-    lectureOverlayWindow.setContentProtection(true);
-  } catch (e) {
-    console.warn('[LectureOverlay] Failed to enable content protection:', e);
+  if (!ALLOW_REMOTE_CAPTURE) {
+    try {
+      lectureOverlayWindow.setContentProtection(true);
+    } catch (e) {
+      console.warn('[LectureOverlay] Failed to enable content protection:', e);
+    }
   }
 
   // Apply native Windows styles
@@ -95,9 +102,11 @@ function createLectureOverlayWindow() {
           console.log('[LectureOverlay] ✅ Applied WS_EX_TOOLWINDOW');
         }
 
-        const affinitySuccess = setDisplayAffinity(lectureOverlayWindow, 0x11);
-        if (affinitySuccess) {
-          console.log('[LectureOverlay] ✅ Applied WDA_EXCLUDEFROMCAPTURE');
+        if (!ALLOW_REMOTE_CAPTURE) {
+          const affinitySuccess = setDisplayAffinity(lectureOverlayWindow, 0x11);
+          if (affinitySuccess) {
+            console.log('[LectureOverlay] ✅ Applied WDA_EXCLUDEFROMCAPTURE');
+          }
         }
       } catch (err) {
         console.warn('[LectureOverlay] Failed to apply native window styles:', err);
